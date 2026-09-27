@@ -26,7 +26,13 @@ const SIDE_BY_SIDE_MIN = 960;
  * where natural — German capitalizes nouns, so it keeps the original casing.
  */
 function toastStatusLabel(label: string, locale: string): string {
-  return locale.toLowerCase().startsWith("de") ? label : label.toLocaleLowerCase(locale);
+  if (locale.toLowerCase().startsWith("de")) return label;
+  try {
+    return label.toLocaleLowerCase(locale);
+  } catch {
+    // Invalid BCP-47 tag from a custom locale ("fr_FR") — lowercase without one.
+    return label.toLowerCase();
+  }
 }
 
 /**

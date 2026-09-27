@@ -183,6 +183,25 @@ describe("SitepingInbox — keyboard", () => {
     await waitFor(() => expect(listRows()).toHaveLength(3)); // o1 reinstated
   });
 
+  it("e still toasts under a non-BCP-47 locale tag (fr_FR)", async () => {
+    renderInbox({ locale: "fr_FR" });
+    const listbox = await ready();
+    fireEvent.keyDown(listbox, { key: "j" });
+    fireEvent.keyDown(listbox, { key: "e" });
+    // "fr_FR" isn't a BCP-47 tag, so the strings fall back to English.
+    expect(await screen.findByText("Marked as resolved")).toBeTruthy();
+  });
+
+  it("opening a feedback with diagnostics under a non-BCP-47 locale tag keeps the inbox mounted", async () => {
+    renderInbox({ locale: "fr_FR" });
+    const listbox = await ready();
+    fireEvent.keyDown(listbox, { key: "j" });
+    fireEvent.keyDown(listbox, { key: "j" }); // o2 carries diagnostics
+    fireEvent.keyDown(listbox, { key: "Enter" });
+    const dialog = await screen.findByRole("dialog", { name: /Feedback details/ });
+    expect(dialog.querySelectorAll("time.spd-diag-time").length).toBeGreaterThan(0);
+  });
+
   it("p marks the focused row in progress and it leaves the open tab", async () => {
     renderInbox();
     const listbox = await ready();
