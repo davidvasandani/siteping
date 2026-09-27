@@ -1,5 +1,4 @@
 import {
-  applyFeedbackFilters,
   FEEDBACK_STATUSES,
   type FeedbackQuery,
   type FeedbackRecord,
@@ -450,13 +449,19 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
 
   /**
    * Whether a record matches the current project / type / search — the query
-   * the tab counts describe. Runs the stores' own filter so search semantics
-   * (case-insensitive substring of the message) can't drift.
+   * the tab counts describe. Same semantics as the stores' filter (core
+   * `applyFeedbackFilters`): exact project and type, case-insensitive
+   * substring of the message. Inlined — the shared helper's sort/pagination
+   * would cost the bundle budget for a one-record check.
    */
-  const matchesBase = useCallback(
-    (record: FeedbackRecord): boolean => applyFeedbackFilters([record], queryBaseRef.current).total === 1,
-    [],
-  );
+  const matchesBase = useCallback((record: FeedbackRecord): boolean => {
+    const { projectName, type, search } = queryBaseRef.current;
+    return (
+      record.projectName === projectName &&
+      (type === undefined || record.type === type) &&
+      (search === undefined || record.message.toLowerCase().includes(search.toLowerCase()))
+    );
+  }, []);
 
   /** Whether a record belongs in the currently loaded list (base query + status tab). */
   const belongsInList = useCallback(
