@@ -618,6 +618,14 @@ describe("Popup", () => {
       // Should flip: left = right - 300 = 950 - 300 = 650
       expect(Number.parseInt(dialog.style.left, 10)).toBeLessThan(900);
     });
+
+    it("stays inside the viewport when the rect extends past the right edge", () => {
+      // Keyboard path: a focused element wider than the viewport (innerWidth 1024)
+      popup.show(makeBounds({ left: 900, right: 1400, bottom: 100, top: 50 }));
+
+      const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+      expect(Number.parseInt(dialog.style.left, 10) + 300).toBeLessThanOrEqual(1024 - 8);
+    });
   });
 
   // -------------------------------------------------------------------------

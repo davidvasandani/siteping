@@ -364,7 +364,9 @@ export class Popup {
       if (left + popupW > window.innerWidth) {
         left = rectBounds.right - popupW;
       }
-      left = Math.max(8, left);
+      // The flip alone overflows when the rect itself extends past the right
+      // edge (keyboard path: a focused element wider than the viewport).
+      left = Math.max(8, Math.min(left, window.innerWidth - popupW - 8));
       top = Math.max(8, top);
 
       this.root.style.top = `${top}px`;
