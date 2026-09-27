@@ -1,4 +1,5 @@
 import {
+  applyFeedbackFilters,
   FEEDBACK_STATUSES,
   type FeedbackQuery,
   type FeedbackRecord,
@@ -378,11 +379,24 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
     setPendingUndo(next);
   }, []);
 
-  /** Whether a record belongs in the currently loaded list. */
-  const belongsInList = useCallback((record: FeedbackRecord): boolean => {
-    const filter = statusRef.current;
-    return filter === "all" || filter === record.status;
-  }, []);
+  /**
+   * Whether a record matches the current project / type / search — the query
+   * the tab counts describe. Runs the stores' own filter so search semantics
+   * (case-insensitive substring of the message) can't drift.
+   */
+  const matchesBase = useCallback(
+    (record: FeedbackRecord): boolean => applyFeedbackFilters([record], queryBaseRef.current).total === 1,
+    [],
+  );
+
+  /** Whether a record belongs in the currently loaded list (base query + status tab). */
+  const belongsInList = useCallback(
+    (record: FeedbackRecord): boolean => {
+      const filter = statusRef.current;
+      return (filter === "all" || filter === record.status) && matchesBase(record);
+    },
+    [matchesBase],
+  );
 
   /**
    * Put one feedback where the current list wants it: replace its row, insert
@@ -501,10 +515,14 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
         resolvedAt: isClosedStatus(nextStatus) ? now : null,
         updatedAt: now,
       };
-      const deltas: CountDeltas = [
-        [previous, -1],
-        [nextStatus, +1],
-      ];
+      // A record outside the current type/search (reached via the drawer or
+      // undo) is not part of the counts either.
+      const deltas: CountDeltas = matchesBase(record)
+        ? [
+            [previous, -1],
+            [nextStatus, +1],
+          ]
+        : [];
 
       const wasFocused = focusedIdRef.current === id;
       const { removedAt } = placeRecord(id, optimistic);
@@ -548,6 +566,7 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
       }
     },
     [
+      matchesBase,
       placeRecord,
       moveFocusAfterRemoval,
       beginMutation,
@@ -579,10 +598,12 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
 
       const epoch = projectEpochRef.current;
       const undoBefore = { pending: pendingUndoRef.current, record: undoRecordRef.current };
-      const deltas: CountDeltas = [
-        [record.status, -1],
-        ["all", -1],
-      ];
+      const deltas: CountDeltas = matchesBase(record)
+        ? [
+            [record.status, -1],
+            ["all", -1],
+          ]
+        : [];
 
       const wasFocused = focusedIdRef.current === id;
       const wasOpened = openedIdRef.current === id;
@@ -628,7 +649,16 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
         throw err;
       }
     },
-    [placeRecord, moveFocusAfterRemoval, beginMutation, settleMutation, rollback, commitCounts, commitPendingUndo],
+    [
+      matchesBase,
+      placeRecord,
+      moveFocusAfterRemoval,
+      beginMutation,
+      settleMutation,
+      rollback,
+      commitCounts,
+      commitPendingUndo,
+    ],
   );
 
   // -------------------------------------------------------------------------
