@@ -2,6 +2,7 @@ import {
   type AnnotationPayload,
   type DiagnosticsSnapshot,
   type FeedbackPayload,
+  IDENTITY_FIELD_MAX_LENGTH,
   isValidEmail,
   type PageScope,
   type SitepingConfig,
@@ -852,6 +853,7 @@ function promptIdentity(shadowRoot: ShadowRoot, t: TFunction): Promise<Identity 
     nameInput.className = "sp-input";
     nameInput.id = nameInputId;
     nameInput.type = "text";
+    nameInput.maxLength = IDENTITY_FIELD_MAX_LENGTH;
     nameInput.placeholder = t("identity.namePlaceholder");
     nameInput.style.marginBottom = "14px";
 
@@ -863,6 +865,7 @@ function promptIdentity(shadowRoot: ShadowRoot, t: TFunction): Promise<Identity 
     emailInput.className = "sp-input";
     emailInput.id = emailInputId;
     emailInput.type = "email";
+    emailInput.maxLength = IDENTITY_FIELD_MAX_LENGTH;
     emailInput.placeholder = t("identity.emailPlaceholder");
 
     const btnRow = document.createElement("div");
@@ -891,10 +894,15 @@ function promptIdentity(shadowRoot: ShadowRoot, t: TFunction): Promise<Identity 
       const name = nameInput.value.trim();
       const email = emailInput.value.trim();
       if (!name || !email) return;
-      // Same pattern the server schema enforces — what the modal accepts here
-      // is persisted and replayed on every submission, so it must never be
-      // something the server rejects.
-      if (!isValidEmail(email)) {
+      // Same pattern and length cap the server schema enforces — what the
+      // modal accepts here is persisted and replayed on every submission, so
+      // it must never be something the server rejects. `maxlength` covers
+      // typing; this covers values set around it.
+      if (name.length > IDENTITY_FIELD_MAX_LENGTH) {
+        nameInput.style.borderColor = "var(--sp-type-bug, #ef4444)";
+        return;
+      }
+      if (email.length > IDENTITY_FIELD_MAX_LENGTH || !isValidEmail(email)) {
         emailInput.style.borderColor = "var(--sp-type-bug, #ef4444)";
         return;
       }

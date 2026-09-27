@@ -759,6 +759,41 @@ describe("launcher — annotation:complete integration", () => {
       instance.destroy();
     });
 
+    it("caps both inputs at the server's 200-char limit", async () => {
+      mockGetIdentity.mockReturnValue(null);
+      const instance = launch(defaultConfig());
+      capturedBus!.emit("annotation:complete", makeAnnotationCompleteData());
+
+      const { nameInput, emailInput } = await getIdentityModal();
+      expect(nameInput.maxLength).toBe(200);
+      expect(emailInput.maxLength).toBe(200);
+
+      instance.destroy();
+    });
+
+    it.each([
+      ["name", "N".repeat(201), "alice@example.com"],
+      ["email", "Alice", `${"a".repeat(64)}@${"b".repeat(60)}.${"c".repeat(60)}.${"d".repeat(60)}.com`],
+    ])("rejects a %s longer than the server accepts instead of persisting it", async (_field, name, email) => {
+      // A persisted 201-char value is replayed on every submission — each one
+      // a 400 from adapter-prisma (authorName / authorEmail max 200).
+      mockGetIdentity.mockReturnValue(null);
+      const instance = launch(defaultConfig());
+      capturedBus!.emit("annotation:complete", makeAnnotationCompleteData());
+
+      const { nameInput, emailInput, submitBtn, modal } = await getIdentityModal();
+      nameInput.value = name;
+      emailInput.value = email;
+      submitBtn.click();
+
+      await new Promise((r) => setTimeout(r, 350));
+      expect(mockSaveIdentity).not.toHaveBeenCalled();
+      expect(mockSendFeedback).not.toHaveBeenCalled();
+      expect(modal.isConnected).toBe(true);
+
+      instance.destroy();
+    });
+
     it("Cancel button click closes modal and aborts feedback submission", async () => {
       mockGetIdentity.mockReturnValue(null);
       const instance = launch(defaultConfig());
