@@ -30,6 +30,22 @@ export function feedbackQueryToSearchParams(query: FeedbackQuery): URLSearchPara
 }
 
 /**
+ * Append `params` to `endpoint`, which may already carry a query string
+ * (`/api/siteping?tenant=acme`) or a fragment — naive `${endpoint}?${params}`
+ * produced `?tenant=acme?projectName=…`, a 400. Plain string work, so
+ * relative endpoints stay relative and nothing depends on `location`.
+ */
+export function withSearchParams(endpoint: string, params: URLSearchParams): string {
+  const hashAt = endpoint.indexOf("#");
+  const base = hashAt === -1 ? endpoint : endpoint.slice(0, hashAt);
+  const hash = hashAt === -1 ? "" : endpoint.slice(hashAt);
+  const query = params.toString();
+  if (!query) return endpoint;
+  const separator = !base.includes("?") ? "?" : base.endsWith("?") || base.endsWith("&") ? "" : "&";
+  return `${base}${separator}${query}${hash}`;
+}
+
+/**
  * Map a non-OK `Response` to the appropriate typed error:
  *   - 401 / 403 → `SitepingAuthError`
  *   - other 4xx → `SitepingValidationError`
