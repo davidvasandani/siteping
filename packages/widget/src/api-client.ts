@@ -47,8 +47,8 @@ export interface ApiClientAuth {
 /**
  * Build the headers for one request — mirrors the dashboard's
  * `createEndpointSource` semantics: `Content-Type` when the request carries a
- * JSON body, then `Bearer` from `apiKey`, then `headers` merged on top so an
- * explicit `Authorization` wins.
+ * JSON body, then `Bearer` from `apiKey`, then `headers` merged on top
+ * (case-insensitively) so an explicit `Authorization` wins.
  *
  * A function `headers` resolves once per call — retries inside
  * `resilientFetch` reuse the values for the whole retry sequence — up to
@@ -61,7 +61,16 @@ export async function buildRequestHeaders(auth: ApiClientAuth, json: boolean): P
   if (json) merged["Content-Type"] = "application/json";
   if (auth.apiKey) merged.Authorization = `Bearer ${auth.apiKey}`;
   const extra = typeof auth.headers === "function" ? await auth.headers() : auth.headers;
-  if (extra) Object.assign(merged, extra);
+  for (const [name, value] of Object.entries(extra ?? {})) {
+    // Header names are case-insensitive: drop a default spelled differently
+    // so the explicit value replaces it — a plain merge sent both, and fetch
+    // combined them ("Bearer k, Basic xyz").
+    const lower = name.toLowerCase();
+    for (const key of Object.keys(merged)) {
+      if (key.toLowerCase() === lower) delete merged[key];
+    }
+    merged[name] = value;
+  }
   return merged;
 }
 
