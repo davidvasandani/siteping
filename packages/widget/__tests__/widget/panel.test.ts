@@ -386,6 +386,22 @@ describe("Panel", () => {
       });
     });
 
+    it("page markers (and the FAB badge they drive) ignore the panel's status tab", async () => {
+      const open = makeFeedback({ id: "fb-open", status: "open", url: "/" });
+      const done = makeFeedback({ id: "fb-done", status: "resolved", url: "/" });
+      apiClient.getFeedbacks.mockImplementation(async (_project: string, opts?: { statuses?: unknown }) =>
+        opts?.statuses ? { feedbacks: [done], total: 1 } : { feedbacks: [open, done], total: 2 },
+      );
+      await panel.open();
+
+      shadow.querySelector<HTMLButtonElement>('[data-status-filter="resolved"]')!.click();
+      await vi.waitFor(() => expect(shadow.querySelector('[data-feedback-id="fb-open"]')).toBeNull());
+
+      // The open marker must survive — otherwise the badge drops to 0 and
+      // stays there after the panel closes.
+      await vi.waitFor(() => expect(markers.render.mock.calls.at(-1)?.[0]).toEqual([open, done]));
+    });
+
     it("keeps a wont_fix feedback visible under the Resolved tab", async () => {
       apiClient.getFeedbacks.mockResolvedValue({
         feedbacks: [makeFeedback({ id: "fb-wf", status: "wont_fix" })],
@@ -3766,9 +3782,10 @@ describe("Panel", () => {
       await vi.waitFor(() => {
         expect(apiClient.getFeedbacks).toHaveBeenCalled();
       });
-      const lastCall = apiClient.getFeedbacks.mock.calls[apiClient.getFeedbacks.mock.calls.length - 1];
-      expect(lastCall?.[1]).not.toHaveProperty("url");
-      expect(lastCall?.[1]).not.toHaveProperty("urlPattern");
+      // First call = the list query (the page-marker query may follow it)
+      const listCall = apiClient.getFeedbacks.mock.calls[0];
+      expect(listCall?.[1]).not.toHaveProperty("url");
+      expect(listCall?.[1]).not.toHaveProperty("urlPattern");
     });
 
     it("respects custom getScope option for url and urlPattern", async () => {
@@ -3804,8 +3821,9 @@ describe("Panel", () => {
       await vi.waitFor(() => {
         expect(apiClient.getFeedbacks).toHaveBeenCalled();
       });
-      const lastCall = apiClient.getFeedbacks.mock.calls[apiClient.getFeedbacks.mock.calls.length - 1];
-      expect(lastCall?.[1]).toMatchObject({ urlPattern: "/orders/:id" });
+      // First call = the list query (the page-marker query may follow it)
+      const listCall = apiClient.getFeedbacks.mock.calls[0];
+      expect(listCall?.[1]).toMatchObject({ urlPattern: "/orders/:id" });
     });
 
     it("filters markers to current url even when panel shows wider scope", async () => {

@@ -555,11 +555,7 @@ export class Panel {
       const pendingScrollId = this.pendingScrollId;
       this.pendingScrollId = null;
       if (pendingScrollId) this.flashCard(pendingScrollId);
-      // Markers always render only the current-URL slice — even when the panel
-      // shows a wider scope ("template" or "all"), markers stay strictly local
-      // so the user never sees out-of-context dots on the page.
-      const markerFeedbacks = this.scopeAnnotationsByUrl ? feedbacks.filter((f) => f.url === scope.url) : feedbacks;
-      this.markers.render(markerFeedbacks);
+      await this.renderMarkers(scope, options, feedbacks, signal);
     } catch (error) {
       if (signal.aborted) return; // Expected abort, not a real error
       if (!hasContent) this.showError();
@@ -608,16 +604,50 @@ export class Panel {
       this.feedbacks = [...this.feedbacks, ...feedbacks];
       this.stats.update(this.feedbacks, total);
       this.renderList();
-      const markerFeedbacks = this.scopeAnnotationsByUrl
-        ? this.feedbacks.filter((f) => f.url === scope.url)
-        : this.feedbacks;
-      this.markers.render(markerFeedbacks);
+      // Extra pages only add markers when the panel shows the marker query.
+      if (this.isMarkerQuery(scope, options)) await this.renderMarkers(scope, options, this.feedbacks);
     } catch (error) {
       if (restoreBtn) restoreBtn();
       this.bus.emit("feedback:error", error instanceof Error ? error : new Error(String(error)));
     } finally {
       this.isLoadingMore = false;
     }
+  }
+
+  /**
+   * Page markers — and the FAB badge, derived from their open count — show the
+   * page's feedbacks, never the panel's status/type/search filters or a wider
+   * scope: a "Resolved" tab must not wipe the open markers and zero the badge
+   * (which then persists after the panel closes). Markers also stay strictly
+   * local to the current URL so out-of-context dots never appear. The panel's
+   * result is reused when its query is the marker query (the one the launcher
+   * loads); otherwise that query is fetched.
+   */
+  private async renderMarkers(
+    scope: PageScope,
+    options: GetFeedbacksOptions,
+    loaded: FeedbackResponse[],
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const url = this.scopeAnnotationsByUrl ? scope.url : undefined;
+    let feedbacks = loaded;
+    if (!this.isMarkerQuery(scope, options)) {
+      const query = url ? { limit: PAGE_SIZE, url } : { limit: PAGE_SIZE };
+      try {
+        ({ feedbacks } = await this.client.getFeedbacks(this.projectName, query));
+      } catch {
+        return; // Non-critical — keep the current markers
+      }
+      if (signal?.aborted) return; // A newer load owns the markers
+    }
+    // Defensive client-side URL filter — the backend may ignore `url`.
+    this.markers.render(url ? feedbacks.filter((f) => f.url === url) : feedbacks);
+  }
+
+  /** Whether a panel query is exactly the page-marker query (no filter, marker URL scope). */
+  private isMarkerQuery(scope: PageScope, options: GetFeedbacksOptions): boolean {
+    const url = this.scopeAnnotationsByUrl ? scope.url : undefined;
+    return !options.type && !options.statuses && !options.search && !options.urlPattern && options.url === url;
   }
 
   private renderList(): void {
