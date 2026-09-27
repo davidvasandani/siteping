@@ -2215,6 +2215,25 @@ describe("Panel", () => {
       vi.restoreAllMocks();
     });
 
+    it("clicking the trigger again closes the menu once the outside-click handler is armed", async () => {
+      vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb: FrameRequestCallback) => {
+        cb(0);
+        return 0;
+      });
+      await panel.open();
+
+      const typeBtn = shadow.querySelector<HTMLButtonElement>(".sp-filter-dropdown-btn")!;
+      typeBtn.click();
+      expect(shadow.querySelector(".sp-filter-dropdown-menu")).not.toBeNull();
+
+      // At document level the click target is retargeted to the shadow host.
+      typeBtn.click();
+      expect(shadow.querySelector(".sp-filter-dropdown-menu")).toBeNull();
+      expect(typeBtn.getAttribute("aria-expanded")).toBe("false");
+
+      vi.restoreAllMocks();
+    });
+
     it("clicking the trigger again while menu is open closes it", async () => {
       await panel.open();
 

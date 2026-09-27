@@ -1103,7 +1103,9 @@ export class Panel {
 
     requestAnimationFrame(() => {
       this.typeDropdownOutsideHandler = (e: MouseEvent) => {
-        if (this.typeDropdownMenu && !this.typeDropdownContainer.contains(e.target as Node)) {
+        // composedPath, not e.target: at document level the target is
+        // retargeted to the shadow host, so every click looked "outside".
+        if (this.typeDropdownMenu && !e.composedPath().includes(this.typeDropdownContainer)) {
           this.closeTypeDropdown();
         }
       };

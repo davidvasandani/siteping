@@ -268,7 +268,8 @@ export class ExportButton {
 
     // Close on outside click
     this.onDocumentClick = (e: MouseEvent) => {
-      if (this.isOpen && !this.element.contains(e.target as Node)) {
+      // composedPath, not e.target (retargeted to the shadow host).
+      if (this.isOpen && !e.composedPath().includes(this.element)) {
         this.close();
       }
     };

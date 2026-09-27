@@ -318,7 +318,8 @@ export class PanelSortControls {
     // Close on outside click (next tick to avoid the current click)
     requestAnimationFrame(() => {
       this.outsideClickHandler = (e: MouseEvent) => {
-        if (this.menuEl && !this.element.contains(e.target as Node)) {
+        // composedPath, not e.target (retargeted to the shadow host).
+        if (this.menuEl && !e.composedPath().includes(this.element)) {
           this.closeMenu();
         }
       };

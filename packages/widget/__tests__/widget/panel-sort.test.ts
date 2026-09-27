@@ -230,6 +230,29 @@ describe("PanelSortControls", () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
+  it("clicking the trigger again closes the menu inside a shadow root", () => {
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const controls = new PanelSortControls(buildThemeColors(), vi.fn(), createT("en"));
+    host.attachShadow({ mode: "open" }).appendChild(controls.element);
+    const sortButton = controls.element.querySelector<HTMLButtonElement>(".sp-sort-btn")!;
+
+    sortButton.click();
+    expect(controls.element.querySelector(".sp-sort-menu")).not.toBeNull();
+
+    // At document level the click target is retargeted to the shadow host.
+    sortButton.click();
+    expect(controls.element.querySelector(".sp-sort-menu")).toBeNull();
+
+    controls.destroy();
+    host.remove();
+    vi.restoreAllMocks();
+  });
+
   it("closes the menu on outside click, Escape, and destroy", () => {
     vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb: FrameRequestCallback) => {
       cb(0);

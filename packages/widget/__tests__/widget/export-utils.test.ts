@@ -215,6 +215,24 @@ describe("ExportButton", () => {
     expect(document.body.contains(button.element)).toBe(false);
   });
 
+  it("clicking the trigger again closes the menu inside a shadow root", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const button = new ExportButton(buildThemeColors(), () => [makeFeedback()], createT("en"));
+    host.attachShadow({ mode: "open" }).appendChild(button.element);
+    const trigger = button.element.querySelector<HTMLButtonElement>(".sp-export-btn")!;
+
+    trigger.click();
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+
+    // At document level the click target is retargeted to the shadow host.
+    trigger.click();
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+
+    button.destroy();
+    host.remove();
+  });
+
   it("renders French labels when locale='fr'", () => {
     const button = new ExportButton(buildThemeColors(), () => [makeFeedback()], createT("fr"));
     document.body.appendChild(button.element);
