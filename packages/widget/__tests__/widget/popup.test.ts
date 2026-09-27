@@ -446,6 +446,27 @@ describe("Popup", () => {
     });
   });
 
+  describe("stale hide timer", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("a hide timer from the previous session does not hide a freshly re-opened popup", async () => {
+      vi.useFakeTimers();
+      const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+      const first = popup.show(makeBounds());
+      dialog.querySelector("textarea")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await first;
+
+      vi.advanceTimersByTime(100);
+      popup.show(makeBounds());
+      vi.advanceTimersByTime(200);
+
+      expect(popup.isOpen).toBe(true);
+      expect(dialog.style.display).toBe("block");
+    });
+  });
+
   // -------------------------------------------------------------------------
   // Destroy
   // -------------------------------------------------------------------------

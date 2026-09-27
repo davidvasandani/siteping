@@ -68,6 +68,8 @@ export class Popup {
   private submittingState = false;
   /** WAAPI handle for the running spinner — cancelled when submitting ends. */
   private spinnerAnimation: Animation | null = null;
+  /** Pending `display:none` after the hide transition — cleared by `show()`. */
+  private hideTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
    * True from `show()` until its promise settles — through typing, the
@@ -327,6 +329,9 @@ export class Popup {
    */
   show(rectBounds: DOMRect, onSubmit?: PopupSubmitHandler): Promise<PopupResult | null> {
     return new Promise((resolve) => {
+      // A re-show within the previous hide transition must not be hidden by it.
+      if (this.hideTimer) clearTimeout(this.hideTimer);
+      this.hideTimer = null;
       this.resolve = resolve;
       this.onSubmit = onSubmit ?? null;
       this.selectedType = null;
@@ -600,7 +605,8 @@ export class Popup {
     // Restore focus to the previously focused element
     this.previouslyFocused?.focus();
     this.previouslyFocused = null;
-    setTimeout(() => {
+    this.hideTimer = setTimeout(() => {
+      this.hideTimer = null;
       this.root.style.display = "none";
     }, 250);
   }
@@ -618,6 +624,7 @@ export class Popup {
       this.root.removeEventListener("keydown", this.onKeydownTrap);
       this.onKeydownTrap = null;
     }
+    if (this.hideTimer) clearTimeout(this.hideTimer);
     this.root.remove();
   }
 }
