@@ -715,8 +715,12 @@ export function launch(config: SitepingConfig): SitepingInstance {
     };
   }
 
-  instance = {
+  const self: SitepingInstance = {
     destroy: () => {
+      // Idempotent: hosts can hold stale handles (two `useSiteping` consumers
+      // share the singleton), and a repeat call must not tear anything down
+      // again — least of all a newer widget's singleton slot below.
+      if (destroyed) return;
       log("Destroying widget");
       if (onContextMenu) {
         document.removeEventListener("contextmenu", onContextMenu);
@@ -740,7 +744,7 @@ export function launch(config: SitepingConfig): SitepingInstance {
       publicBus.removeAll();
       liveRegion.remove();
       host.remove();
-      instance = null;
+      if (instance === self) instance = null;
     },
     open: () => {
       // Emit synchronously so consumers wired through `onOpen` / `panel:open`
@@ -775,7 +779,8 @@ export function launch(config: SitepingConfig): SitepingInstance {
     },
   };
 
-  return instance;
+  instance = self;
+  return self;
 }
 
 /**
