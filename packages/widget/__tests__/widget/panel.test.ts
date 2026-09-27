@@ -2284,6 +2284,26 @@ describe("Panel", () => {
       expect(card.scrollIntoView).toHaveBeenCalled();
       expect(card.classList.contains("sp-anim-flash")).toBe(true);
     });
+
+    it("a marker click that opens the panel flashes its card once the list has rendered", async () => {
+      const fb = makeFeedback({ id: "fb-marker" });
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [fb], total: 1 });
+      const scrollSpy = vi.fn();
+      const original = Element.prototype.scrollIntoView;
+      Element.prototype.scrollIntoView = scrollSpy; // jsdom lacks it
+      try {
+        // markers.ts: emit panel:toggle, then synchronously dispatch the click
+        bus.emit("panel:toggle", true);
+        document.dispatchEvent(new CustomEvent("sp-marker-click", { detail: { feedbackId: "fb-marker" } }));
+
+        await vi.waitFor(() => expect(shadow.querySelector('[data-feedback-id="fb-marker"]')).not.toBeNull());
+        const card = shadow.querySelector<HTMLElement>('[data-feedback-id="fb-marker"]')!;
+        expect(card.classList.contains("sp-anim-flash")).toBe(true);
+        expect(scrollSpy.mock.contexts).toContain(card);
+      } finally {
+        Element.prototype.scrollIntoView = original;
+      }
+    });
   });
 
   // -------------------------------------------------------------------------

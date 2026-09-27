@@ -69,6 +69,8 @@ export class Panel {
   private loadController: AbortController | null = null;
   /** Tracks feedback IDs with in-flight mutations to prevent spam-click race conditions */
   private pendingMutations = new Set<string>();
+  /** Marker-clicked feedback whose card wasn't rendered yet — flashed after the next render. */
+  private pendingScrollId: string | null = null;
 
   // New feature modules
   private readonly stats: PanelStats;
@@ -545,6 +547,9 @@ export class Panel {
       this.stats.update(feedbacks, total);
       this.bulk.reset();
       this.renderList();
+      const pendingScrollId = this.pendingScrollId;
+      this.pendingScrollId = null;
+      if (pendingScrollId) this.flashCard(pendingScrollId);
       // Markers always render only the current-URL slice — even when the panel
       // shows a wider scope ("template" or "all"), markers stay strictly local
       // so the user never sees out-of-context dots on the page.
@@ -1227,19 +1232,26 @@ export class Panel {
   }
 
   scrollToFeedback(feedbackId: string): void {
+    // A marker click on a closed panel opens it and lands here before the
+    // list has loaded — retry once the next load renders the cards.
+    this.pendingScrollId = this.flashCard(feedbackId) ? null : feedbackId;
+  }
+
+  /** Scroll a card into view and flash it. Returns false when it isn't rendered. */
+  private flashCard(feedbackId: string): boolean {
     const escapedId = CSS.escape(feedbackId);
     const card = this.listContainer.querySelector<HTMLElement>(`[data-feedback-id="${escapedId}"]`);
-    if (card) {
-      card.scrollIntoView({ behavior: "smooth", block: "center" });
-      card.classList.add("sp-anim-flash");
-      card.addEventListener(
-        "animationend",
-        () => {
-          card.classList.remove("sp-anim-flash");
-        },
-        { once: true },
-      );
-    }
+    if (!card) return false;
+    card.scrollIntoView({ behavior: "smooth", block: "center" });
+    card.classList.add("sp-anim-flash");
+    card.addEventListener(
+      "animationend",
+      () => {
+        card.classList.remove("sp-anim-flash");
+      },
+      { once: true },
+    );
+    return true;
   }
 
   /** Refresh the panel after a new feedback is submitted */
