@@ -1255,6 +1255,34 @@ describe("queueForRetry (via sendFeedback)", () => {
     expect(parsed[1].payload.message).toBe("new");
   });
 
+  it("a failed resend of the same clientId replaces its queued entry (latest edit is replayed)", async () => {
+    const payload = {
+      projectName: "test",
+      type: "bug" as const,
+      message: "first attempt",
+      url: "https://example.com",
+      viewport: "1x1",
+      userAgent: "t",
+      authorName: "A",
+      authorEmail: "a@b.com",
+      annotations: [],
+      clientId: "same-session",
+    };
+    vi.mocked(localStorage.getItem).mockReturnValue(JSON.stringify([{ endpoint, payload }]));
+    vi.mocked(fetch).mockRejectedValue(new TypeError("Failed to fetch"));
+
+    const client = new ApiClient(endpoint, "test");
+    await expectTransientFailure(client, { ...payload, message: "edited resend" });
+
+    const savedValue = vi.mocked(localStorage.setItem).mock.calls[0]?.[1];
+    if (savedValue === undefined) throw new Error("expected the retry queue to be written to localStorage");
+    const parsed = JSON.parse(savedValue);
+    // Two entries would replay the stale first attempt, and the server's
+    // clientId dedupe would then discard the edit.
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0].payload.message).toBe("edited resend");
+  });
+
   it("drops the oldest entry when the queue exceeds MAX_QUEUE_SIZE (20)", async () => {
     // Pre-fill queue with MAX_QUEUE_SIZE entries
     const existing = Array.from({ length: 20 }, (_, i) => ({

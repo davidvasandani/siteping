@@ -982,6 +982,42 @@ describe("launcher — annotation:complete integration", () => {
     });
   });
 
+  describe("clientId across retries", () => {
+    it("a resend of the same annotation after a failure reuses its clientId (no duplicate with the queued retry)", async () => {
+      // The failed attempt is queued for replay by api-client; if the resend
+      // got a fresh clientId, the next page load would replay the first one
+      // and the server (deduping by clientId only) would store both.
+      mockSendFeedback.mockRejectedValueOnce(new Error("Network down")).mockResolvedValue(makeFeedbackResponse());
+      const instance = launch(defaultConfig());
+      const errorListener = vi.fn();
+      capturedBus!.on("feedback:error", errorListener);
+
+      // The annotator re-emits the same `annotation` object on every retry.
+      const data = makeAnnotationCompleteData();
+      capturedBus!.emit("annotation:complete", data);
+      await vi.waitFor(() => {
+        expect(errorListener).toHaveBeenCalledOnce();
+      });
+      capturedBus!.emit("annotation:complete", { ...data, message: "Edited before resending" });
+      await vi.waitFor(() => {
+        expect(mockSendFeedback).toHaveBeenCalledTimes(2);
+      });
+
+      const first = mockSendFeedback.mock.calls[0]![0];
+      const resend = mockSendFeedback.mock.calls[1]![0];
+      expect(resend.clientId).toBe(first.clientId);
+
+      // A new annotation is a new feedback — it must get its own clientId.
+      capturedBus!.emit("annotation:complete", makeAnnotationCompleteData());
+      await vi.waitFor(() => {
+        expect(mockSendFeedback).toHaveBeenCalledTimes(3);
+      });
+      expect(mockSendFeedback.mock.calls[2]![0].clientId).not.toBe(first.clientId);
+
+      instance.destroy();
+    });
+  });
+
   // -------------------------------------------------------------------------
   // Initial markers load failure (line 247)
   // -------------------------------------------------------------------------

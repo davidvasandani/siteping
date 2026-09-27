@@ -1,4 +1,5 @@
 import {
+  type AnnotationPayload,
   type DiagnosticsSnapshot,
   type FeedbackPayload,
   isValidEmail,
@@ -470,6 +471,12 @@ export function launch(config: SitepingConfig): SitepingInstance {
   // listener hung forever. We emit `submission:cancelled` so the waiter
   // unblocks as a benign abort (the popup restores, `onError` is not called).
   let submitting = false;
+  // One clientId per annotation session. The annotator re-emits the SAME
+  // `annotation` object on every resend from its popup (the session its
+  // screenshot cache is scoped to), so a resend after a transient failure
+  // reuses the clientId of the attempt api-client queued for replay — the
+  // server dedupes them instead of storing the feedback twice.
+  const clientIds = new WeakMap<AnnotationPayload, string>();
   const unsubAnnotation = bus.on("annotation:complete", async (data) => {
     if (submitting) {
       bus.emit("submission:cancelled");
@@ -497,13 +504,15 @@ export function launch(config: SitepingConfig): SitepingInstance {
       }
 
       // crypto.randomUUID() throws in non-secure contexts (plain HTTP)
-      const clientId = (() => {
+      let clientId = clientIds.get(annotation);
+      if (!clientId) {
         try {
-          return crypto.randomUUID();
+          clientId = crypto.randomUUID();
         } catch {
-          return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+          clientId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
         }
-      })();
+        clientIds.set(annotation, clientId);
+      }
 
       // Use scope.url as the single source of truth — same identifier the
       // panel filter and marker filter use. If we stored full URLs here while

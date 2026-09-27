@@ -171,7 +171,10 @@ function queueForRetry(endpoint: string, payload: FeedbackPayload): void {
   // Fire-and-forget — we don't want to block the caller on the lock
   void withRetryLock(() => {
     try {
-      const queue = readQueue();
+      // A resend from the same popup session reuses its clientId: replace
+      // the earlier attempt so the replay carries the latest edit (the
+      // server's clientId dedupe would otherwise keep the stale first one).
+      const queue = readQueue().filter((entry) => entry.payload.clientId !== payload.clientId);
 
       // Cap queue size to prevent unbounded localStorage growth
       if (queue.length >= MAX_QUEUE_SIZE) {
