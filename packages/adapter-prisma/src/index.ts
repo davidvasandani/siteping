@@ -640,10 +640,11 @@ type CorsHeaders = Readonly<Record<string, string>>;
 function buildCorsHeaders(request: Request, allowedOrigins: ReadonlyArray<string> | undefined): CorsHeaders {
   if (!allowedOrigins) return {};
 
+  // With an allowlist the response depends on Origin even when it gets no
+  // CORS headers (Origin absent or unlisted) — without `Vary`, a shared cache
+  // could replay a header-less response to an allowed origin, or vice versa.
   const origin = request.headers.get("Origin");
-  if (!origin) return {};
-
-  if (!allowedOrigins.includes(origin)) return {};
+  if (!origin || !allowedOrigins.includes(origin)) return { Vary: "Origin" };
 
   return {
     "Access-Control-Allow-Origin": origin,
@@ -656,13 +657,28 @@ function buildCorsHeaders(request: Request, allowedOrigins: ReadonlyArray<string
 }
 
 /**
- * Attach CORS headers to an existing Response.
+ * Attach CORS headers to an existing Response. `Vary` is merged into any
+ * value already present rather than overwriting it.
  */
 function withCors(response: Response, corsHeaders: CorsHeaders): Response {
   for (const [key, value] of Object.entries(corsHeaders)) {
-    response.headers.set(key, value);
+    if (key === "Vary") appendVary(response.headers, value);
+    else response.headers.set(key, value);
   }
   return response;
+}
+
+/** Add comma-separated `Vary` tokens, skipping ones already listed (case-insensitive) and a `*`. */
+function appendVary(headers: Headers, value: string): void {
+  const current = headers.get("Vary");
+  if (!current) {
+    headers.set("Vary", value);
+    return;
+  }
+  const listed = new Set(current.split(",").map((token) => token.trim().toLowerCase()));
+  if (listed.has("*")) return;
+  const missing = value.split(",").filter((token) => !listed.has(token.trim().toLowerCase()));
+  if (missing.length > 0) headers.set("Vary", [current, ...missing.map((token) => token.trim())].join(", "));
 }
 
 // ---------------------------------------------------------------------------
