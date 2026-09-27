@@ -209,6 +209,7 @@ export class PanelSortControls {
   private readonly colors: ThemeColors;
   private readonly onChange: () => void;
   private outsideClickHandler: ((e: MouseEvent) => void) | null = null;
+  private outsideClickRaf: number | null = null;
 
   constructor(colors: ThemeColors, onChange: () => void, t: TFunction) {
     this.colors = colors;
@@ -315,8 +316,10 @@ export class PanelSortControls {
     // Position relative to button
     this.element.appendChild(this.menuEl);
 
-    // Close on outside click (next tick to avoid the current click)
-    requestAnimationFrame(() => {
+    // Close on outside click (next tick to avoid the current click). The
+    // frame is cancelled by closeMenu() so destroy can't leak the listener.
+    this.outsideClickRaf = requestAnimationFrame(() => {
+      this.outsideClickRaf = null;
       this.outsideClickHandler = (e: MouseEvent) => {
         // composedPath, not e.target (retargeted to the shadow host).
         if (this.menuEl && !e.composedPath().includes(this.element)) {
@@ -342,6 +345,8 @@ export class PanelSortControls {
       this.menuEl = null;
     }
     this.sortBtn.setAttribute("aria-expanded", "false");
+    if (this.outsideClickRaf !== null) cancelAnimationFrame(this.outsideClickRaf);
+    this.outsideClickRaf = null;
     if (this.outsideClickHandler) {
       document.removeEventListener("click", this.outsideClickHandler, true);
       this.outsideClickHandler = null;

@@ -58,6 +58,8 @@ export class Panel {
   private typeDropdownContainer!: HTMLElement;
   private typeDropdownMenu: HTMLElement | null = null;
   private typeDropdownOutsideHandler: ((e: MouseEvent) => void) | null = null;
+  /** Pending frame that arms the outside-click handler — cancelled on close/destroy. */
+  private typeDropdownRaf: number | null = null;
   private statusSegmented!: SegmentedControl<"all" | FeedbackStatus>;
   private typeOptions!: ReadonlyArray<{ value: string; label: string; icon: string; color: string; bg: string }>;
   private feedbacks: FeedbackResponse[] = [];
@@ -1105,7 +1107,8 @@ export class Panel {
 
     this.typeDropdownContainer.appendChild(this.typeDropdownMenu);
 
-    requestAnimationFrame(() => {
+    this.typeDropdownRaf = requestAnimationFrame(() => {
+      this.typeDropdownRaf = null;
       this.typeDropdownOutsideHandler = (e: MouseEvent) => {
         // composedPath, not e.target: at document level the target is
         // retargeted to the shadow host, so every click looked "outside".
@@ -1131,6 +1134,8 @@ export class Panel {
       this.typeDropdownMenu = null;
     }
     this.typeDropdownBtn.setAttribute("aria-expanded", "false");
+    if (this.typeDropdownRaf !== null) cancelAnimationFrame(this.typeDropdownRaf);
+    this.typeDropdownRaf = null;
     if (this.typeDropdownOutsideHandler) {
       document.removeEventListener("click", this.typeDropdownOutsideHandler, true);
       this.typeDropdownOutsideHandler = null;

@@ -2268,6 +2268,28 @@ describe("Panel", () => {
       vi.restoreAllMocks();
     });
 
+    it("destroying the panel before the next frame leaves no document click listener behind", async () => {
+      await panel.open();
+      // Manual frame queue honouring cancelAnimationFrame
+      const frames = new Map<number, FrameRequestCallback>();
+      let nextFrame = 0;
+      vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb: FrameRequestCallback) => {
+        frames.set(++nextFrame, cb);
+        return nextFrame;
+      });
+      vi.spyOn(window, "cancelAnimationFrame").mockImplementation((id: number) => void frames.delete(id));
+      const addSpy = vi.spyOn(document, "addEventListener");
+      try {
+        shadow.querySelector<HTMLButtonElement>(".sp-filter-dropdown-btn")!.click();
+        panel.destroy();
+        for (const cb of frames.values()) cb(0);
+
+        expect(addSpy.mock.calls.filter(([type]) => type === "click")).toEqual([]);
+      } finally {
+        vi.restoreAllMocks();
+      }
+    });
+
     it("clicking the trigger again while menu is open closes it", async () => {
       await panel.open();
 

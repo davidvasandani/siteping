@@ -253,6 +253,30 @@ describe("PanelSortControls", () => {
     vi.restoreAllMocks();
   });
 
+  it("destroy before the next frame leaves no document click listener behind", () => {
+    // Manual frame queue honouring cancelAnimationFrame
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb: FrameRequestCallback) => {
+      frames.set(++nextFrame, cb);
+      return nextFrame;
+    });
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation((id: number) => void frames.delete(id));
+    const controls = new PanelSortControls(buildThemeColors(), vi.fn(), createT("en"));
+    document.body.appendChild(controls.element);
+    const addSpy = vi.spyOn(document, "addEventListener");
+    try {
+      controls.element.querySelector<HTMLButtonElement>(".sp-sort-btn")!.click();
+      controls.destroy();
+      for (const cb of frames.values()) cb(0);
+
+      expect(addSpy.mock.calls.filter(([type]) => type === "click")).toEqual([]);
+    } finally {
+      controls.element.remove();
+      vi.restoreAllMocks();
+    }
+  });
+
   it("closes the menu on outside click, Escape, and destroy", () => {
     vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb: FrameRequestCallback) => {
       cb(0);
