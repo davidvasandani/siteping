@@ -1718,6 +1718,51 @@ describe("Panel", () => {
       });
     });
 
+    it("bulkDelete partial failure still reports the deleted items and reloads", async () => {
+      const fb1 = makeFeedback({ id: "fb-1" });
+      const fb2 = makeFeedback({ id: "fb-2" });
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [fb1, fb2], total: 2 });
+      apiClient.deleteFeedback.mockImplementation((id: string) =>
+        id === "fb-2" ? Promise.reject(new Error("fb-2 failed")) : Promise.resolve(undefined),
+      );
+      const deletedListener = vi.fn();
+      const errorListener = vi.fn();
+      bus.on("feedback:deleted", deletedListener);
+      bus.on("feedback:error", errorListener);
+
+      await panel.open();
+      shadow.querySelector<HTMLElement>(".sp-bulk-select-all .sp-bulk-checkbox")!.click();
+      apiClient.getFeedbacks.mockClear();
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [fb2], total: 1 });
+
+      shadow.querySelector<HTMLButtonElement>(".sp-bulk-btn-delete")!.click();
+
+      await vi.waitFor(() => expect(errorListener).toHaveBeenCalledWith(expect.any(Error)));
+      expect(deletedListener).toHaveBeenCalledWith("fb-1");
+      expect(deletedListener).not.toHaveBeenCalledWith("fb-2");
+      expect(apiClient.getFeedbacks).toHaveBeenCalled();
+    });
+
+    it("bulkResolve partial failure still reloads the list", async () => {
+      const fb1 = makeFeedback({ id: "fb-1" });
+      const fb2 = makeFeedback({ id: "fb-2" });
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [fb1, fb2], total: 2 });
+      apiClient.resolveFeedback.mockImplementation((id: string) =>
+        id === "fb-2" ? Promise.reject(new Error("fb-2 failed")) : Promise.resolve(undefined),
+      );
+      const errorListener = vi.fn();
+      bus.on("feedback:error", errorListener);
+
+      await panel.open();
+      shadow.querySelector<HTMLElement>(".sp-bulk-select-all .sp-bulk-checkbox")!.click();
+      apiClient.getFeedbacks.mockClear();
+
+      shadow.querySelector<HTMLButtonElement>(".sp-bulk-btn-resolve")!.click();
+
+      await vi.waitFor(() => expect(errorListener).toHaveBeenCalledWith(expect.any(Error)));
+      expect(apiClient.getFeedbacks).toHaveBeenCalled();
+    });
+
     it("bulkDelete emits feedback:error on failure", async () => {
       const fb = makeFeedback({ id: "fb-1" });
       apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [fb], total: 1 });

@@ -794,24 +794,31 @@ export class Panel {
   // ---------------------------------------------------------------------------
 
   private async bulkResolve(ids: string[]): Promise<void> {
-    try {
-      await Promise.all(ids.map((id) => this.client.resolveFeedback(id, true)));
-      await this.loadFeedbacks();
-    } catch (error) {
-      this.bus.emit("feedback:error", error instanceof Error ? error : new Error(String(error)));
-      throw error;
-    }
+    const results = await Promise.allSettled(ids.map((id) => this.client.resolveFeedback(id, true)));
+    await this.settleBulk(results);
   }
 
   private async bulkDelete(ids: string[]): Promise<void> {
-    try {
-      await Promise.all(ids.map((id) => this.client.deleteFeedback(id)));
-      for (const id of ids) this.bus.emit("feedback:deleted", id);
-      await this.loadFeedbacks();
-    } catch (error) {
-      this.bus.emit("feedback:error", error instanceof Error ? error : new Error(String(error)));
-      throw error;
-    }
+    const results = await Promise.allSettled(ids.map((id) => this.client.deleteFeedback(id)));
+    results.forEach((result, i) => {
+      const id = ids[i];
+      if (result.status === "fulfilled" && id) this.bus.emit("feedback:deleted", id);
+    });
+    await this.settleBulk(results);
+  }
+
+  /**
+   * Finish a bulk action. Always reload — items that succeeded must leave the
+   * list (and their markers the page) even when another item failed — then
+   * surface the first failure, rethrown so BulkActions restores its buttons.
+   */
+  private async settleBulk(results: PromiseSettledResult<unknown>[]): Promise<void> {
+    await this.loadFeedbacks();
+    const failure = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
+    if (!failure) return;
+    const error = failure.reason instanceof Error ? failure.reason : new Error(String(failure.reason));
+    this.bus.emit("feedback:error", error);
+    throw error;
   }
 
   // ---------------------------------------------------------------------------
