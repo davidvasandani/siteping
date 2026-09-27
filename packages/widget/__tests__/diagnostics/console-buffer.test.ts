@@ -117,6 +117,14 @@ describe("ConsoleBuffer", () => {
     buffer.dispose();
   });
 
+  it("does not label a shared, non-circular reference as [Circular]", () => {
+    const buffer = new ConsoleBuffer();
+    const shared = { v: 1 };
+    console.log({ a: shared, b: [shared, { c: shared }] });
+    expect(buffer.getEntries()[0]?.message).toBe('{"a":{"v":1},"b":[{"v":1},{"c":{"v":1}}]}');
+    buffer.dispose();
+  });
+
   it("truncates very long messages to roughly 500 chars", () => {
     const buffer = new ConsoleBuffer();
     console.log("x".repeat(2000));
