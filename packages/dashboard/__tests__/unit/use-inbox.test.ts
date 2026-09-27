@@ -1032,6 +1032,41 @@ describe("useSitepingInbox — loadMore while a mutation is in flight", () => {
   });
 });
 
+describe("useSitepingInbox — counts racing a mutation", () => {
+  it("count responses that predate a mutation don't leave the tabs stale", async () => {
+    const { source, result } = await mountDemo();
+    // Hold the refresh's count queries on a snapshot of the server taken when they were sent.
+    const real = source.list.getMockImplementation();
+    if (!real) throw new Error("no list implementation");
+    const heldCounts: Array<() => void> = [];
+    source.list.mockImplementation((query) => {
+      if (query.limit !== 1) return real(query);
+      const snapshot = real(query);
+      return new Promise((resolve) => heldCounts.push(() => resolve(snapshot)));
+    });
+
+    let refreshing!: Promise<void>;
+    act(() => {
+      refreshing = result.current.refresh();
+    });
+    await waitFor(() => expect(heldCounts).toHaveLength(5));
+    await act(async () => {
+      await result.current.changeStatus("r1", "resolved");
+    });
+    expect(result.current.counts).toMatchObject({ open: 2, resolved: 2 });
+
+    source.list.mockImplementation(real);
+    await act(async () => {
+      for (const release of heldCounts) release();
+      await refreshing;
+    });
+    await settle();
+
+    expect(ids(result.current.items)).toEqual(["r2", "r3"]);
+    expect(result.current.counts).toMatchObject({ all: 6, open: 2, resolved: 2 });
+  });
+});
+
 describe("useSitepingInbox — a success landing in a list refetched meanwhile", () => {
   it("removes the saved record when it no longer matches the refetched list", async () => {
     const { source, result } = await mountDemo();
