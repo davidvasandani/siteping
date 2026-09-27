@@ -5,7 +5,8 @@
  * - If the element has a unique id → //tag[@id='value']
  * - Otherwise, walk up the tree building /tag[position] segments
  *   until we hit an ancestor with an id or reach <body>
- * - Cap depth at 6 levels to keep paths short
+ * - Cap depth at 6 levels to keep paths short — a truncated path is emitted
+ *   relative (//tag[n]/…) since it no longer starts at <body>
  */
 export function generateXPath(element: Element): string {
   if (element.id) {
@@ -41,5 +42,10 @@ export function generateXPath(element: Element): string {
     current = parent;
   }
 
+  // Truncated by the depth cap: "/html/body" + the innermost segments would
+  // match nothing, or a shallower decoy with the same shape. The relative
+  // form matches the element wherever it sits — possibly alongside
+  // look-alikes, which the resolver gathers and verifies like CSS matches.
+  if (current && current !== document.body) return "/" + segments.join("");
   return "/html/body" + segments.join("");
 }
