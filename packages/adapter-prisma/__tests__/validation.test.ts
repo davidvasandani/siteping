@@ -153,6 +153,18 @@ describe("feedbackCreateSchema", () => {
     expect(result.success).toBe(false);
   });
 
+  it("caps anchor elementTag at 200 chars and elementId at 500 chars", () => {
+    const withAnchor = (anchor: Partial<typeof validAnnotation.anchor>) =>
+      feedbackCreateSchema.safeParse({
+        ...validPayload,
+        annotations: [{ ...validAnnotation, anchor: { ...validAnnotation.anchor, ...anchor } }],
+      }).success;
+
+    expect(withAnchor({ elementTag: "X".repeat(200), elementId: "i".repeat(500) })).toBe(true);
+    expect(withAnchor({ elementTag: "X".repeat(201) })).toBe(false);
+    expect(withAnchor({ elementId: "i".repeat(501) })).toBe(false);
+  });
+
   it("accepts empty strings for text context fields", () => {
     const result = feedbackCreateSchema.safeParse({
       ...validPayload,
