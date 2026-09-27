@@ -71,8 +71,22 @@ export function setButtonLoading(btn: HTMLButtonElement): () => void {
   };
 }
 
+/**
+ * `locale` as Intl accepts it. `SitepingLocale` takes any string, and a
+ * malformed tag (`fr_FR` from PHP / WordPress) makes every Intl constructor
+ * throw a RangeError — fall back to English, as `createT` does.
+ */
+function intlLocale(locale: string): string {
+  try {
+    return Intl.getCanonicalLocales(locale)[0] ?? "en";
+  } catch {
+    return "en";
+  }
+}
+
 /** Format a relative date string using Intl.RelativeTimeFormat for locale support */
-export function formatRelativeDate(isoString: string, locale = "en"): string {
+export function formatRelativeDate(isoString: string, requestedLocale = "en"): string {
+  const locale = intlLocale(requestedLocale);
   const diff = Date.now() - new Date(isoString).getTime();
   const seconds = Math.floor(diff / 1000);
 
