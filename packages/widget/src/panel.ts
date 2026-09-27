@@ -794,7 +794,11 @@ export class Panel {
   // ---------------------------------------------------------------------------
 
   private async bulkResolve(ids: string[]): Promise<void> {
-    const results = await Promise.allSettled(ids.map((id) => this.client.resolveFeedback(id, true)));
+    // Skip closed items: resolving would turn a wont_fix into resolved and
+    // overwrite a resolved item's closure timestamp.
+    const closed = new Set(this.feedbacks.filter((f) => isClosedStatus(f.status)).map((f) => f.id));
+    const targets = ids.filter((id) => !closed.has(id));
+    const results = await Promise.allSettled(targets.map((id) => this.client.resolveFeedback(id, true)));
     await this.settleBulk(results);
   }
 
