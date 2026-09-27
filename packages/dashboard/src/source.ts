@@ -64,9 +64,8 @@ export function createEndpointSource(options: EndpointSourceOptions): InboxSourc
     // Header names are case-insensitive: drop a built-in the caller overrides
     // under another casing, or fetch sends both joined ("Bearer a, Bearer b").
     for (const [name, value] of Object.entries(extra ?? {})) {
-      const lower = name.toLowerCase();
       for (const key of Object.keys(merged)) {
-        if (key.toLowerCase() === lower) delete merged[key];
+        if (key.toLowerCase() === name.toLowerCase()) delete merged[key];
       }
       merged[name] = value;
     }

@@ -36,13 +36,12 @@ export function feedbackQueryToSearchParams(query: FeedbackQuery): URLSearchPara
  * relative endpoints stay relative and nothing depends on `location`.
  */
 export function withSearchParams(endpoint: string, params: URLSearchParams): string {
-  const hashAt = endpoint.indexOf("#");
-  const base = hashAt === -1 ? endpoint : endpoint.slice(0, hashAt);
-  const hash = hashAt === -1 ? "" : endpoint.slice(hashAt);
   const query = params.toString();
   if (!query) return endpoint;
-  const separator = !base.includes("?") ? "?" : base.endsWith("?") || base.endsWith("&") ? "" : "&";
-  return `${base}${separator}${query}${hash}`;
+  const hashAt = endpoint.includes("#") ? endpoint.indexOf("#") : endpoint.length;
+  const base = endpoint.slice(0, hashAt);
+  const separator = /[?&]$/.test(base) ? "" : base.includes("?") ? "&" : "?";
+  return base + separator + query + endpoint.slice(hashAt);
 }
 
 /**
