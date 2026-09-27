@@ -80,6 +80,11 @@ export class Popup {
     return this.resolve !== null;
   }
 
+  /** True while `onSubmit` is pending — the popup holds the session until it settles. */
+  get isSubmitting(): boolean {
+    return this.submittingState;
+  }
+
   constructor(
     private readonly colors: ThemeColors,
     private readonly t: TFunction,
@@ -211,9 +216,6 @@ export class Popup {
       if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         this.submit();
-      }
-      if (e.key === "Escape") {
-        this.cancel();
       }
     });
 
@@ -364,8 +366,10 @@ export class Popup {
       this.root.style.left = `${left}px`;
       this.root.style.display = "block";
 
-      // Install focus trap
+      // Install focus trap. Escape cancels from any control, not just the
+      // textarea — it then bubbles on so the annotator can end the session.
       this.onKeydownTrap = (e: KeyboardEvent) => {
+        if (e.key === "Escape") this.cancel();
         if (e.key === "Tab") {
           const focusableEls = Array.from(
             this.root.querySelectorAll<HTMLElement>(
@@ -472,7 +476,8 @@ export class Popup {
       });
   }
 
-  private cancel(): void {
+  /** Close as cancelled (`show()` resolves null). No-op while submitting. */
+  cancel(): void {
     if (this.submittingState) return;
     this.resolve?.(null);
     this.resolve = null;
