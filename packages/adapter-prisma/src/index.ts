@@ -632,6 +632,9 @@ export interface SitepingHandler {
 
 type CorsHeaders = Readonly<Record<string, string>>;
 
+/** Request headers every allowlisted origin may send (preflights can add more). */
+const DEFAULT_ALLOWED_HEADERS: ReadonlyArray<string> = ["Content-Type", "Authorization"];
+
 /**
  * Build CORS headers for a given request.
  * When `allowedOrigins` is set, only matching origins get reflected.
@@ -649,7 +652,7 @@ function buildCorsHeaders(request: Request, allowedOrigins: ReadonlyArray<string
   return {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Headers": DEFAULT_ALLOWED_HEADERS.join(", "),
     "Access-Control-Allow-Credentials": "true",
     "Access-Control-Max-Age": "86400",
     Vary: "Origin",
@@ -666,6 +669,29 @@ function withCors(response: Response, corsHeaders: CorsHeaders): Response {
     else response.headers.set(key, value);
   }
   return response;
+}
+
+/** RFC 9110 `token` — the only valid shape for a header field name. */
+const HEADER_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+/**
+ * Extend a preflight's `Access-Control-Allow-Headers` with the header names
+ * it asks for — the widget's `headers` option lets hosts send their own (a
+ * session token, a tenant id), which the fixed default list would block.
+ * Callers invoke this for ALLOWLISTED origins only; names that are not
+ * valid header tokens are dropped, and the defaults are always kept.
+ */
+function allowRequestedHeaders(request: Request, headers: Headers): void {
+  const allowed = [...DEFAULT_ALLOWED_HEADERS];
+  const seen = new Set(allowed.map((name) => name.toLowerCase()));
+  for (const raw of (request.headers.get("Access-Control-Request-Headers") ?? "").split(",")) {
+    const name = raw.trim();
+    if (!HEADER_TOKEN.test(name) || seen.has(name.toLowerCase())) continue;
+    seen.add(name.toLowerCase());
+    allowed.push(name);
+  }
+  headers.set("Access-Control-Allow-Headers", allowed.join(", "));
+  appendVary(headers, "Access-Control-Request-Headers");
 }
 
 /** Add comma-separated `Vary` tokens, skipping ones already listed (case-insensitive) and a `*`. */
@@ -830,7 +856,9 @@ export function createSitepingHandler({
      */
     OPTIONS: (request: Request): Response => {
       const corsHeaders = buildCorsHeaders(request, allowedOrigins);
-      return new Response(null, { status: 204, headers: corsHeaders });
+      const response = withCors(new Response(null, { status: 204 }), corsHeaders);
+      if (corsHeaders["Access-Control-Allow-Origin"]) allowRequestedHeaders(request, response.headers);
+      return response;
     },
 
     POST: async (request: Request): Promise<Response> => {
