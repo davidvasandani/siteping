@@ -7,6 +7,10 @@ import { generateXPath } from "./xpath.js";
 /** HTML attribute hosts use to mark stable semantic anchors. */
 export const ANCHOR_KEY_ATTR = "data-feedback-anchor";
 
+/** Server-side length caps for `elementTag` / `elementId`. */
+const MAX_ELEMENT_TAG = 200;
+const MAX_ELEMENT_ID = 500;
+
 /**
  * Generate a multi-selector anchor for a DOM element.
  *
@@ -51,8 +55,10 @@ export function generateAnchor(element: Element): AnchorData {
     textSuffix,
     fingerprint,
     neighborText: neighbor,
-    elementTag: element.tagName,
-    elementId: element.id || undefined,
+    elementTag: element.tagName.slice(0, MAX_ELEMENT_TAG),
+    // Over-long ids are dropped, not truncated: a truncated id matches nothing
+    // (or the wrong element) — the resolver falls back to other strategies.
+    elementId: element.id && element.id.length <= MAX_ELEMENT_ID ? element.id : undefined,
     anchorKey,
   };
 }
