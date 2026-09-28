@@ -13,10 +13,12 @@ import {
   hasOwn,
   isStoreDuplicate,
   isStoreNotFound,
+  isUnreachableOffset,
   type ScreenshotStorage,
   type SitepingStore,
   StoreDuplicateError,
   StoreNotFoundError,
+  screenshotMimeType,
   toFeedbackUpdate,
 } from "@siteping/core";
 import {
@@ -229,15 +231,6 @@ function isStoredScreenshotUrl(url: unknown): url is string {
 }
 
 /**
- * MIME type declared by an image data URL (`data:image/png;base64,…` →
- * `image/png`) — the schema accepts JPEG, PNG and WebP. Falls back to JPEG,
- * the widget's capture format, for anything unparseable.
- */
-function dataUrlMimeType(dataUrl: string): string {
-  return /^data:(image\/[\w.+-]+)[;,]/.exec(dataUrl)?.[1] ?? "image/jpeg";
-}
-
-/**
  * Prisma-backed implementation of `SitepingStore`.
  *
  * Wraps a PrismaClient to satisfy the abstract store interface.
@@ -278,24 +271,29 @@ export class PrismaStore implements SitepingStore {
     try {
       return await this.insertFeedback(data, screenshotUrl);
     } catch (error) {
-      await this.discardUnreferencedUpload(screenshotUrl, data.clientId);
+      if (isStoreDuplicate(error)) await this.discardUnreferencedUpload(screenshotUrl, data.clientId);
       throw toStoreError(error);
     }
   }
 
   /**
-   * Drop the screenshot uploaded for an insert that failed — unless a stored
-   * row references it. Uploads are keyed on clientId, so with a deterministic
-   * key (`feedback/${feedbackId}.jpg`) a replay of a stored clientId wrote to
-   * the very object the existing row points at: deleting it would strip the
+   * Drop the screenshot uploaded by a replay of a stored clientId — unless the
+   * stored row references it. Uploads are keyed on clientId, so with a
+   * deterministic key (`feedback/${feedbackId}.jpg`) the replay wrote to the
+   * very object the existing row points at: deleting it would strip the
    * surviving feedback of its screenshot. If the lookup itself fails the
-   * object is kept — an orphan beats data loss.
+   * object is kept — an orphan beats data loss. Other insert failures never
+   * get here: with such a key, a retry on another instance may have rewritten
+   * the object and not yet inserted the row that will point at it.
    */
   private async discardUnreferencedUpload(url: string | null, clientId: string): Promise<void> {
     if (!isStoredScreenshotUrl(url) || !this.screenshotStorage?.delete) return;
-    let existing: FeedbackRecord | null;
+    let existing: { screenshotUrl: string | null } | null;
     try {
-      existing = await this.findByClientId(clientId);
+      existing = (await this.prisma.sitepingFeedback.findUnique({
+        where: { clientId },
+        select: { screenshotUrl: true },
+      })) as { screenshotUrl: string | null } | null;
     } catch {
       return;
     }
@@ -382,7 +380,7 @@ export class PrismaStore implements SitepingStore {
         // map it to a filesystem path MUST sanitize against path traversal.
         const { url } = await this.screenshotStorage.upload(dataUrl, {
           feedbackId: clientId,
-          mimeType: dataUrlMimeType(dataUrl),
+          mimeType: screenshotMimeType(dataUrl),
         });
         return url;
       } catch (err) {
@@ -465,6 +463,13 @@ export class PrismaStore implements SitepingStore {
       where.message = this.caseInsensitiveSearch ? { contains: search, mode: "insensitive" } : { contains: search };
     }
 
+    // A huge `page` from a direct caller yields a `skip` Prisma rejects
+    // (non-integer or past 64 bits): answer the empty page the in-memory
+    // stores return, with the real total, without issuing `findMany`.
+    if (isUnreachableOffset(skip)) {
+      return { feedbacks: [], total: await this.prisma.sitepingFeedback.count({ where }) };
+    }
+
     const [feedbacks, total] = await Promise.all([
       this.prisma.sitepingFeedback.findMany({
         where,
@@ -526,7 +531,9 @@ export class PrismaStore implements SitepingStore {
   async verifyProjectOwnership(id: string, projectName: string): Promise<boolean> {
     const record = (await this.prisma.sitepingFeedback.findUnique({
       where: { id },
-      // Only need projectName for the check — skip annotations
+      // Only need projectName for the check — not the annotations, nor an
+      // inline screenshot data URL or the diagnostics JSON
+      select: { projectName: true },
     })) as { projectName: string } | null;
     return record !== null && record.projectName === projectName;
   }
@@ -662,13 +669,11 @@ function buildCorsHeaders(request: Request, allowedOrigins: ReadonlyArray<string
 }
 
 /**
- * Attach CORS headers to an existing Response. `Vary` is merged into any
- * value already present rather than overwriting it.
+ * Attach CORS headers to an existing Response.
  */
 function withCors(response: Response, corsHeaders: CorsHeaders): Response {
   for (const [key, value] of Object.entries(corsHeaders)) {
-    if (key === "Vary") appendVary(response.headers, value);
-    else response.headers.set(key, value);
+    response.headers.set(key, value);
   }
   return response;
 }
@@ -677,13 +682,13 @@ function withCors(response: Response, corsHeaders: CorsHeaders): Response {
 const HEADER_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
 /**
- * Extend a preflight's `Access-Control-Allow-Headers` with the header names
- * it asks for — the widget's `headers` option lets hosts send their own (a
- * session token, a tenant id), which the fixed default list would block.
- * Callers invoke this for ALLOWLISTED origins only; names that are not
- * valid header tokens are dropped, and the defaults are always kept.
+ * `Access-Control-Allow-Headers` for a preflight from an ALLOWLISTED origin:
+ * the defaults plus the header names it asks for — the widget's `headers`
+ * option lets hosts send their own (a session token, a tenant id), which the
+ * fixed default list would block. Names that are not valid header tokens
+ * are dropped.
  */
-function allowRequestedHeaders(request: Request, headers: Headers): void {
+function preflightAllowedHeaders(request: Request): string {
   const allowed = [...DEFAULT_ALLOWED_HEADERS];
   const seen = new Set(allowed.map((name) => name.toLowerCase()));
   for (const raw of (request.headers.get("Access-Control-Request-Headers") ?? "").split(",")) {
@@ -692,21 +697,7 @@ function allowRequestedHeaders(request: Request, headers: Headers): void {
     seen.add(name.toLowerCase());
     allowed.push(name);
   }
-  headers.set("Access-Control-Allow-Headers", allowed.join(", "));
-  appendVary(headers, "Access-Control-Request-Headers");
-}
-
-/** Add comma-separated `Vary` tokens, skipping ones already listed (case-insensitive) and a `*`. */
-function appendVary(headers: Headers, value: string): void {
-  const current = headers.get("Vary");
-  if (!current) {
-    headers.set("Vary", value);
-    return;
-  }
-  const listed = new Set(current.split(",").map((token) => token.trim().toLowerCase()));
-  if (listed.has("*")) return;
-  const missing = value.split(",").filter((token) => !listed.has(token.trim().toLowerCase()));
-  if (missing.length > 0) headers.set("Vary", [current, ...missing.map((token) => token.trim())].join(", "));
+  return allowed.join(", ");
 }
 
 // ---------------------------------------------------------------------------
@@ -818,26 +809,22 @@ export function createSitepingHandler({
     : [];
 
   /**
-   * Creates in flight, keyed by clientId. The widget's timeout + retry can
-   * overlap its first attempt, and stores that return the existing record on
-   * a duplicate clientId (memory, localStorage, `createCollectionStore`) would
-   * let both requests pass the replay check and both "create" — notifying the
-   * webhooks twice. A request whose clientId is in flight shares that outcome
-   * instead. Scoped to this handler instance: across processes, the store's
-   * unique constraint (the duplicate path in POST) still decides.
+   * Creates in flight, keyed by clientId. The widget aborts an attempt after
+   * 10 s and resends the same payload, so a retry can reach the server while
+   * the first attempt is still being processed. With a store that returns the
+   * existing record on a duplicate clientId without implementing
+   * `createFeedbackIfAbsent`, both requests would pass the replay check and
+   * both "create" — notifying the webhooks twice. A request whose clientId is
+   * in flight shares that outcome instead, and never runs a second insert or
+   * upload. Scoped to this handler instance: across processes, the store
+   * decides — `createFeedbackIfAbsent`, or its unique constraint (the
+   * duplicate path in POST).
    */
   const inflightCreates = new Map<string, Promise<{ feedback: FeedbackRecord; inserted: boolean }>>();
 
   /** Replay check + insert for one validated payload; `inserted` is false for a replay. */
   async function createOrReplay(data: FeedbackPayload): Promise<{ feedback: FeedbackRecord; inserted: boolean }> {
-    // Replay detection up front, for every store alike: stores that return
-    // the existing record on a duplicate clientId are indistinguishable
-    // from a fresh insert afterwards, and a replayed submission must not
-    // notify the webhooks a second time.
-    const replayed = await store.findByClientId(data.clientId);
-    if (replayed) return { feedback: replayed, inserted: false };
-
-    const feedback = await store.createFeedback({
+    const input: FeedbackCreateInput = {
       projectName: data.projectName,
       type: data.type,
       message: data.message,
@@ -853,8 +840,23 @@ export function createSitepingHandler({
       screenshotDataUrl: data.screenshotDataUrl ?? null,
       screenshotRegion: data.screenshotRegion ?? null,
       diagnostics: data.diagnostics ?? null,
-    });
-    return { feedback, inserted: true };
+    };
+
+    // The store reports its own inserts: it arbitrates replays and races on
+    // the clientId atomically, across handler instances and processes too.
+    if (store.createFeedbackIfAbsent) {
+      const { feedback, created } = await store.createFeedbackIfAbsent(input);
+      return { feedback, inserted: created };
+    }
+
+    // Otherwise, replay detection up front: stores that return the existing
+    // record on a duplicate clientId are indistinguishable from a fresh
+    // insert afterwards, and a replayed submission must not notify the
+    // webhooks a second time.
+    const replayed = await store.findByClientId(data.clientId);
+    if (replayed) return { feedback: replayed, inserted: false };
+
+    return { feedback: await store.createFeedback(input), inserted: true };
   }
 
   /**
@@ -898,9 +900,15 @@ export function createSitepingHandler({
      */
     OPTIONS: (request: Request): Response => {
       const corsHeaders = buildCorsHeaders(request, allowedOrigins);
-      const response = withCors(new Response(null, { status: 204 }), corsHeaders);
-      if (corsHeaders["Access-Control-Allow-Origin"]) allowRequestedHeaders(request, response.headers);
-      return response;
+      // An allowlisted preflight's answer also depends on the headers it requests.
+      const headers = corsHeaders["Access-Control-Allow-Origin"]
+        ? {
+            ...corsHeaders,
+            "Access-Control-Allow-Headers": preflightAllowedHeaders(request),
+            Vary: "Origin, Access-Control-Request-Headers",
+          }
+        : corsHeaders;
+      return new Response(null, { status: 204, headers });
     },
 
     POST: async (request: Request): Promise<Response> => {

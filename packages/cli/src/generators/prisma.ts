@@ -1,6 +1,6 @@
 // Must run before prisma-ast: chevrotain needs Object.groupBy (Node 21+).
 import "../utils/object-group-by-polyfill.js";
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import type {
   Attribute,
@@ -100,24 +100,31 @@ interface SchemaFile {
  * The parsed files of the schema at `schemaPath`, that file first. In a
  * multi-file schema folder (`prisma/schema/`, which `findPrismaSchema`
  * detects) Prisma merges every `.prisma` file under it, so a Siteping model in
- * a sibling file has to be found there rather than added again.
+ * a sibling file has to be found there rather than added again. A package
+ * root is never such a folder, even one named `schema`.
  */
 function loadSchemaFiles(schemaPath: string): [SchemaFile, ...SchemaFile[]] {
-  const main = { path: schemaPath, schema: parsePrismaSchema(readSchemaSource(schemaPath)) };
-  const folder = dirname(schemaPath);
-  if (basename(folder) !== "schema") return [main];
+  const main = { path: schemaPath, schema: parsePrismaSchema(schemaPath, readSchemaSource(schemaPath)) };
+  const folder = resolve(dirname(schemaPath));
+  if (basename(folder) !== "schema" || existsSync(join(folder, "package.json"))) return [main];
   const siblings = prismaFilesIn(folder)
-    .filter((path) => resolve(path) !== resolve(schemaPath))
-    .map((path) => ({ path, schema: parsePrismaSchema(readFileSync(path, "utf-8")) }));
+    .filter((path) => path !== resolve(schemaPath))
+    .map((path) => ({ path, schema: parsePrismaSchema(path, readFileSync(path, "utf-8")) }));
   return [main, ...siblings];
 }
 
-/** Every `.prisma` file under `dir`, subfolders included — as Prisma loads a schema folder. */
+/**
+ * Every `.prisma` file under `dir`, subfolders included — as Prisma loads a
+ * schema folder — except in `node_modules` and hidden folders, where only
+ * generated copies live.
+ */
 function prismaFilesIn(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true })
     .flatMap((entry) => {
       const path = join(dir, entry.name);
-      if (entry.isDirectory()) return prismaFilesIn(path);
+      if (entry.isDirectory()) {
+        return entry.name === "node_modules" || entry.name.startsWith(".") ? [] : prismaFilesIn(path);
+      }
       return extname(entry.name) === ".prisma" ? [path] : [];
     })
     .sort();
@@ -129,15 +136,20 @@ function prismaFilesIn(dir: string): string[] {
  * (harmless to strip — Prisma strings are single-line), and a comment after a
  * block's opening `{`, which moves onto its own line as a plain `//` comment:
  * in place it documents nothing, while a `///` there would document the first field.
+ * A parse error names the file at `path`: a schema folder has several.
  */
-export function parsePrismaSchema(source: string): Schema {
+function parsePrismaSchema(path: string, source: string): Schema {
   const normalized = source
     .replace(/[ \t]+(?=\r?$)/gm, "")
     .replace(
       /^([ \t]*(?:model|view|type|enum|datasource|generator)[ \t]+\w+[ \t]*\{)[ \t]*\/{2,}(.*)$/gm,
       "$1\n  //$2",
     );
-  return getSchema(normalized);
+  try {
+    return getSchema(normalized);
+  } catch (error) {
+    throw new Error(`${path}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  }
 }
 
 /** Private-use sentinel: can't occur in a schema, survives printSchema() verbatim. */
@@ -191,7 +203,7 @@ function readSchemaSource(schemaPath: string): string {
  * the datasource are looked up there too (and updated in place); missing
  * models are added to `schema`.
  */
-export function reconcileSitepingModels(schema: Schema, siblings: readonly Schema[] = []): SchemaReconciliation {
+function reconcileSitepingModels(schema: Schema, siblings: readonly Schema[]): SchemaReconciliation {
   const existingModelsMap = new Map<string, Model>();
   for (const item of [...siblings, schema].flatMap((file) => file.list)) {
     if (item.type === "model") {
@@ -294,16 +306,15 @@ export function reconcileSitepingModels(schema: Schema, siblings: readonly Schem
 }
 
 // ── User-owned parts of a Siteping field ───────────────────────────────
-// The column name (`@map`), `@ignore`, the relation name, constraint names
-// (`map:` arguments) and the field's comment belong to the user: they're never
-// compared, and a rewrite carries them over. Dropping a `@map` makes
+// The column name (`@map`), the relation name and its `onUpdate`, constraint
+// names (`map:` arguments) and the field's comment belong to the user: they're
+// never compared, and a rewrite carries them over. Dropping a `@map` makes
 // `prisma db push` rename/drop the column; dropping a relation name on one
-// side only leaves the schema invalid.
-
-const USER_OWNED_ATTRIBUTES: ReadonlySet<string> = new Set(["map", "ignore"]);
+// side only leaves the schema invalid. `@ignore` is drift, not the user's:
+// it hides the field from Prisma Client, and the adapter writes every column.
 
 function isUserOwnedAttribute(attr: Attribute): boolean {
-  return !attr.group && USER_OWNED_ATTRIBUTES.has(attr.name);
+  return !attr.group && attr.name === "map";
 }
 
 function isRelation(attr: Attribute): boolean {
@@ -319,10 +330,19 @@ function isConstraintName(arg: AttributeArgument): boolean {
   return isKeyValue(arg.value) && arg.value.key === "map";
 }
 
-/** A constraint name, or the relation name: `@relation("Name", …)` / `@relation(name: "Name", …)`. */
-function isUserOwnedArg(attr: Attribute, arg: AttributeArgument): boolean {
-  if (isConstraintName(arg)) return true;
+/** `@relation("Name", …)` / `@relation(name: "Name", …)`. */
+function isRelationName(attr: Attribute, arg: AttributeArgument): boolean {
   return isRelation(attr) && (typeof arg.value === "string" || (isKeyValue(arg.value) && arg.value.key === "name"));
+}
+
+/**
+ * A constraint name, the relation name, or the relation's `onUpdate` —
+ * Siteping never sets it (its ids never change), while SQL Server may need
+ * `NoAction` there to break a cycle of cascade paths.
+ */
+function isUserOwnedArg(attr: Attribute, arg: AttributeArgument): boolean {
+  if (isConstraintName(arg) || isRelationName(attr, arg)) return true;
+  return isRelation(attr) && isKeyValue(arg.value) && arg.value.key === "onUpdate";
 }
 
 /**
@@ -347,11 +367,11 @@ function withUserOwnedParts(expected: Field, existing: Field): Field {
   const attributes = (expected.attributes ?? []).map((attr) => {
     const owned = ownedArgs(attr);
     if (owned.length === 0) return attr;
-    // The relation name leads (`@relation("Name", …)`), constraint names trail.
+    // The relation name leads (`@relation("Name", …)`), the rest trails.
     const args = [
-      ...owned.filter((a) => !isConstraintName(a)),
+      ...owned.filter((a) => isRelationName(attr, a)),
       ...(attr.args ?? []),
-      ...owned.filter(isConstraintName),
+      ...owned.filter((a) => !isRelationName(attr, a)),
     ];
     return { ...attr, args };
   });

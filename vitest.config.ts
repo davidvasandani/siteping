@@ -1,4 +1,7 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
+
+const source = (pkg: string) => fileURLToPath(new URL(`packages/${pkg}/src/index.ts`, import.meta.url));
 
 export default defineConfig({
   esbuild: {
@@ -8,6 +11,16 @@ export default defineConfig({
   },
   resolve: {
     conditions: ["import", "module", "default"],
+    // These packages export only their built `dist`. Tests that import one
+    // (the widget's bulk-action test runs over real stores, adapter-drizzle
+    // mounts its store behind adapter-prisma's handler) resolve it to source
+    // like `@siteping/core`, so they need no prior build and never run a
+    // stale copy of the engine after a core edit.
+    alias: {
+      "@siteping/adapter-localstorage": source("adapter-localstorage"),
+      "@siteping/adapter-memory": source("adapter-memory"),
+      "@siteping/adapter-prisma": source("adapter-prisma"),
+    },
   },
   test: {
     include: ["packages/**/__tests__/**/*.test.{ts,tsx}"],

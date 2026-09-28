@@ -33,13 +33,6 @@ describe("Diagnostics", () => {
     expect(time?.getAttribute("datetime")).toBe("2026-07-20T10:00:00.000Z");
   });
 
-  it("formats times under a non-BCP-47 locale tag instead of throwing", () => {
-    const { container } = renderWithUi(<Diagnostics diagnostics={makeDiagnostics()} />, { locale: "fr_FR" });
-    const times = [...container.querySelectorAll("time.spd-diag-time")];
-    expect(times).toHaveLength(3);
-    for (const time of times) expect(time.textContent).toMatch(/\d/);
-  });
-
   it("shows the merged count in the section header", () => {
     renderWithUi(<Diagnostics diagnostics={makeDiagnostics()} />);
     expect(screen.getByText(/Diagnostics · 3/)).toBeTruthy();

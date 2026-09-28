@@ -7,9 +7,9 @@
  *
  * 1. **Snapshot backends** (KV, flat file, IndexedDB, …): hand
  *    {@link createCollectionStore} a `load`/`persist`/`generateId` trio and
- *    every store semantic (clientId dedup, filtering, pagination, error
- *    contract) comes built-in — an adapter is ~20 lines plus its storage
- *    specifics.
+ *    every store semantic (clientId dedup, serialized mutations, filtering,
+ *    pagination, error contract) comes built-in — an adapter is ~20 lines
+ *    plus its storage specifics.
  * 2. **Query backends** (SQL, ORMs): implement {@link SitepingStore}
  *    directly; {@link buildFeedbackRecord} / {@link buildAnnotationRecord}
  *    handle input→record construction, and the JSDoc on `SitepingStore`
@@ -43,6 +43,7 @@ export type {
   ConsoleDiagnosticLevel,
   DiagnosticsSnapshot,
   FeedbackCreateInput,
+  FeedbackCreateOutcome,
   FeedbackPage,
   FeedbackPayload,
   FeedbackQuery,
@@ -80,6 +81,7 @@ export {
   isStoreDuplicate,
   isStoreNotFound,
   isStorePersistence,
+  isUnreachableOffset,
   MAX_PAGE_LIMIT,
   OPEN_FEEDBACK_STATUSES,
   StoreDuplicateError,

@@ -107,6 +107,17 @@ describe("PrismaStore — screenshot storage", () => {
       expect(storage.upload).toHaveBeenCalledWith(dataUrl, { feedbackId: "c1", mimeType });
     });
 
+    it("never forwards a type outside JPEG, PNG and WebP (an SVG label is script-capable)", async () => {
+      // `PrismaStore.createFeedback` is public: its callers skip the HTTP schema.
+      const storage: ScreenshotStorage = { upload: vi.fn().mockResolvedValue({ url: "https://cdn.example.com/x" }) };
+      const store = new PrismaStore(prisma, { screenshotStorage: storage });
+      const dataUrl = "data:image/svg+xml;base64,PHN2Zz4";
+
+      await store.createFeedback(createInput({ screenshotDataUrl: dataUrl, clientId: "c1" }));
+
+      expect(storage.upload).toHaveBeenCalledWith(dataUrl, { feedbackId: "c1", mimeType: "image/jpeg" });
+    });
+
     it("does not call storage when no data URL is sent", async () => {
       const storage: ScreenshotStorage = { upload: vi.fn() };
       const store = new PrismaStore(prisma, { screenshotStorage: storage });
@@ -244,7 +255,7 @@ describe("PrismaStore — screenshot cleanup", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Failed inserts — only discard an upload no stored row references
+// Failed inserts — only a replay's unreferenced upload is discarded
 // ---------------------------------------------------------------------------
 
 describe("PrismaStore — upload cleanup after a failed insert", () => {
@@ -297,15 +308,17 @@ describe("PrismaStore — upload cleanup after a failed insert", () => {
     expect(storage.delete).toHaveBeenCalledWith("https://cdn.example.com/obj-2.jpg");
   });
 
-  it("discards the just-uploaded object when the insert fails for another reason", async () => {
+  it("keeps the object when the insert fails for another reason — a retry elsewhere may be about to reference it", async () => {
+    // With a deterministic key, a retry on another instance rewrites this
+    // object and inserts the row pointing at it after this lookup would run.
     const prisma = fakePrisma();
-    const storage = uniqueKeyStorage();
+    const storage = deterministicStorage();
     const outage = Object.assign(new Error("Can't reach database server"), { code: "P1001" });
     vi.spyOn(prisma.sitepingFeedback, "create").mockRejectedValueOnce(outage);
 
     await expect(new PrismaStore(prisma, { screenshotStorage: storage }).createFeedback(input())).rejects.toBe(outage);
 
-    expect(storage.delete).toHaveBeenCalledWith("https://cdn.example.com/obj-1.jpg");
+    expect(storage.delete).not.toHaveBeenCalled();
   });
 
   it("keeps the object when the reference lookup itself fails (an orphan beats data loss)", async () => {

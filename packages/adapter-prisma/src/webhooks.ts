@@ -120,17 +120,16 @@ function truncate(text: string, max = 300): string {
 }
 
 /**
- * Escape untrusted `text` and truncate it so the ESCAPED result fits `max`.
- * Truncation walks whole characters and escapes each one, so an escape
- * sequence (`&amp;`, `\[`) is never cut in half — and escaping can grow a
- * value several-fold, so sizing the raw text alone would not guarantee fit.
+ * Join escaped `units` (one per source character) and truncate so the ESCAPED
+ * result fits `max`. Truncation drops whole units, so an escape sequence
+ * (`&amp;`, `\[`, `%28`) is never cut in half — and escaping can grow a value
+ * several-fold, so sizing the raw text alone would not guarantee fit.
  */
-function escapeWithin(text: string, max: number, escapeText: (text: string) => string): string {
-  const escaped = escapeText(text);
+function fitEscaped(units: readonly string[], max: number): string {
+  const escaped = units.join("");
   if (escaped.length <= max) return escaped;
   let out = "";
-  for (const char of text) {
-    const unit = escapeText(char);
+  for (const unit of units) {
     if (out.length + unit.length > max - 1) break;
     out += unit;
   }
@@ -161,7 +160,7 @@ function escapeSlackText(text: string): string {
  */
 function buildSlackPayload(feedback: FeedbackRecord): SlackWebhookPayload {
   const preview = escapeSlackText(truncate(feedback.message));
-  const escapeField = (value: string, max: number) => escapeWithin(value, max, escapeSlackText);
+  const escapeField = (value: string, max: number) => fitEscaped(Array.from(value, escapeSlackText), max);
   // Two halves + "*From:*  ()" stay under the text-object limit.
   const fromHalf = Math.floor((SLACK_TEXT_MAX - 11) / 2);
   const headline = `New ${feedback.type} feedback from ${feedback.authorName}`;
@@ -211,13 +210,60 @@ const DISCORD_FIELD_VALUE_MAX = 1024;
 const DISCORD_MARKDOWN = /[\\*_~`|>#[\]()<]/g;
 
 /**
- * Backslash-escape Discord markdown in untrusted text, sized to `max` (see
- * `escapeWithin`). Feedback text is typed by anonymous visitors: unescaped,
+ * An http(s) URL, bare or in Discord's `<url>` link form, which Discord
+ * autolinks. Backslash escapes inside it would land in the link (browsers
+ * read `\` as `/`), so its characters are not escaped: only `[`, `]`, `(`,
+ * `)` inside the link are percent-encoded, which keeps the address while
+ * making sure no masked link can form (see `discordUrlUnits` for where a
+ * bare link ends). `<https://…>` is never a mention. The capture group makes
+ * `split` keep the URLs.
+ */
+const DISCORD_AUTOLINK = /(<https?:\/\/[^\s<>]+>|https?:\/\/[^\s<>]+)/i;
+
+/** Punctuation Discord leaves out of the end of a bare autolink. */
+const DISCORD_LINK_TRAILER = `.,:;"')]`;
+
+const escapeMarkdownChar = (char: string) => char.replace(DISCORD_MARKDOWN, "\\$&");
+// Global so it stays complete on any input, not only the single code
+// points `discordUrlUnits` passes in.
+const encodeLinkChar = (char: string) =>
+  char.replace(/[[\]()]/g, (bracket) => `%${bracket.charCodeAt(0).toString(16).toUpperCase()}`);
+const count = (text: string, char: string) => text.split(char).length - 1;
+
+/**
+ * Units for a URL token (see `DISCORD_AUTOLINK`). A bare URL's trailing
+ * `.,:;"')]` is the sentence around it — `(see https://…).` — and Discord
+ * ends the link before it, so it goes out raw: encoded, it would change the
+ * address; escaped, the `\` would. Raw `)` and `]` are harmless because an
+ * unescaped `[` is never sent, so no masked link can start. A `)` or `]`
+ * closing a bracket opened inside the URL stays in it (`…/Mercury_(planet)`).
+ */
+function discordUrlUnits(url: string): string[] {
+  let end = url.length;
+  while (end > 0) {
+    const last = url.charAt(end - 1);
+    if (!DISCORD_LINK_TRAILER.includes(last)) break;
+    const opener = last === ")" ? "(" : last === "]" ? "[" : "";
+    const link = url.slice(0, end);
+    if (opener && count(link, opener) >= count(link, last)) break;
+    end -= 1;
+  }
+  return [...Array.from(url.slice(0, end), encodeLinkChar), ...url.slice(end)];
+}
+
+/**
+ * Escape untrusted text for Discord, sized to `max` (see `fitEscaped`).
+ * Feedback text is typed by anonymous visitors: unescaped,
  * `[Reset your password](https://evil.example)` renders as a disguised link —
- * the same threat `escapeSlackText` handles.
+ * the same threat `escapeSlackText` handles. URLs inside the text stay
+ * linkable (see `DISCORD_AUTOLINK`).
  */
 function escapeDiscordText(text: string, max: number): string {
-  return escapeWithin(text, max, (value) => value.replace(DISCORD_MARKDOWN, "\\$&"));
+  // `split` alternates plain text (even indexes) and URLs (odd indexes).
+  const units = text
+    .split(DISCORD_AUTOLINK)
+    .flatMap((part, index) => (index % 2 === 1 ? discordUrlUnits(part) : Array.from(part, escapeMarkdownChar)));
+  return fitEscaped(units, max);
 }
 
 /**
@@ -301,11 +347,12 @@ export async function dispatchWebhook(config: WebhookConfig, feedback: FeedbackR
 
     // Build merged headers — caller-supplied entries override `Content-Type`
     // when they explicitly need a different mime (rare for chat webhooks, but
-    // possible for some generic receivers). `Headers.set` matches names
-    // case-insensitively: an object spread would keep `content-type` next to
-    // `Content-Type` and fetch would send both values combined.
-    const headers = new Headers({ "Content-Type": "application/json" });
-    for (const [name, value] of Object.entries(config.headers ?? {})) headers.set(name, value);
+    // possible for some generic receivers). Names are case-insensitive: a
+    // `content-type` spread next to our `Content-Type` would make fetch send
+    // both values combined, so the default is dropped for any spelling.
+    const custom = config.headers ?? {};
+    const setsContentType = Object.keys(custom).some((name) => name.toLowerCase() === "content-type");
+    const headers = setsContentType ? custom : { "Content-Type": "application/json", ...custom };
 
     // Use AbortSignal.timeout when available (Node 17.3+, all modern browsers).
     // Fall back to a manual controller for environments lacking it.
@@ -338,13 +385,17 @@ function reportError(config: WebhookConfig, err: Error, feedbackId: string): voi
       // Defense-in-depth: a thrown user callback must not bubble back up
       // and crash the request that already succeeded persisting the
       // feedback. Surface the original error too so it isn't silently lost.
-      console.warn(
-        `[siteping] webhook onError() callback threw for feedback ${feedbackId}: ${String(callbackErr)} (original error: ${err.message})`,
+      warnWithoutUrl(
+        config.url,
+        `webhook onError() callback threw for feedback ${feedbackId}: ${String(callbackErr)} (original error: ${err.message})`,
       );
     }
     return;
   }
-  console.warn(`[siteping] webhook to ${webhookOrigin(config.url)} failed for feedback ${feedbackId}: ${err.message}`);
+  warnWithoutUrl(
+    config.url,
+    `webhook to ${webhookOrigin(config.url)} failed for feedback ${feedbackId}: ${err.message}`,
+  );
 }
 
 /**
@@ -358,6 +409,16 @@ function webhookOrigin(url: string): string {
   } catch {
     return "<invalid URL>";
   }
+}
+
+/**
+ * `console.warn` with every copy of the webhook URL reduced to its origin.
+ * Node's fetch copies the URL it was given into some errors ("…a URL that
+ * includes credentials: <url>", "Failed to parse URL from <url>"), and an
+ * `onError` that rethrows or wraps one carries it into its own error.
+ */
+function warnWithoutUrl(url: string, message: string): void {
+  console.warn(`[siteping] ${url ? message.split(url).join(webhookOrigin(url)) : message}`);
 }
 
 /**

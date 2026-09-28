@@ -49,13 +49,7 @@ export function Diagnostics({ diagnostics }: DiagnosticsProps): ReactElement {
 
   const formatTime = (iso: string): string => {
     const date = new Date(iso);
-    if (Number.isNaN(date.getTime())) return iso;
-    try {
-      return date.toLocaleTimeString(locale, { hour12: false });
-    } catch {
-      // Invalid BCP-47 tag from a custom locale ("fr_FR") — fall back to English.
-      return date.toLocaleTimeString("en", { hour12: false });
-    }
+    return Number.isNaN(date.getTime()) ? iso : date.toLocaleTimeString(locale, { hour12: false });
   };
 
   const toggleExpanded = (key: string): void => {

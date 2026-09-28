@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createT } from "../../src/i18n/index.js";
 import { createPageGroupHeader, groupFeedbacksByPage, PanelSortControls, sortFeedbacks } from "../../src/panel-sort.js";
 import { buildThemeColors } from "../../src/styles/theme.js";
+import { trackClickListeners } from "../helpers.js";
 
 function makeFeedback(overrides: Partial<FeedbackResponse> = {}): FeedbackResponse {
   return {
@@ -230,53 +231,6 @@ describe("PanelSortControls", () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it("clicking the trigger again closes the menu inside a shadow root", () => {
-    vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb: FrameRequestCallback) => {
-      cb(0);
-      return 0;
-    });
-    const host = document.createElement("div");
-    document.body.appendChild(host);
-    const controls = new PanelSortControls(buildThemeColors(), vi.fn(), createT("en"));
-    host.attachShadow({ mode: "open" }).appendChild(controls.element);
-    const sortButton = controls.element.querySelector<HTMLButtonElement>(".sp-sort-btn")!;
-
-    sortButton.click();
-    expect(controls.element.querySelector(".sp-sort-menu")).not.toBeNull();
-
-    // At document level the click target is retargeted to the shadow host.
-    sortButton.click();
-    expect(controls.element.querySelector(".sp-sort-menu")).toBeNull();
-
-    controls.destroy();
-    host.remove();
-    vi.restoreAllMocks();
-  });
-
-  it("destroy before the next frame leaves no document click listener behind", () => {
-    // Manual frame queue honouring cancelAnimationFrame
-    const frames = new Map<number, FrameRequestCallback>();
-    let nextFrame = 0;
-    vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb: FrameRequestCallback) => {
-      frames.set(++nextFrame, cb);
-      return nextFrame;
-    });
-    vi.spyOn(window, "cancelAnimationFrame").mockImplementation((id: number) => void frames.delete(id));
-    const controls = new PanelSortControls(buildThemeColors(), vi.fn(), createT("en"));
-    document.body.appendChild(controls.element);
-    const addSpy = vi.spyOn(document, "addEventListener");
-    try {
-      controls.element.querySelector<HTMLButtonElement>(".sp-sort-btn")!.click();
-      controls.destroy();
-      for (const cb of frames.values()) cb(0);
-
-      expect(addSpy.mock.calls.filter(([type]) => type === "click")).toEqual([]);
-    } finally {
-      controls.element.remove();
-      vi.restoreAllMocks();
-    }
-  });
-
   it("closes the menu on outside click, Escape, and destroy", () => {
     vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb: FrameRequestCallback) => {
       cb(0);
@@ -303,6 +257,74 @@ describe("PanelSortControls", () => {
 
     expect(controls.element.querySelector(".sp-sort-menu")).toBeNull();
     expect(sortButton.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("toggles on its trigger and closes on any other click from a closed shadow root", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = host.attachShadow({ mode: "closed" });
+    const controls = new PanelSortControls(buildThemeColors(), vi.fn(), createT("en"));
+    const elsewhere = document.createElement("button");
+    root.append(controls.element, elsewhere);
+    const sortButton = controls.element.querySelector<HTMLButtonElement>(".sp-sort-btn")!;
+    const menuOpen = () => controls.element.querySelector(".sp-sort-menu") !== null;
+
+    // The trigger itself, elsewhere in the same shadow tree, the host page.
+    for (const target of [sortButton, elsewhere, document.body]) {
+      sortButton.click();
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      expect(menuOpen()).toBe(true);
+      target.click();
+      expect(menuOpen()).toBe(false);
+    }
+
+    controls.destroy();
+    host.remove();
+  });
+
+  it("closes the menu on a click on the group toggle or the empty bar beside it", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = host.attachShadow({ mode: "closed" });
+    const onChange = vi.fn();
+    const controls = new PanelSortControls(buildThemeColors(), onChange, createT("en"));
+    root.append(controls.element);
+    const sortButton = controls.element.querySelector<HTMLButtonElement>(".sp-sort-btn")!;
+    const groupToggle = controls.element.querySelector<HTMLButtonElement>(".sp-group-toggle")!;
+    const menuOpen = () => controls.element.querySelector(".sp-sort-menu") !== null;
+
+    for (const target of [groupToggle, controls.element]) {
+      sortButton.click();
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      target.click();
+      expect(menuOpen()).toBe(false);
+      expect(sortButton.getAttribute("aria-expanded")).toBe("false");
+    }
+    // The toggle click still groups the list.
+    expect(controls.groupByPage).toBe(true);
+    expect(onChange).toHaveBeenCalledTimes(1);
+
+    controls.destroy();
+    host.remove();
+  });
+
+  it("leaves no click listener behind when destroyed with its menu open", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = host.attachShadow({ mode: "closed" });
+    const controls = new PanelSortControls(buildThemeColors(), vi.fn(), createT("en"));
+    root.append(controls.element);
+    const liveClickListeners = trackClickListeners(document, root);
+    try {
+      controls.element.querySelector<HTMLButtonElement>(".sp-sort-btn")!.click();
+      controls.destroy();
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+      expect(liveClickListeners()).toEqual([]);
+    } finally {
+      vi.restoreAllMocks();
+      host.remove();
+    }
   });
 });
 

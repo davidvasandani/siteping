@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // ---------------------------------------------------------------------------
@@ -667,7 +667,7 @@ model SitepingFeedback {
   });
 
   // -----------------------------------------------------------------------
-  // User-owned parts of a Siteping field (@map, @ignore, relation name, comment)
+  // User-owned parts of a Siteping field (@map, relation name, comment)
   // -----------------------------------------------------------------------
 
   describe("user-owned field parts", () => {
@@ -681,11 +681,11 @@ model SitepingFeedback {
       expect(readFileSync(schemaPath, "utf-8")).toBe(schema);
     });
 
-    it("keeps @map, @ignore and the trailing comment when rewriting a drifted field", () => {
+    it("keeps @map and the trailing comment when rewriting a drifted field", () => {
       // message lost its @db.Text — the rewrite restores it and nothing else.
       const schema = syncedSchema().replace(
         /^(\s*)message\s+String\s+@db\.Text$/m,
-        '$1message String @map("body") @ignore // client text',
+        '$1message String @map("body") // client text',
       );
       writeFileSync(schemaPath, schema);
 
@@ -695,8 +695,22 @@ model SitepingFeedback {
         { model: "SitepingFeedback", field: "message", action: "updated", detail: "+@db.Text" },
       ]);
       expect(readFileSync(schemaPath, "utf-8")).toMatch(
-        /^\s*message\s+String\s+@db\.Text @map\("body"\) @ignore \/\/ client text$/m,
+        /^\s*message\s+String\s+@db\.Text @map\("body"\) \/\/ client text$/m,
       );
+    });
+
+    it("removes an @ignore from a Siteping field", () => {
+      // @ignore drops the field from Prisma Client, but the adapter writes
+      // every Siteping column: each feedback submission would fail.
+      const synced = syncedSchema();
+      writeFileSync(schemaPath, synced.replace(/^(\s*url\s+String)$/m, "$1 @ignore"));
+
+      const result = syncPrismaModels(schemaPath);
+
+      expect(result.changes).toEqual([
+        { model: "SitepingFeedback", field: "url", action: "updated", detail: "-@ignore" },
+      ]);
+      expect(readFileSync(schemaPath, "utf-8")).toBe(synced);
     });
 
     it("keeps a named relation on both sides", () => {
@@ -809,6 +823,34 @@ model SitepingFeedback {
 
       expect(readFileSync(schemaPath, "utf-8")).toContain(
         '@relation(fields: [feedbackId], references: [id], onDelete: Cascade, map: "fk_annotation_feedback")',
+      );
+    });
+
+    it("leaves an onUpdate on the relation alone", () => {
+      // Siteping never sets it (its ids never change), and SQL Server may need
+      // `NoAction` there to break a cycle of cascade paths.
+      const schema = syncedSchema().replace("onDelete: Cascade)", "onDelete: Cascade, onUpdate: NoAction)");
+      writeFileSync(schemaPath, schema);
+
+      const result = syncPrismaModels(schemaPath);
+
+      expect(result.changes).toEqual([]);
+      expect(readFileSync(schemaPath, "utf-8")).toBe(schema);
+    });
+
+    it("keeps onUpdate and a map: constraint name, in order, when rewriting the relation", () => {
+      writeFileSync(
+        schemaPath,
+        syncedSchema().replace(
+          "@relation(fields: [feedbackId], references: [id], onDelete: Cascade)",
+          '@relation(fields: [feedbackId], references: [id], onUpdate: NoAction, map: "fk_annotation_feedback")',
+        ),
+      );
+
+      syncPrismaModels(schemaPath);
+
+      expect(readFileSync(schemaPath, "utf-8")).toContain(
+        '@relation(fields: [feedbackId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_annotation_feedback")',
       );
     });
   });
@@ -1059,6 +1101,15 @@ model SitepingFeedback {
       expect(readFileSync(mainPath, "utf-8")).not.toContain("@db.");
     });
 
+    it("names the file that fails to parse", () => {
+      const broken = join(folder, "broken.prisma");
+      writeFileSync(mainPath, MINIMAL_SCHEMA);
+      writeFileSync(broken, "model Broken {\n  id String @id\n");
+
+      expect(() => syncPrismaModels(mainPath)).toThrow(`${broken}: Expecting`);
+      expect(readFileSync(mainPath, "utf-8")).toBe(MINIMAL_SCHEMA);
+    });
+
     it("leaves sibling .prisma files alone outside a schema folder", () => {
       // prisma/schema.prisma is a single-file schema — Prisma ignores its neighbours.
       const single = join(tmpDir, "prisma", "schema.prisma");
@@ -1066,6 +1117,42 @@ model SitepingFeedback {
       writeFileSync(join(tmpDir, "prisma", "old.prisma"), sitepingModels());
 
       expect(syncPrismaModels(single).addedModels).toEqual(["SitepingFeedback", "SitepingAnnotation"]);
+    });
+
+    it("treats a project root named schema as a single-file schema", () => {
+      // A package root is not a schema folder: another app's schema or a
+      // generated client's copy under it must be neither read nor written.
+      const project = join(tmpDir, "schema");
+      const rootSchema = join(project, "schema.prisma");
+      const others = [join(project, "apps", "admin", "siteping.prisma"), join(project, "node_modules", "x.prisma")];
+      const models = sitepingModels().replace(/^\s*screenshotRegion\s+Json\?\s*\n/m, "");
+      mkdirSync(join(project, "apps", "admin"), { recursive: true });
+      mkdirSync(join(project, "node_modules"));
+      writeFileSync(join(project, "package.json"), "{}");
+      writeFileSync(rootSchema, MINIMAL_SCHEMA);
+      for (const other of others) writeFileSync(other, models);
+
+      const result = syncPrismaModels(rootSchema);
+
+      expect(result.addedModels).toEqual(["SitepingFeedback", "SitepingAnnotation"]);
+      expect(readFileSync(rootSchema, "utf-8")).toContain("model SitepingFeedback {");
+      for (const other of others) expect(readFileSync(other, "utf-8")).toBe(models);
+    });
+
+    it.each([
+      ["node_modules", "client"],
+      [".generated", "client"],
+    ])("ignores .prisma files under %s in a schema folder", (...segments) => {
+      const copy = join(folder, ...segments, "schema.prisma");
+      const models = sitepingModels().replace(/^\s*screenshotRegion\s+Json\?\s*\n/m, "");
+      mkdirSync(dirname(copy), { recursive: true });
+      writeFileSync(mainPath, MINIMAL_SCHEMA);
+      writeFileSync(copy, models);
+
+      const result = syncPrismaModels(mainPath);
+
+      expect(result.addedModels).toEqual(["SitepingFeedback", "SitepingAnnotation"]);
+      expect(readFileSync(copy, "utf-8")).toBe(models);
     });
   });
 

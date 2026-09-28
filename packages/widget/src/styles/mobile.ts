@@ -132,7 +132,8 @@ export const MOBILE_CSS = `
       height: 44px;
     }
 
-    .sp-detail-actions button {
+    .sp-detail-actions button,
+    .sp-detail-actions a {
       height: 44px;
     }
   }

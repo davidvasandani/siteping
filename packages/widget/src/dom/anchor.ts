@@ -1,5 +1,5 @@
 import { finder } from "@medv/finder";
-import type { AnchorData, RectData } from "@siteping/core";
+import { ANCHOR_ELEMENT_ID_MAX, ANCHOR_ELEMENT_TAG_MAX, type AnchorData, type RectData } from "@siteping/core";
 import { generateFingerprint } from "./fingerprint.js";
 import { adjacentText, neighborText } from "./text-context.js";
 import { generateXPath } from "./xpath.js";
@@ -7,9 +7,43 @@ import { generateXPath } from "./xpath.js";
 /** HTML attribute hosts use to mark stable semantic anchors. */
 export const ANCHOR_KEY_ATTR = "data-feedback-anchor";
 
-/** Server-side length caps for `elementTag` / `elementId`. */
-const MAX_ELEMENT_TAG = 200;
-const MAX_ELEMENT_ID = 500;
+/**
+ * Joins the per-tree selectors of an element inside open shadow roots,
+ * outermost host first (`my-card >>> .title`). Puppeteer's deep-descendant
+ * notation; finder never emits it, since it escapes spaces and `>` inside
+ * attribute values.
+ */
+export const SHADOW_BOUNDARY = " >>> ";
+
+const FINDER_OPTIONS = {
+  // Filter out CSS-in-JS hashed class names
+  className: (name: string) => !/^(css|sc|emotion|styled)-/.test(name) && !/^[a-z]{1,3}[A-Za-z0-9]{4,8}$/.test(name),
+  // Prefer stable attributes
+  attr: (name: string) => ["data-testid", "data-id", "role", "aria-label"].includes(name),
+  // Exclude framework-generated dynamic IDs
+  idName: (name: string) => !name.startsWith("radix-") && !/^:r[0-9]+:$/.test(name),
+  seedMinLength: 3,
+  optimizedMinLength: 2,
+};
+
+/** Like `element.closest()`, but pierces shadow boundaries upwards. */
+function closestCrossShadow(element: Element, selector: string): Element | null {
+  let current: Element | null = element;
+  while (current) {
+    const match = current.closest(selector);
+    if (match) return match;
+    const root = current.getRootNode();
+    current = root instanceof ShadowRoot ? root.host : null;
+  }
+  return null;
+}
+
+/** Like `element.parentElement`, but pierces shadow boundaries upwards. */
+function parentElementCrossShadow(element: Element): Element | null {
+  if (element.parentElement) return element.parentElement;
+  const root = element.getRootNode();
+  return root instanceof ShadowRoot ? root.host : null;
+}
 
 /**
  * Generate a multi-selector anchor for a DOM element.
@@ -21,18 +55,26 @@ const MAX_ELEMENT_ID = 500;
  * 3. CSS selector via @medv/finder
  * 4. XPath
  * 5. Smart scan (fingerprint + text + prefix/suffix + neighbor)
+ *
+ * Selectors cannot see across a shadow boundary, so an element inside open
+ * shadow roots gets one finder selector per tree, joined by SHADOW_BOUNDARY.
  */
 export function generateAnchor(element: Element): AnchorData {
-  const cssSelector = finder(element, {
-    // Filter out CSS-in-JS hashed class names
-    className: (name: string) => !/^(css|sc|emotion|styled)-/.test(name) && !/^[a-z]{1,3}[A-Za-z0-9]{4,8}$/.test(name),
-    // Prefer stable attributes
-    attr: (name: string) => ["data-testid", "data-id", "role", "aria-label"].includes(name),
-    // Exclude framework-generated dynamic IDs
-    idName: (name: string) => !name.startsWith("radix-") && !/^:r[0-9]+:$/.test(name),
-    seedMinLength: 3,
-    optimizedMinLength: 2,
-  });
+  const selectors: string[] = [];
+  let current: Element | null = element;
+  while (current) {
+    const root = current.getRootNode();
+    if (root instanceof ShadowRoot) {
+      // finder types `root` as an Element but only queries it: a ShadowRoot
+      // scopes the uniqueness checks to that tree.
+      selectors.unshift(finder(current, { ...FINDER_OPTIONS, root: root as unknown as Element }));
+      current = root.host;
+    } else {
+      selectors.unshift(finder(current, FINDER_OPTIONS));
+      current = null;
+    }
+  }
+  const cssSelector = selectors.join(SHADOW_BOUNDARY);
 
   const xpath = generateXPath(element);
 
@@ -44,7 +86,7 @@ export function generateAnchor(element: Element): AnchorData {
   const fingerprint = generateFingerprint(element);
   const neighbor = neighborText(element);
 
-  const semanticAncestor = element.closest(`[${ANCHOR_KEY_ATTR}]`);
+  const semanticAncestor = closestCrossShadow(element, `[${ANCHOR_KEY_ATTR}]`);
   const anchorKey = semanticAncestor?.getAttribute(ANCHOR_KEY_ATTR) ?? null;
 
   return {
@@ -55,10 +97,10 @@ export function generateAnchor(element: Element): AnchorData {
     textSuffix,
     fingerprint,
     neighborText: neighbor,
-    elementTag: element.tagName.slice(0, MAX_ELEMENT_TAG),
+    elementTag: element.tagName.slice(0, ANCHOR_ELEMENT_TAG_MAX),
     // Over-long ids are dropped, not truncated: a truncated id matches nothing
     // (or the wrong element) — the resolver falls back to other strategies.
-    elementId: element.id && element.id.length <= MAX_ELEMENT_ID ? element.id : undefined,
+    elementId: element.id && element.id.length <= ANCHOR_ELEMENT_ID_MAX ? element.id : undefined,
     anchorKey,
   };
 }
@@ -78,16 +120,14 @@ function containsRect(el: Element, rect: DOMRect): boolean {
  *    them keeps the percentage-based rect stable across viewport changes
  *    instead of stretching to the width of `<main>` or `<body>`.
  * 2. Smallest ancestor that contains the rect (legacy behavior).
- * 3. `document.body` when it contains the rect, else `<html>` — a short body
- *    (or its default margin) leaves blank page area outside it.
+ * 3. `document.body` fallback — it may not contain the rect (a short body, its
+ *    default margin); the HTTP client clips the rect for the server schema.
+ *
+ * Both ancestor walks climb out of open shadow roots through their hosts.
  */
 export function findAnchorElement(rect: DOMRect, root: Element = document.documentElement): Element {
-  const centerX = rect.x + rect.width / 2;
-  const centerY = rect.y + rect.height / 2;
-  const fallback = () => (containsRect(document.body, rect) ? document.body : document.documentElement);
-
-  const elementAtCenter = document.elementFromPoint(centerX, centerY);
-  if (!elementAtCenter || elementAtCenter === root) return fallback();
+  const elementAtCenter = deepElementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+  if (!elementAtCenter || elementAtCenter === root) return document.body;
 
   // Pass 1 — semantic anchor (host-controlled, most stable)
   let current: Element | null = elementAtCenter;
@@ -95,38 +135,53 @@ export function findAnchorElement(rect: DOMRect, root: Element = document.docume
     if (current.hasAttribute(ANCHOR_KEY_ATTR) && containsRect(current, rect)) {
       return current;
     }
-    current = current.parentElement;
+    current = parentElementCrossShadow(current);
   }
 
   // Pass 2 — original behavior: smallest ancestor that contains the rect
   current = elementAtCenter;
   while (current && current !== document.body) {
     if (containsRect(current, rect)) return current;
-    current = current.parentElement;
+    current = parentElementCrossShadow(current);
   }
 
-  return fallback();
+  return document.body;
 }
 
-const clamp01 = (v: number): number => Math.min(1, Math.max(0, v));
+/**
+ * The element under a viewport point, inside open shadow roots too. Document
+ * hit-testing retargets to the outermost shadow host, so drill through open
+ * roots to the element actually under the point. Only an element of that root
+ * is accepted (slotted content hit-tests to the host itself), so every step
+ * goes strictly deeper; closed roots stay opaque.
+ */
+export function deepElementFromPoint(x: number, y: number): Element | null {
+  // The typeof guard stays although lib.dom types it as always-present:
+  // jsdom doesn't implement ShadowRoot.elementFromPoint.
+  let element = document.elementFromPoint(x, y);
+  let shadowRoot = element?.shadowRoot;
+  while (shadowRoot && typeof shadowRoot.elementFromPoint === "function") {
+    const inner = shadowRoot.elementFromPoint(x, y);
+    if (!inner || inner.getRootNode() !== shadowRoot) break;
+    element = inner;
+    shadowRoot = inner.shadowRoot;
+  }
+  return element;
+}
 
 /**
  * Convert absolute rectangle coordinates to percentages
  * relative to an anchor element's bounding box.
- *
- * The rect is intersected with the anchor bounds first: the server schema
- * rejects any field outside [0, 1], and even `<html>` may not contain a rect
- * drawn in blank viewport space. A rect fully outside collapses onto the
- * nearest edge (zero width/height) rather than losing the feedback.
  */
 export function rectToPercentages(rect: DOMRect, anchorBounds: DOMRect): RectData {
   // Guard against zero-dimension anchors (collapsed/hidden elements)
   if (anchorBounds.width <= 0 || anchorBounds.height <= 0) {
     return { xPct: 0, yPct: 0, wPct: 1, hPct: 1 };
   }
-  const x0 = clamp01((rect.x - anchorBounds.x) / anchorBounds.width);
-  const y0 = clamp01((rect.y - anchorBounds.y) / anchorBounds.height);
-  const x1 = clamp01((rect.x + rect.width - anchorBounds.x) / anchorBounds.width);
-  const y1 = clamp01((rect.y + rect.height - anchorBounds.y) / anchorBounds.height);
-  return { xPct: x0, yPct: y0, wPct: x1 - x0, hPct: y1 - y0 };
+  return {
+    xPct: (rect.x - anchorBounds.x) / anchorBounds.width,
+    yPct: (rect.y - anchorBounds.y) / anchorBounds.height,
+    wPct: rect.width / anchorBounds.width,
+    hPct: rect.height / anchorBounds.height,
+  };
 }

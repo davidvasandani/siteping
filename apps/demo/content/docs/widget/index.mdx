@@ -18,7 +18,7 @@ const siteping = initSiteping({
 });
 ```
 
-`initSiteping` is the package's main runtime export, alongside the two i18n helpers (`registerLocale`, `loadLocale`) and the TypeScript types. It weighs about **33 KB gzipped** (ESM), lazy-loads its heavier parts (panel, locales, screenshot engine), and renders inside a closed Shadow DOM so your page styles and the widget's never collide.
+`initSiteping` is the package's main runtime export, alongside the two i18n helpers (`registerLocale`, `loadLocale`) and the TypeScript types. It weighs about **35 KB gzipped** (ESM), lazy-loads its heavier parts (panel, locales, screenshot engine), and renders inside a closed Shadow DOM so your page styles and the widget's never collide.
 
 ## When the widget shows — and when it doesn't
 
@@ -68,7 +68,7 @@ siteping.destroy();               // full teardown, restores all patched globals
 |---|---|---|
 | `feedback:sent` | the created feedback | A submission succeeded |
 | `feedback:deleted` | the feedback id | A feedback was deleted |
-| `feedback:error` | the `Error` | A feedback API call failed — same payload as the `onError` config callback |
+| `feedback:error` | the `Error` | A feedback API call failed — same payload as the `onError` config callback, which additionally receives [panel action](/docs/widget/panel-actions#errors) failures |
 | `panel:open` / `panel:close` | — | The panel opened / closed |
 | `annotation:start` / `annotation:end` | — | An annotation session started / ended. `end` fires whether the user submitted or cancelled, and both entry paths — the FAB and [right-click comments](/docs/widget/right-click) — emit the symmetric pair, so you can pause chat bubbles or analytics overlays in between |
 
@@ -90,11 +90,11 @@ export function Feedback() {
 }
 ```
 
-The hook returns `null` until it mounts, then the instance. Changing `endpoint` or another structural option requires a remount; changing a callback does not — **every** callback the config accepts (`onFeedbackSent`, `onError`, `onOpen`, `onClose`, `onAnnotationStart`, `onAnnotationEnd`, `onSkip`) is read at call time, so a handler that closes over fresh state fires with that state. They also go quiet after unmount, so a late response can't call into a torn-down tree.
+The hook returns `null` until it mounts, then the instance. Changing `endpoint` or another structural option requires a remount; changing a callback does not — **every** callback the config accepts (`onFeedbackSent`, `onError`, `onOpen`, `onClose`, `onAnnotationStart`, `onAnnotationEnd`, `onSkip`) is read at call time, so a handler that closes over fresh state fires with that state — and so are the [panel actions](/docs/widget/panel-actions#react) callbacks. They also go quiet after unmount, so a late response can't call into a torn-down tree.
 
 ## Handling errors
 
-`onError` receives errors with two useful fields — `code` (`"NETWORK" | "VALIDATION" | "AUTH" | "SERVER"`) and `retryable` (boolean):
+`onError` receives errors with two useful fields — `code` (`"NETWORK" | "VALIDATION" | "AUTH" | "SERVER" | "TIMEOUT"`, the last one only in `store` mode) and `retryable` (boolean):
 
 ```ts
 initSiteping({
@@ -116,5 +116,5 @@ Feedback has four statuses (`open`, `in_progress`, `resolved`, `wont_fix`). The 
 ## Reliability details you get for free
 
 - **Retry with backoff** — failed submissions retry 3 times (10 s timeout, exponential backoff with jitter). Server errors and network failures retry; validation errors don't.
-- **Offline queue** — when a submission still fails after the retries, the payload is queued in localStorage (up to 20 entries) and flushed on the next page load. Only transient failures are queued (network errors, 5xx): a 4xx is the server's verdict on the payload and would fail identically on replay, so it is reported through `onError` and never queued. The queue stores payloads only — never tokens or headers, which are recomputed at flush time.
-- Both apply to HTTP mode (`endpoint`). In client-side [`store` mode](/docs/adapters/localstorage) writes are local, so there is nothing to retry.
+- **Offline queue** — when a submission still fails after the retries, the payload is queued in localStorage (up to 20 entries) and flushed on the next page load. Only transient failures are queued (network errors, 5xx): a 4xx is the server's verdict on the payload and would fail identically on replay, so it is reported through `onError` and never queued. Every resend from the same popup keeps the feedback's id, so it replaces its queued attempt and the server never stores it twice. The queue stores payloads only — never tokens or headers, which are recomputed at flush time. If localStorage runs out of space, queued screenshots are dropped first (oldest first), then the oldest entries, and a console warning says what was dropped.
+- **Nothing hangs a send** — its response body gets a 10 s window too (a server that sends its headers and then stalls counts as a timeout), and a `headers` factory must settle within 10 s. Retries and the queue apply to HTTP mode (`endpoint`). In client-side [`store` mode](/docs/adapters/localstorage) nothing is retried or queued: the widget stops waiting on the store's `createFeedback` after 30 s and reports a retryable error (code `"TIMEOUT"`), but cannot cancel the call — a network-backed [custom store](/docs/adapters/writing-an-adapter) should bound its own calls.

@@ -30,6 +30,9 @@ const FEEDBACK: FeedbackRecord = {
   diagnostics: null,
 };
 
+/** Node's fetch, captured before `beforeEach` swaps in the spy. */
+const realFetch = globalThis.fetch;
+
 let fetchSpy: ReturnType<typeof vi.fn>;
 let warnSpy: ReturnType<typeof vi.spyOn>;
 
@@ -150,7 +153,9 @@ describe("buildWebhookPayload — untrusted input", () => {
 
   it("escapes Discord markdown so a visitor can't send a disguised masked link", () => {
     const phish = "[Reset your password](https://evil.example/phish)";
-    const escaped = "\\[Reset your password\\]\\(https://evil.example/phish\\)";
+    // The URL keeps its characters (it stays linkable); the `[`, `]` and `(`
+    // around it are escaped, so no masked link can form.
+    const escaped = "\\[Reset your password\\]\\(https://evil.example/phish)";
     const payload = buildWebhookPayload("discord", {
       ...FEEDBACK,
       message: `**urgent** ${phish}`,
@@ -168,7 +173,7 @@ describe("buildWebhookPayload — untrusted input", () => {
     expect(embed?.title).toBe("bug — \\_\\_proj\\_\\_");
     expect(embed?.fields.find((f) => f.name === "URL")?.value).toBe(escaped);
     expect(embed?.fields.find((f) => f.name === "Author")?.value).toBe(`${escaped} (alice@example.com)`);
-    expect(embed?.fields.find((f) => f.name === "Viewport")?.value).toBe("\\[x\\]\\(https://e.co\\)");
+    expect(embed?.fields.find((f) => f.name === "Viewport")?.value).toBe("\\[x\\]\\(https://e.co)");
   });
 
   it("keeps every Discord value within the API limits, even after escaping", () => {
@@ -192,6 +197,62 @@ describe("buildWebhookPayload — untrusted input", () => {
     expect(value.length).toBeLessThanOrEqual(1024);
     expect(value).toMatch(/^(\\_)+…$/);
   });
+
+  describe("Discord URLs", () => {
+    const urlField = (url: string) =>
+      buildWebhookPayload("discord", { ...FEEDBACK, url }).embeds[0]?.fields.find((f) => f.name === "URL")?.value;
+    const description = (message: string) =>
+      buildWebhookPayload("discord", { ...FEEDBACK, message }).embeds[0]?.description;
+
+    it("keeps a full page URL linkable — no backslash lands inside Discord's autolink", () => {
+      expect(urlField("https://example.com/docs/some_page_(v2)?q=a*b~c")).toBe(
+        "https://example.com/docs/some_page_%28v2%29?q=a*b~c",
+      );
+    });
+
+    it("percent-encodes brackets and parens so a URL can't smuggle in a masked link", () => {
+      expect(urlField("https://ok.example/[Reset-password](https://evil.example)")).toBe(
+        "https://ok.example/%5BReset-password%5D%28https://evil.example%29",
+      );
+    });
+
+    it("escapes everything around an http(s) URL", () => {
+      expect(urlField("/orders/__draft__")).toBe("/orders/\\_\\_draft\\_\\_");
+      expect(urlField("https://ok.example [Reset](https://evil.example)")).toBe(
+        "https://ok.example \\[Reset\\]\\(https://evil.example)",
+      );
+    });
+
+    it("ends a URL where Discord's autolink does, keeping only brackets it opened", () => {
+      // Sentence punctuation after a URL goes out raw: percent-encoded or
+      // backslash-escaped, it would become part of the link's address.
+      expect(description("The button (https://shop.example/cart) is broken.")).toBe(
+        "The button \\(https://shop.example/cart) is broken.",
+      );
+      expect(description("(see https://en.wikipedia.org/wiki/Mercury_(planet)).")).toBe(
+        "\\(see https://en.wikipedia.org/wiki/Mercury_%28planet%29).",
+      );
+      expect(urlField("https://shop.example/list?filter[status]")).toBe("https://shop.example/list?filter%5Bstatus%5D");
+    });
+
+    it("keeps a URL typed into the message linkable while escaping the text around it", () => {
+      expect(description("_Price_ is wrong on https://shop.example/product_42#price_box, please fix")).toBe(
+        "\\_Price\\_ is wrong on https://shop.example/product_42#price_box, please fix",
+      );
+    });
+
+    it("keeps Discord's <url> link form intact, without letting other <…> syntax through", () => {
+      expect(description("see <https://a.example/some_page> or <@&123>")).toBe(
+        "see <https://a.example/some_page> or \\<@&123\\>",
+      );
+    });
+
+    it("never cuts a percent-encoding in half when truncating", () => {
+      const value = urlField(`https://example.com/${"(".repeat(2000)}`) ?? "";
+      expect(value.length).toBeLessThanOrEqual(1024);
+      expect(value).toMatch(/^https:\/\/example\.com\/(%28)+…$/);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -205,7 +266,7 @@ describe("dispatchWebhook", () => {
     const [calledUrl, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
     expect(calledUrl).toBe("https://hooks.slack.com/T/B/X");
     expect(init.method).toBe("POST");
-    expect(new Headers(init.headers).get("Content-Type")).toBe("application/json");
+    expect((init.headers as Record<string, string>)["Content-Type"]).toBe("application/json");
     const sent = JSON.parse(init.body as string) as { text: string };
     expect(sent.text).toContain("Alice");
   });
@@ -237,19 +298,18 @@ describe("dispatchWebhook", () => {
       FEEDBACK,
     );
     const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
-    expect(Object.fromEntries(new Headers(init.headers))).toEqual({
-      "content-type": "application/json",
-      "x-signature": "abc",
-      authorization: "Bearer xyz",
+    expect(init.headers).toEqual({
+      "Content-Type": "application/json",
+      "X-Signature": "abc",
+      Authorization: "Bearer xyz",
     });
   });
 
   it("lets a user header override Content-Type case-insensitively (never sent twice)", async () => {
     await dispatchWebhook({ url: "https://hooks.example.com", headers: { "content-type": "text/plain" } }, FEEDBACK);
     const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
-    // A plain-object merge keeps both keys and fetch combines them into
-    // "application/json, text/plain".
-    expect(new Headers(init.headers).get("content-type")).toBe("text/plain");
+    // Keeping both keys would make fetch send "application/json, text/plain".
+    expect(init.headers).toEqual({ "content-type": "text/plain" });
   });
 
   it("invokes onError on a 500 response and does not throw", async () => {
@@ -305,6 +365,28 @@ describe("dispatchWebhook", () => {
     expect(logged).toContain("https://hooks.slack.com");
     expect(logged).not.toContain("XXXXSECRETTOKEN");
     expect(logged).not.toContain("/services/");
+  });
+
+  it.each([
+    ["with userinfo", "https://user:s3cret@hooks.example.com/hook/TOKEN123", "includes credentials"],
+    ["without a scheme", "hooks.slack.com/services/T0/B0/TOKEN123", "Failed to parse URL"],
+  ])("keeps the credential out of the log when fetch quotes a URL %s", async (_label, url, reason) => {
+    // Node's own fetch copies the URL it was given into these errors, and
+    // throws them before any network access.
+    // An onError that rethrows carries the same message into its warning.
+    fetchSpy.mockImplementation(realFetch);
+    const rethrowingOnError = (err: Error) => {
+      throw err;
+    };
+    await dispatchWebhook({ url }, FEEDBACK);
+    await dispatchWebhook({ url, onError: rethrowingOnError }, FEEDBACK);
+
+    expect(warnSpy).toHaveBeenCalledTimes(2);
+    for (const [logged] of warnSpy.mock.calls) {
+      expect(String(logged)).toContain(reason);
+      expect(String(logged)).not.toContain("TOKEN123");
+      expect(String(logged)).not.toContain("s3cret");
+    }
   });
 
   it("aborts the fetch when the per-webhook timeout elapses", async () => {
@@ -471,6 +553,37 @@ describe("createSitepingHandler — webhooks option", () => {
 // ---------------------------------------------------------------------------
 
 describe("createSitepingHandler — webhooks on clientId replays", () => {
+  /**
+   * An idempotent collection store on an async backend (KV, remote storage):
+   * every `load`/`persist` yields, so overlapping requests both pass the
+   * replay check before either insert lands.
+   */
+  function asyncCollectionStore() {
+    let feedbacks: FeedbackRecord[] = [];
+    let seq = 0;
+    const tick = () => new Promise((resolve) => setTimeout(resolve, 1));
+    return createCollectionStore({
+      load: async () => {
+        await tick();
+        return feedbacks;
+      },
+      persist: async (next) => {
+        await tick();
+        feedbacks = next;
+      },
+      generateId: () => `id-${++seq}`,
+    });
+  }
+
+  function postClientId(handler: ReturnType<typeof createSitepingHandler>, clientId: string) {
+    return handler.POST(
+      new Request("http://localhost/api/siteping", {
+        method: "POST",
+        body: JSON.stringify({ ...validPayloadNoAnnotations, clientId }),
+      }),
+    );
+  }
+
   it("does not dispatch again when a store returns the existing record for a replayed clientId", async () => {
     // Snapshot stores (memory, localStorage, adapter-kit) are idempotent on
     // clientId: a replay resolves like a fresh insert. The handler must still
@@ -503,33 +616,35 @@ describe("createSitepingHandler — webhooks on clientId replays", () => {
   });
 
   it("dispatches once when two POSTs with the same clientId overlap (widget timeout + retry)", async () => {
-    // An async backend (KV, remote storage) lets both requests pass the
-    // replay check before either insert lands; the idempotent store then
-    // resolves the second create like a fresh insert.
-    let feedbacks: FeedbackRecord[] = [];
-    let seq = 0;
-    const tick = () => new Promise((resolve) => setTimeout(resolve, 1));
-    const store = createCollectionStore({
-      load: async () => {
-        await tick();
-        return feedbacks;
-      },
-      persist: async (next) => {
-        await tick();
-        feedbacks = next;
-      },
-      generateId: () => `id-${++seq}`,
-    });
+    // Without `createFeedbackIfAbsent` (a third-party store that doesn't
+    // report its inserts), the idempotent store resolves the second create
+    // like a fresh insert: only the handler's in-flight coalescing tells.
+    const { createFeedbackIfAbsent: _reportsInserts, ...store } = asyncCollectionStore();
     const handler = createSitepingHandler({ store, webhooks: { url: "https://hooks.example.com" } });
-    const post = () =>
-      handler.POST(
-        new Request("http://localhost/api/siteping", {
-          method: "POST",
-          body: JSON.stringify({ ...validPayloadNoAnnotations, clientId: "overlapping" }),
-        }),
-      );
+    const post = () => postClientId(handler, "overlapping");
 
     const [first, second] = await Promise.all([post(), post()]);
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    expect(((await first.json()) as { id: string }).id).toBe(((await second.json()) as { id: string }).id);
+
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(fetchSpy).toHaveBeenCalledOnce();
+  });
+
+  it("dispatches once when handlers in separate processes race on one clientId (createFeedbackIfAbsent)", async () => {
+    // Two handler instances share nothing in memory, like two server
+    // processes: in-flight coalescing can't join them, so only the store's
+    // own report of which call inserted the record keeps the second request
+    // from notifying.
+    const store = asyncCollectionStore();
+    const processHandler = () => createSitepingHandler({ store, webhooks: { url: "https://hooks.example.com" } });
+
+    const [first, second] = await Promise.all([
+      postClientId(processHandler(), "cross-process"),
+      postClientId(processHandler(), "cross-process"),
+    ]);
     expect(first.status).toBe(201);
     expect(second.status).toBe(201);
     expect(((await first.json()) as { id: string }).id).toBe(((await second.json()) as { id: string }).id);

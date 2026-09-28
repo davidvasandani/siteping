@@ -153,7 +153,11 @@ createSitepingHandler({
 
 Si un envoi échoue, le feedback est quand même enregistré (avec `screenshotUrl: null`) et un avertissement est journalisé — un bucket cassé ne fait jamais perdre le commentaire d'un client.
 
+Renvoyez une URL `https:` : la vue détail du widget n'affiche que les images `https:`, plus le `http:` simple sur la machine locale (`localhost`, `*.localhost`, `127.0.0.1`, `[::1]`), pour qu'un MinIO ou un localstack local fonctionne en développement.
+
 Ajoutez un `delete(url)` optionnel et l'adapter l'appelle à la suppression d'un feedback — `DELETE` unitaire comme `deleteAll` — pour ne rien laisser traîner dans votre bucket. C'est du meilleur effort : un `delete` qui échoue est journalisé et ne fait jamais échouer la suppression (un objet orphelin vaut mieux qu'une ligne qui refuse de partir). Les URL `data:` en ligne ne lui sont jamais passées.
+
+Il est aussi appelé quand une création est refusée parce que son `clientId` est déjà enregistré (un nouvel essai en concurrence avec le premier), pour supprimer la capture envoyée par cette tentative — sauf si le feedback enregistré pointe vers cette même URL. C'est le cas quand votre clé dérive de `feedbackId` : l'envoi a réécrit l'objet du feedback enregistré, qui est donc conservé. Une capture dont l'insertion a échoué pour une autre raison reste dans votre bucket, car un nouvel essai sur une autre instance peut être sur le point de la référencer.
 
 ## Webhooks
 
@@ -169,7 +173,7 @@ createSitepingHandler({
 });
 ```
 
-`type` vaut `"slack"`, `"discord"` ou `"generic"` (le défaut — il poste l'enregistrement en JSON avec l'e-mail de l'auteur non masqué : traitez donc les cibles de webhook générique comme de confiance ; le `clientId` est retiré comme partout ailleurs). Chaque appel a un timeout de 5 secondes, les échecs ne bloquent jamais l'envoi, et un `onError(err, feedbackId)` optionnel permet de les journaliser.
+`type` vaut `"slack"`, `"discord"` ou `"generic"` (le défaut — il poste l'enregistrement en JSON avec l'e-mail de l'auteur non masqué : traitez donc les cibles de webhook générique comme de confiance ; le `clientId` est retiré comme partout ailleurs). Chaque appel a un timeout de 5 secondes, les échecs ne bloquent jamais l'envoi, et un `onError(err, feedbackId)` optionnel permet de les journaliser. Un `clientId` rejoué ne les redéclenche jamais, et deux envois simultanés du même `clientId` (le widget qui relance une requête expirée) ne notifient qu'une fois lorsqu'ils atteignent le même processus serveur. Entre plusieurs instances, seul le store peut les départager : le `@unique` de Prisma sur `clientId` le fait, tout comme l'index unique du [store Drizzle](/fr/docs/adapters/drizzle). Les stores memory et localStorage, comme tout store construit sur `createCollectionStore`, ne dédoublonnent qu'au sein d'une même instance de store, et un store personnalisé qui renvoie l'enregistrement existant sur un doublon peut notifier deux fois s'il n'implémente pas `createFeedbackIfAbsent` de façon atomique — voir [Écrire un adapter](/fr/docs/adapters/writing-an-adapter#effets-de-création-exactement-une-fois).
 
 Le texte des feedbacks est saisi par des visiteurs anonymes, les charges utiles de chat sont donc durcies : le texte Slack est échappé (un commentaire contenant `<!channel>` s'affiche tel quel, jamais comme une notification) et les messages Discord partent avec l'analyse des mentions désactivée (`allowed_mentions: { parse: [] }`) et leur markdown échappé (un lien masqué `[Réinitialisez votre mot de passe](https://…)` s'affiche tel quel, jamais comme un lien déguisé) — un formulaire public ne peut servir ni à notifier tout votre serveur, ni à l'hameçonner. Les valeurs trop longues sont tronquées aux limites de taille de Slack et de Discord (échappement compris), pour qu'une URL de page de 2000 caractères ne fasse jamais rejeter toute la notification.
 

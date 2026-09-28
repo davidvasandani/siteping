@@ -1,5 +1,10 @@
 import type { FeedbackQuery, FeedbackStatus, FeedbackUpdateInput, SitepingStore } from "@siteping/core";
-import { SitepingAuthError, SitepingNetworkError, SitepingValidationError } from "@siteping/core";
+import {
+  createCollectionStore,
+  SitepingAuthError,
+  SitepingNetworkError,
+  SitepingValidationError,
+} from "@siteping/core";
 import { beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { createEndpointSource, createStoreSource } from "../../src/source.js";
 import { errorFetch, jsonFetch, makeAnnotationResponse, makeRecord, makeResponse } from "../helpers.js";
@@ -163,10 +168,11 @@ describe("createEndpointSource — auth & headers", () => {
       fetchFn,
     });
     await source.setStatus("fb-resp-1", "demo", "resolved");
-    // What fetch actually sends — duplicate-cased keys would be joined ("Bearer KEY, Bearer SESSION").
-    const sent = new Headers(lastCall(fetchFn).init.headers);
-    expect(sent.get("Authorization")).toBe("Bearer SESSION");
-    expect(sent.get("Content-Type")).toBe("application/merge-patch+json");
+    // Duplicate-cased keys would go out joined ("Bearer KEY, Bearer SESSION").
+    expect(lastCall(fetchFn).init.headers).toEqual({
+      authorization: "Bearer SESSION",
+      "content-type": "application/merge-patch+json",
+    });
   });
 });
 
@@ -326,5 +332,30 @@ describe("createStoreSource", () => {
     const source = createStoreSource(store);
     await source.remove("fb-1", "demo");
     expect(store.deleteFeedback).toHaveBeenCalledWith("fb-1");
+  });
+
+  it("two status changes 1 ms apart over an async collection store both land", async () => {
+    // A remote-KV-shaped backend: every load and persist takes 5 ms (#341).
+    let rows = [makeRecord({ id: "a" }), makeRecord({ id: "b" })];
+    const kvLatency = () => new Promise<void>((resolve) => setTimeout(resolve, 5));
+    const source = createStoreSource(
+      createCollectionStore({
+        load: async () => {
+          await kvLatency();
+          return rows;
+        },
+        persist: async (next) => {
+          await kvLatency();
+          rows = next;
+        },
+        generateId: () => crypto.randomUUID(),
+      }),
+    );
+
+    const first = source.setStatus("a", "demo", "resolved");
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    await Promise.all([first, source.setStatus("b", "demo", "wont_fix")]);
+
+    expect(Object.fromEntries(rows.map((f) => [f.id, f.status]))).toEqual({ a: "resolved", b: "wont_fix" });
   });
 });

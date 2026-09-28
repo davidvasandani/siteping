@@ -100,8 +100,9 @@ describe("NetworkBuffer — fetch", () => {
     nowSpy.mockRestore();
     const entry = buffer.getEntries()[0];
     expect(entry?.durationMs).toBe(600_000);
-    expect(entry?.method.length).toBeLessThanOrEqual(20);
-    expect(entry?.status).toBeLessThanOrEqual(599);
+    expect(entry?.method).toBe("X".repeat(20));
+    // 999 is not a 5xx — clamping it to 599 would misreport it as one.
+    expect(entry?.status).toBe(0);
     buffer.dispose();
   });
 
@@ -112,6 +113,14 @@ describe("NetworkBuffer — fetch", () => {
     await fetch(new Request("https://example.com/api/me?session=s3cr3t"));
     const urls = buffer.getEntries().map((e) => e.url);
     expect(urls).toEqual(["/api/items", "https://example.com/api/me"]);
+    buffer.dispose();
+  });
+
+  it("records a credentialed fetch URL without its userinfo (fetch rejects it after the wrapper read it)", async () => {
+    fetchSpy.mockRejectedValue(new TypeError("Request cannot be constructed from a URL that includes credentials"));
+    const buffer = new NetworkBuffer();
+    await expect(fetch("https://user:s3cr3t@api.example.com/v1/items?token=abc")).rejects.toBeInstanceOf(TypeError);
+    expect(buffer.getEntries()[0]?.url).toBe("https://api.example.com/v1/items");
     buffer.dispose();
   });
 
@@ -168,6 +177,24 @@ describe("NetworkBuffer — XHR", () => {
     Object.defineProperty(xhr, "status", { value: 500, configurable: true });
     xhr.dispatchEvent(new Event("loadend"));
     expect(buffer.getEntries()[0]?.url).toBe("/xhr-bad");
+    buffer.dispose();
+  });
+
+  it("records XHR URLs without their userinfo", () => {
+    const buffer = new NetworkBuffer();
+    // Loopback hosts: jsdom really issues the request.
+    const urls = ["https://user:s3cr3t@127.0.0.1/v1/items?token=abc", "//admin:hunter2@localhost/x"];
+    for (const url of urls) {
+      const xhr = new XMLHttpRequest();
+      xhr.open("GET", url);
+      xhr.send();
+      Object.defineProperty(xhr, "status", { value: 401, configurable: true });
+      xhr.dispatchEvent(new Event("loadend"));
+    }
+    expect(buffer.getEntries().map((e) => e.url)).toEqual([
+      "https://127.0.0.1/v1/items",
+      `${location.protocol}//localhost/x`,
+    ]);
     buffer.dispose();
   });
 

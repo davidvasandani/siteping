@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { findAnchorElement, generateAnchor, rectToPercentages } from "../../src/dom/anchor";
+import { afterEach, describe, expect, it } from "vitest";
+import { deepElementFromPoint, findAnchorElement, generateAnchor, rectToPercentages } from "../../src/dom/anchor";
 
 // jsdom polyfill — @medv/finder uses CSS.escape internally
 if (typeof CSS === "undefined") {
@@ -111,23 +111,31 @@ describe("rectToPercentages", () => {
     expect(result).toEqual({ xPct: 0, yPct: 0, wPct: 1, hPct: 1 });
   });
 
-  it("rect fully outside the anchor collapses onto the nearest edge", () => {
+  // A rect outside its anchor keeps its drawn geometry: store mode stores it
+  // as is and markers extrapolate past the anchor box. Only the HTTP client
+  // clips it, for the server schema (api-client.test.ts).
+  it("negative percentages when rect is outside anchor bounds", () => {
     const anchor = makeDOMRect(200, 200, 100, 100);
     // Rect is 50px to the left and 30px above the anchor
     const rect = makeDOMRect(150, 170, 30, 20);
 
-    // Negative percentages would be rejected by the server schema.
     const result = rectToPercentages(rect, anchor);
-    expect(result).toEqual({ xPct: 0, yPct: 0, wPct: 0, hPct: 0 });
+    expect(result.xPct).toBeCloseTo(-0.5); // (150−200)/100
+    expect(result.yPct).toBeCloseTo(-0.3); // (170−200)/100
+    expect(result.wPct).toBeCloseTo(0.3);
+    expect(result.hPct).toBeCloseTo(0.2);
   });
 
-  it("rect larger than the anchor is clipped to the full anchor", () => {
+  it("percentages > 1 when rect is larger than anchor", () => {
     const anchor = makeDOMRect(100, 100, 50, 50);
     // Rect starts before anchor and is much larger
     const rect = makeDOMRect(80, 80, 200, 150);
 
     const result = rectToPercentages(rect, anchor);
-    expect(result).toEqual({ xPct: 0, yPct: 0, wPct: 1, hPct: 1 });
+    expect(result.xPct).toBeCloseTo(-0.4); // (80−100)/50
+    expect(result.yPct).toBeCloseTo(-0.4); // (80−100)/50
+    expect(result.wPct).toBeCloseTo(4.0); // 200/50
+    expect(result.hPct).toBeCloseTo(3.0); // 150/50
   });
 
   it("anchor at origin with unit dimensions gives identity values", () => {
@@ -154,17 +162,10 @@ describe("rectToPercentages", () => {
 // findAnchorElement
 // ---------------------------------------------------------------------------
 describe("findAnchorElement", () => {
-  beforeEach(() => {
-    // jsdom lays nothing out; give body a viewport-sized box so it contains
-    // the test rects (the body fallback requires that).
-    document.body.getBoundingClientRect = () => makeDOMRect(0, 0, 1024, 768);
-  });
-
   afterEach(() => {
     while (document.body.firstChild) {
       document.body.removeChild(document.body.firstChild);
     }
-    delete (document.body as { getBoundingClientRect?: unknown }).getBoundingClientRect;
     // Restore original implementations if they were mocked
     if ("_origElementFromPoint" in document) {
       document.elementFromPoint = (document as any)._origElementFromPoint;
@@ -189,6 +190,27 @@ describe("findAnchorElement", () => {
     const rect = makeDOMRect(50, 50, 100, 100);
     const result = findAnchorElement(rect);
     expect(result).toBe(document.body);
+  });
+
+  it("a rect drawn in the blank area below a short body keeps its geometry against the body fallback", () => {
+    // Body 300px tall with the default 8px margin; the drag lands below it, so
+    // the body fallback does not contain the rect. Store mode renders it back
+    // where it was drawn; the HTTP client clips it for the server schema.
+    stubElementFromPoint(() => document.documentElement);
+    stubBounds(document.body, makeDOMRect(8, 8, 1008, 300));
+    try {
+      const drawn = makeDOMRect(2, 500, 198, 100);
+      const anchor = findAnchorElement(drawn);
+      expect(anchor).toBe(document.body);
+
+      const rect = rectToPercentages(drawn, anchor.getBoundingClientRect());
+      expect(rect.xPct).toBeCloseTo(-6 / 1008);
+      expect(rect.yPct).toBeCloseTo(492 / 300);
+      expect(rect.wPct).toBeCloseTo(198 / 1008);
+      expect(rect.hPct).toBeCloseTo(100 / 300);
+    } finally {
+      delete (document.body as { getBoundingClientRect?: unknown }).getBoundingClientRect;
+    }
   });
 
   it("falls back to document.body when elementFromPoint returns root", () => {
@@ -286,48 +308,122 @@ describe("findAnchorElement", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Annotation rect must satisfy the server schema (every field in [0, 1])
-// ---------------------------------------------------------------------------
-describe("annotation rect stays within [0, 1]", () => {
+describe("findAnchorElement — open shadow roots (#177)", () => {
   afterEach(() => {
     while (document.body.firstChild) {
       document.body.removeChild(document.body.firstChild);
     }
-    delete (document.body as { getBoundingClientRect?: unknown }).getBoundingClientRect;
-    delete (document.documentElement as { getBoundingClientRect?: unknown }).getBoundingClientRect;
     if ("_origElementFromPoint" in document) {
       document.elementFromPoint = (document as any)._origElementFromPoint;
       delete (document as any)._origElementFromPoint;
     }
   });
 
-  const inUnitRange = (v: number) => v >= 0 && v <= 1;
+  function stubElementFromPoint(target: Document | ShadowRoot, fn: (x: number, y: number) => Element | null) {
+    if (target === document) (document as any)._origElementFromPoint = document.elementFromPoint;
+    target.elementFromPoint = fn;
+  }
 
-  it("a rect drawn in the blank area below a short body anchors to <html> and clamps", () => {
-    // Body 300px tall with the default 8px margin; the drag lands below it.
-    document.body.getBoundingClientRect = () => makeDOMRect(8, 8, 1008, 300);
-    document.documentElement.getBoundingClientRect = () => makeDOMRect(0, 0, 1024, 316);
-    (document as any)._origElementFromPoint = document.elementFromPoint;
-    document.elementFromPoint = () => document.documentElement;
+  function stubBounds(el: Element, rect: DOMRect) {
+    el.getBoundingClientRect = () => rect;
+  }
 
-    const drawn = makeDOMRect(2, 500, 198, 100);
-    const anchor = findAnchorElement(drawn);
-    expect(anchor).not.toBe(document.body);
+  /** A light-DOM host with an open shadow root holding one `<p>`. */
+  function openComponent(): { host: HTMLElement; shadow: ShadowRoot; inner: HTMLElement } {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const shadow = host.attachShadow({ mode: "open" });
+    const inner = document.createElement("p");
+    shadow.appendChild(inner);
+    return { host, shadow, inner };
+  }
 
-    const rect = rectToPercentages(drawn, anchor.getBoundingClientRect());
-    expect(rect).toSatisfy(
-      (r: typeof rect) => inUnitRange(r.xPct) && inUnitRange(r.yPct) && inUnitRange(r.wPct) && inUnitRange(r.hPct),
-    );
+  const rect = makeDOMRect(50, 50, 100, 100);
+
+  it("drills from the retargeted host to the element under the point", () => {
+    const { host, shadow, inner } = openComponent();
+    stubBounds(inner, makeDOMRect(0, 0, 400, 400));
+    stubBounds(host, makeDOMRect(0, 0, 800, 800));
+    stubElementFromPoint(document, () => host);
+    stubElementFromPoint(shadow, () => inner);
+
+    expect(findAnchorElement(rect)).toBe(inner);
   });
 
-  it("rectToPercentages intersects the rect with the anchor bounds", () => {
-    // Rect overhangs the anchor on the left and bottom.
-    const result = rectToPercentages(makeDOMRect(-10, 50, 60, 100), makeDOMRect(0, 0, 200, 100));
-    expect(result.xPct).toBe(0);
-    expect(result.yPct).toBeCloseTo(0.5);
-    expect(result.wPct).toBeCloseTo(0.25); // visible part: 0..50
-    expect(result.hPct).toBeCloseTo(0.5); // visible part: 50..100
+  it("drills through nested open roots", () => {
+    const { host, shadow, inner } = openComponent();
+    const innerShadow = inner.attachShadow({ mode: "open" });
+    const deepest = document.createElement("span");
+    innerShadow.appendChild(deepest);
+    stubBounds(deepest, makeDOMRect(0, 0, 400, 400));
+    stubElementFromPoint(document, () => host);
+    stubElementFromPoint(shadow, () => inner);
+    stubElementFromPoint(innerShadow, () => deepest);
+
+    expect(findAnchorElement(rect)).toBe(deepest);
+  });
+
+  it("climbs back out through the host when nothing inside contains the rect", () => {
+    const { host, shadow, inner } = openComponent();
+    const leaf = inner.appendChild(document.createElement("span"));
+    stubBounds(leaf, makeDOMRect(60, 60, 10, 10));
+    stubBounds(inner, makeDOMRect(60, 60, 20, 20));
+    stubBounds(host, makeDOMRect(0, 0, 400, 400));
+    stubElementFromPoint(document, () => host);
+    stubElementFromPoint(shadow, () => leaf);
+
+    expect(findAnchorElement(rect)).toBe(host);
+  });
+
+  it("finds a semantic anchor on the host from inside its shadow root", () => {
+    const { host, shadow, inner } = openComponent();
+    host.setAttribute("data-feedback-anchor", "pricing");
+    // The inner <p> also contains the rect — pass 1 must still prefer the key.
+    stubBounds(inner, makeDOMRect(0, 0, 400, 400));
+    stubBounds(host, makeDOMRect(0, 0, 800, 800));
+    stubElementFromPoint(document, () => host);
+    stubElementFromPoint(shadow, () => inner);
+
+    expect(findAnchorElement(rect)).toBe(host);
+  });
+
+  it("stops at the host when the shadow root hit-tests back to it (slotted content)", () => {
+    const { host, shadow } = openComponent();
+    stubBounds(host, makeDOMRect(0, 0, 400, 400));
+    stubElementFromPoint(document, () => host);
+    // Bounded stub: without the guard the drill would spin on the host forever.
+    let shadowHits = 0;
+    stubElementFromPoint(shadow, () => (++shadowHits > 3 ? null : host));
+
+    expect(findAnchorElement(rect)).toBe(host);
+    expect(shadowHits).toBe(1);
+  });
+
+  it("keeps the host without throwing when ShadowRoot.elementFromPoint is missing", () => {
+    // jsdom (and any engine lacking DocumentOrShadowRoot.elementFromPoint).
+    const { host } = openComponent();
+    stubBounds(host, makeDOMRect(0, 0, 400, 400));
+    stubElementFromPoint(document, () => host);
+
+    expect(findAnchorElement(rect)).toBe(host);
+  });
+
+  it("deepElementFromPoint returns the element under the point inside open roots (the tap path)", () => {
+    const { host, shadow, inner } = openComponent();
+    stubElementFromPoint(document, () => host);
+    stubElementFromPoint(shadow, () => inner);
+
+    expect(deepElementFromPoint(60, 60)).toBe(inner);
+  });
+
+  it("treats a closed shadow root as opaque", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    host.attachShadow({ mode: "closed" }).appendChild(document.createElement("p"));
+    stubBounds(host, makeDOMRect(0, 0, 400, 400));
+    stubElementFromPoint(document, () => host);
+
+    expect(findAnchorElement(rect)).toBe(host);
   });
 });
 

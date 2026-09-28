@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import type { FeedbackResponse } from "@siteping/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { POPUP_HIDE_TRANSITION_MS } from "../../src/constants.js";
 import { EventBus, type WidgetEvents } from "../../src/events.js";
 import { createT } from "../../src/i18n/index.js";
 import { buildThemeColors } from "../../src/styles/theme.js";
-import { mockMatchMedia } from "../helpers.js";
+import { createShadowRoot, mockMatchMedia } from "../helpers.js";
 
 mockMatchMedia(false);
 
@@ -27,8 +28,11 @@ vi.mock(new URL("../../src/dom/anchor.js", import.meta.url).pathname, () => ({
 }));
 
 import { Annotator } from "../../src/annotator.js";
+import { Panel } from "../../src/panel.js";
 
 const flush = () => new Promise((r) => setTimeout(r, 20));
+/** Outlast the popup's close transition, whatever its configured length. */
+const waitForHide = () => new Promise((r) => setTimeout(r, POPUP_HIDE_TRANSITION_MS + 50));
 
 function findOverlay(): HTMLElement {
   return document.body.querySelector<HTMLElement>('div[data-siteping-ignore][tabindex="0"]')!;
@@ -137,91 +141,204 @@ describe("draw flow — popup re-entry guards (#196, real Popup)", () => {
     await flush();
     expect(completeListener).toHaveBeenCalledOnce();
   });
-});
 
-describe("Escape / cancel never tear the session down around an open popup (real Popup)", () => {
-  let cleanup: (() => void) | null = null;
+  describe("ending the session from outside the popup closes the comment form", () => {
+    function openPopup() {
+      const bus = new EventBus<WidgetEvents>();
+      const annotator = new Annotator(buildThemeColors(), bus, createT("en"));
+      cleanup = () => annotator.destroy();
+      const endListener = vi.fn();
+      bus.on("annotation:end", endListener);
+      const completeListener = vi.fn();
+      bus.on("annotation:complete", completeListener);
 
-  afterEach(() => {
-    cleanup?.();
-    cleanup = null;
-    document.body.innerHTML = "";
+      bus.emit("annotation:start");
+      drag(findOverlay(), 100, 100, 200, 200);
+      return { bus, annotator, endListener, completeListener };
+    }
+
+    /** Fill the popup and click Send — an open popup's submission then waits on a terminal bus event. */
+    function sendFeedback(message: string) {
+      const dialog = findDialog();
+      dialog.querySelector<HTMLButtonElement>('button[data-type="bug"]')!.click();
+      const textarea = dialog.querySelector("textarea")!;
+      textarea.value = message;
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      Array.from(dialog.querySelectorAll("button"))
+        .find((button) => button.textContent?.includes("Send"))!
+        .click();
+      return { dialog, textarea };
+    }
+
+    const findDialog = () => document.body.querySelector<HTMLElement>('[role="dialog"]')!;
+    const findToolbarCancel = () =>
+      Array.from(document.body.querySelectorAll("button")).find(
+        (button) => button.textContent === "Cancel" && !button.closest('[role="dialog"]'),
+      )!;
+    const pressEscape = (target: EventTarget) =>
+      target.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    const endSessionWith: [string, () => void][] = [
+      ["toolbar Cancel", () => findToolbarCancel().click()],
+      ["Escape", () => pressEscape(document)],
+    ];
+
+    it.each([
+      ...endSessionWith,
+      ["Escape on a popup type button", () => pressEscape(findDialog().querySelector('button[data-type="question"]')!)],
+    ])("%s closes the open popup and ends the session", async (_label, endSession) => {
+      const { endListener, completeListener } = openPopup();
+      await flush();
+      expect(findDialog().style.display).toBe("block");
+
+      endSession();
+      await waitForHide();
+
+      expect(endListener).toHaveBeenCalledOnce();
+      expect(findDialog().style.display).toBe("none");
+      // The closed popup must not be able to submit after annotation:end
+      sendFeedback("late message");
+      await flush();
+      expect(completeListener).not.toHaveBeenCalled();
+    });
+
+    it.each(endSessionWith)(
+      "a new annotation started right after %s gets a visible popup under its own rectangle",
+      async (_label, endSession) => {
+        const { bus, annotator } = openPopup();
+        await flush();
+
+        endSession();
+        await flush(); // Separate input events: let the first session settle, still inside the fade
+        // Start a new session while the dismissed popup is still fading out
+        bus.emit("annotation:start");
+        drag(findOverlay(), 300, 300, 400, 400);
+        await waitForHide();
+
+        const dialog = findDialog();
+        expect(dialog.style.display).toBe("block");
+        // The new session's popup, under the second rectangle (bottom 400 + 8), not the first one left open
+        expect(dialog.style.top).toBe("408px");
+        expect(dialog.querySelector("textarea")!.disabled).toBe(false);
+        expect(annotator.isBusy).toBe(true);
+      },
+    );
+
+    it.each(endSessionWith)(
+      "keeps the popup, its submission and the session when %s is used mid-send, ending them once feedback is sent",
+      async (_label, endSession) => {
+        const { bus, annotator, endListener } = openPopup();
+        await flush();
+        const { dialog, textarea } = sendFeedback("sending");
+        await flush();
+
+        endSession();
+        await flush();
+
+        expect(dialog.style.display).toBe("block");
+        expect(textarea.disabled).toBe(true);
+        expect(annotator.isBusy).toBe(true);
+        expect(endListener).not.toHaveBeenCalled();
+        expect(findOverlay()).not.toBeNull();
+
+        bus.emit("feedback:sent", { id: "f1" } as FeedbackResponse);
+        await waitForHide();
+
+        expect(dialog.style.display).toBe("none");
+        expect(annotator.isBusy).toBe(false);
+        expect(endListener).toHaveBeenCalledOnce();
+        expect(findOverlay()).toBeNull();
+      },
+    );
+
+    it("blocks a new instant annotation while a cancelled-mid-send submission is pending", async () => {
+      const { bus, annotator, endListener, completeListener } = openPopup();
+      const startListener = vi.fn();
+      bus.on("annotation:start", startListener);
+      await flush();
+      const { textarea } = sendFeedback("first submission");
+      await flush();
+
+      findToolbarCancel().click();
+      // Not awaited: if the guard ever breaks, the new session's show() never
+      // settles; the assertions below must fail, not a 5 s timeout.
+      void annotator.startInstantAnnotation(50, 50);
+      await flush();
+
+      // The pending popup keeps its form and submission — no second session started.
+      expect(startListener).not.toHaveBeenCalled();
+      expect(textarea.disabled).toBe(true);
+      expect(textarea.value).toBe("first submission");
+
+      bus.emit("feedback:sent", { id: "f1" } as FeedbackResponse);
+      await flush();
+
+      expect(completeListener).toHaveBeenCalledOnce();
+      expect(endListener).toHaveBeenCalledOnce();
+      expect(annotator.isBusy).toBe(false);
+    });
   });
 
-  function setup() {
+  it("a failing panel action while the submission is in flight does not settle it", async () => {
     const bus = new EventBus<WidgetEvents>();
-    const annotator = new Annotator(buildThemeColors(), bus, createT("en"));
-    cleanup = () => annotator.destroy();
-    const events: string[] = [];
-    bus.on("annotation:end", () => events.push("end"));
-    bus.on("annotation:complete", () => events.push("complete"));
-    return { bus, events };
-  }
+    const t = createT("en");
+    const annotator = new Annotator(buildThemeColors(), bus, t);
+    const shadow = createShadowRoot();
+    const feedback: FeedbackResponse = {
+      id: "f0",
+      projectName: "p",
+      type: "bug",
+      message: "earlier feedback",
+      status: "open",
+      url: "http://localhost/",
+      urlPattern: null,
+      viewport: "1280x720",
+      userAgent: "test",
+      authorName: "A",
+      authorEmail: "a@example.com",
+      resolvedAt: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      annotations: [],
+      screenshotUrl: null,
+      screenshotRegion: null,
+      diagnostics: null,
+    };
+    const client = { getFeedbacks: vi.fn().mockResolvedValue({ feedbacks: [feedback], total: 1 }) };
+    const markers = { render: vi.fn(), highlight: vi.fn() };
+    const onAction = vi.fn(() => Promise.reject(new Error("host down")));
+    const panel = new Panel(shadow, buildThemeColors(), bus, client as never, "p", markers as never, t, "en", {
+      getScope: () => ({ url: "/", urlPattern: null }),
+      scopeAnnotationsByUrl: true,
+      panelActions: [{ id: "ticket", label: "Create ticket", onAction }],
+    });
+    cleanup = () => {
+      panel.destroy();
+      annotator.destroy();
+    };
 
-  async function openPopup(bus: EventBus<WidgetEvents>): Promise<HTMLElement> {
     bus.emit("annotation:start");
     drag(findOverlay(), 100, 100, 200, 200);
     await flush();
-    return document.body.querySelector<HTMLElement>('[role="dialog"]')!;
-  }
-
-  function trySubmit(dialog: HTMLElement) {
+    const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]')!;
     dialog.querySelector<HTMLButtonElement>('button[data-type="bug"]')!.click();
     const textarea = dialog.querySelector("textarea")!;
-    textarea.value = "late message";
+    textarea.value = "submitted message";
     textarea.dispatchEvent(new Event("input", { bubbles: true }));
     Array.from(dialog.querySelectorAll("button"))
       .find((b) => b.textContent?.includes("Send"))!
       .click();
-  }
-
-  it("Escape on a popup button cancels the popup, then ends the session", async () => {
-    const { bus, events } = setup();
-    const dialog = await openPopup(bus);
-    const typeBtn = dialog.querySelector<HTMLButtonElement>('button[data-type="question"]')!;
-    typeBtn.focus();
-
-    typeBtn.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     await flush();
+    expect(textarea.disabled).toBe(true);
 
-    expect(dialog.style.opacity).toBe("0");
-    expect(events).toEqual(["end"]);
-    // The hidden popup must not be able to submit after annotation:end.
-    trySubmit(dialog);
+    // The host action rejects while the submission is still pending.
+    await panel.open();
+    shadow.querySelector<HTMLElement>('[data-feedback-id="f0"]')!.click();
+    shadow.querySelector<HTMLButtonElement>(".sp-detail-btn-custom")!.click();
     await flush();
-    expect(events).toEqual(["end"]);
-  });
+    expect(onAction).toHaveBeenCalledOnce();
 
-  it("Escape while the submission is in flight keeps the session (popup holds the user)", async () => {
-    const { bus, events } = setup();
-    const dialog = await openPopup(bus);
-    trySubmit(dialog);
-    await flush();
-    expect(events).toEqual(["complete"]);
-
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-    await flush();
-    expect(events).toEqual(["complete"]);
-    expect(findOverlay()).not.toBeNull();
-
-    bus.emit("feedback:sent", { id: "f1" } as FeedbackResponse);
-    await flush();
-    expect(events).toEqual(["complete", "end"]);
-  });
-
-  it("the toolbar Cancel button also closes an open popup", async () => {
-    const { bus, events } = setup();
-    const dialog = await openPopup(bus);
-
-    const toolbarCancel = Array.from(document.body.querySelectorAll("button")).find(
-      (b) => b.textContent === "Cancel" && !dialog.contains(b),
-    )!;
-    toolbarCancel.click();
-    await flush();
-
-    expect(dialog.style.opacity).toBe("0");
-    trySubmit(dialog);
-    await flush();
-    expect(events).toEqual(["end"]);
+    // Still submitting: the popup did not take the host's error for its own.
+    expect(textarea.disabled).toBe(true);
+    expect(textarea.value).toBe("submitted message");
   });
 });

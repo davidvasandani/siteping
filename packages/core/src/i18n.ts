@@ -53,9 +53,49 @@ export interface I18n<T> {
   registerLocale(code: string, translations: Partial<T>): void;
 }
 
-/** Normalise a BCP-47 tag down to the base language used for dictionary lookups. */
+/**
+ * Normalise a locale tag down to the base language used for dictionary
+ * lookups — BCP-47 `fr-FR` and backend-style `fr_FR` both resolve to `fr`.
+ */
 function normaliseLang(locale: string): string {
-  return (locale.split("-")[0] ?? locale).toLowerCase();
+  return (locale.split(/[-_]/)[0] ?? locale).toLowerCase();
+}
+
+/** `locale` with `_` read as `-`, canonicalised — `undefined` when `Intl` rejects it. */
+function canonicalTag(locale: string): string | undefined {
+  try {
+    return Intl.getCanonicalLocales(locale.replace(/_/g, "-"))[0];
+  } catch {
+    // RangeError: not a well-formed language tag
+    return undefined;
+  }
+}
+
+/**
+ * `locale` as `Intl` accepts it. Locale options take any string, and a
+ * backend-style tag (`fr_FR` from PHP / WordPress) makes every `Intl`
+ * constructor and `toLocale*` call throw a RangeError: `_` reads as `-`, and
+ * a tag `Intl` still rejects falls back to English, as `createT` does.
+ * Silent, so it is safe on a render path; see `canonicalizeLocale` for the
+ * one-time, warning variant.
+ */
+export function intlLocale(locale: string): string {
+  return canonicalTag(locale) ?? "en";
+}
+
+/**
+ * The host's locale tag as `Intl` accepts it. `SitepingLocale` takes any
+ * string, and PHP / WordPress hand out POSIX-style tags (`fr_FR`, `pt_BR`)
+ * that every `Intl` constructor rejects with a RangeError: `_` becomes `-`,
+ * then the tag is canonicalised (`fr-FR`). Falls back to `"en"`, with a
+ * warning, only when the tag is still invalid (empty, garbage) — meant to run
+ * once, where the config is read.
+ */
+export function canonicalizeLocale(locale: string): string {
+  const canonical = canonicalTag(locale);
+  if (canonical) return canonical;
+  console.warn(`[siteping] Invalid locale "${locale}", falling back to "en"`);
+  return "en";
 }
 
 /**

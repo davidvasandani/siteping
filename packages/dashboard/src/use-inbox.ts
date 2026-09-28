@@ -4,6 +4,7 @@ import {
   type FeedbackRecord,
   type FeedbackStatus,
   isClosedStatus,
+  matchesFeedbackQuery,
 } from "@siteping/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createEndpointSource, createStoreSource } from "./source.js";
@@ -30,17 +31,22 @@ type CountDeltas = readonly (readonly ["all" | FeedbackStatus, number])[];
 /**
  * Rollback data for one in-flight optimistic mutation. Mutations on the same
  * feedback chain through `next`: a failure that a still-pending mutation has
- * built on hands it `prev` and its deltas, so the chain reverts as one.
+ * built on hands it `prev`, `wasListed` and its deltas, so the chain reverts
+ * as one.
  */
 interface InFlight {
   /** The record before the optimistic step — what a failure puts back. */
   prev: FeedbackRecord;
+  /** Whether its row was listed before the step — a failure puts a row back only then. */
+  wasListed: boolean;
   /** Count deltas still to invert on failure, each tagged with the counts generation it was applied to. */
   undo: { deltas: CountDeltas; countsGen: number }[];
   /** List generation at the optimistic step — a page 1 committed since then already dropped the edit. */
   listGen: number;
   state: "pending" | "ok" | "failed";
   next: InFlight | null;
+  /** The mutation this one chained behind — the feedback's again if this one fails as the latest. */
+  prior: InFlight | null;
 }
 
 /** Apply deltas to the count keys that are known — unknown (undefined) counts stay unknown. */
@@ -169,8 +175,12 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
   const loadMoreTokenRef = useRef(0);
   /** Bumped on every project switch — a mutation failing after one must not touch the new project's state. */
   const projectEpochRef = useRef(0);
-  /** Bumped on every `pendingUndo` write — a failed mutation restores the undo only if nothing replaced its own. */
-  const undoGenRef = useRef(0);
+  /**
+   * Identity of the current `pendingUndo` entry, fresh on every write. A failed
+   * mutation restores the undo only while its own entry stands, and puts back
+   * the one it replaced as that same entry, which its writer still owns.
+   */
+  const undoEntryRef = useRef<object>({});
   /** Set when a loadMore page returned nothing new — the server has no more rows for us. */
   const [exhausted, setExhausted] = useState(false);
   /** The opened record — kept so the drawer survives its row leaving the filtered list. */
@@ -184,6 +194,11 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
   }, []);
   /** Full record behind `pendingUndo` — undo must work after the row left the list. */
   const undoRecordRef = useRef<FeedbackRecord | null>(null);
+  const commitPendingUndo = useCallback((next: InboxState["pendingUndo"], entry: object = {}) => {
+    undoEntryRef.current = entry;
+    pendingUndoRef.current = next;
+    setPendingUndo(next);
+  }, []);
 
   // Keep the selected project valid when the `projects` prop changes.
   useEffect(() => {
@@ -192,11 +207,11 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
       setProjectState(firstProject);
       setFocusedId(null);
       setOpenedId(null);
-      setPendingUndo(null);
+      commitPendingUndo(null);
       undoRecordRef.current = null;
       commitOpenedCache(null);
     }
-  }, [projects, firstProject, commitOpenedCache]);
+  }, [projects, firstProject, commitPendingUndo, commitOpenedCache]);
 
   // Debounce search → refetch trigger. `search` itself updates synchronously.
   useEffect(() => {
@@ -221,11 +236,30 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
   const queryBaseRef = useRef(queryBase);
   queryBaseRef.current = queryBase;
 
+  /**
+   * Ids the server listed under a query base. Its search can be broader than
+   * the local predicate (accent-insensitive collations, full-text, a custom
+   * source), so a record it listed stays in that query even once its row left.
+   */
+  const listedRef = useRef({ base: queryBase, ids: new Set<string>() });
+  const rememberListed = useCallback((base: typeof queryBase, records: readonly FeedbackRecord[]) => {
+    if (listedRef.current.base !== base) listedRef.current = { base, ids: new Set() };
+    for (const record of records) listedRef.current.ids.add(record.id);
+  }, []);
+
   /** Set when a load's counts raced a mutation — recounted once no mutation is pending. */
   const countsStaleRef = useRef(false);
+  /** A mutation can settle after unmount: its recount must not outlive the component. */
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const loadCountsRef = useRef<(base: typeof queryBase, countsToken: number) => Promise<void>>(async () => {});
   const recountIfIdle = useCallback(() => {
-    if (!countsStaleRef.current || pendingMutationsRef.current > 0) return;
+    if (!countsStaleRef.current || pendingMutationsRef.current > 0 || !mountedRef.current) return;
     countsStaleRef.current = false;
     void loadCountsRef.current(queryBaseRef.current, ++countsTokenRef.current);
   }, []);
@@ -246,7 +280,7 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
             .catch(() => undefined),
         ),
       );
-      if (countsToken !== countsTokenRef.current) return;
+      if (countsToken !== countsTokenRef.current || !mountedRef.current) return;
       const next: InboxState["counts"] = {};
       COUNT_KEYS.forEach((key, index) => {
         const value = totals[index];
@@ -282,6 +316,7 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
       if (token !== tokenRef.current) return;
       setExhausted(false);
       listGenRef.current += 1;
+      rememberListed(queryBase, page.feedbacks);
       itemsRef.current = page.feedbacks;
       totalRef.current = page.total;
       setItems(page.feedbacks);
@@ -303,7 +338,7 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
       return;
     }
     await loadCounts(queryBase, countsToken);
-  }, [src, queryBase, status, pageSize, loadCounts]);
+  }, [src, queryBase, status, pageSize, loadCounts, rememberListed]);
 
   useEffect(() => {
     void load();
@@ -325,13 +360,15 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
       // skip the rows that slid into already-consumed offsets.
       const nextPage = Math.floor(itemsRef.current.length / pageSize) + 1;
       const currentStatus = statusRef.current;
+      const base = queryBaseRef.current;
       const page = await srcRef.current.list({
-        ...queryBaseRef.current,
+        ...base,
         status: currentStatus === "all" ? undefined : currentStatus,
         page: nextPage,
         limit: pageSize,
       });
       if (superseded()) return;
+      rememberListed(base, page.feedbacks);
       // A mutation in flight during the fetch: the server may not have applied
       // it yet, so the page can repeat rows removed optimistically and its
       // total can still count them — the local total already accounts for it.
@@ -359,7 +396,7 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
     } finally {
       setLoadingMore(false);
     }
-  }, [loading, loadingMore, pageSize]);
+  }, [loading, loadingMore, pageSize, rememberListed]);
 
   // -------------------------------------------------------------------------
   // Focus & drawer
@@ -389,12 +426,8 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
 
   const openFeedback = useCallback(
     (id: string) => {
-      const record =
-        itemsRef.current.find((f) => f.id === id) ??
-        (openedCacheRef.current?.id === id ? openedCacheRef.current : null);
-      // Nothing to show: opening would render no drawer yet still count as "open".
-      if (!record) return;
-      commitOpenedCache(record);
+      const record = itemsRef.current.find((f) => f.id === id);
+      if (record) commitOpenedCache(record);
       setOpenedId(id);
       setFocusedId(id);
     },
@@ -441,26 +474,17 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
     totalRef.current = nextTotal;
     setTotal(nextTotal);
   }, []);
-  const commitPendingUndo = useCallback((next: InboxState["pendingUndo"]) => {
-    undoGenRef.current += 1;
-    pendingUndoRef.current = next;
-    setPendingUndo(next);
-  }, []);
 
   /**
    * Whether a record matches the current project / type / search — the query
-   * the tab counts describe. Same semantics as the stores' filter (core
-   * `applyFeedbackFilters`): exact project and type, case-insensitive
-   * substring of the message. Inlined — the shared helper's sort/pagination
-   * would cost the bundle budget for a one-record check.
+   * the tab counts describe. The server's word for a record it listed under
+   * it; otherwise the stores' own predicate (case-insensitive substring of
+   * the message), which a broader server search can outmatch.
    */
   const matchesBase = useCallback((record: FeedbackRecord): boolean => {
-    const { projectName, type, search } = queryBaseRef.current;
-    return (
-      record.projectName === projectName &&
-      (type === undefined || record.type === type) &&
-      (search === undefined || record.message.toLowerCase().includes(search.toLowerCase()))
-    );
+    const base = queryBaseRef.current;
+    const listed = listedRef.current;
+    return (listed.base === base && listed.ids.has(record.id)) || matchesFeedbackQuery(record, base);
   }, []);
 
   /** Whether a record belongs in the currently loaded list (base query + status tab). */
@@ -501,21 +525,26 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
   );
 
   /** Register an optimistic step, chained behind any mutation still pending on the same feedback. */
-  const beginMutation = useCallback((id: string, prev: FeedbackRecord, deltas: CountDeltas): InFlight => {
-    const handle: InFlight = {
-      prev,
-      undo: [{ deltas, countsGen: countsGenRef.current }],
-      listGen: listGenRef.current,
-      state: "pending",
-      next: null,
-    };
-    const prior = inFlightRef.current.get(id);
-    if (prior) prior.next = handle;
-    inFlightRef.current.set(id, handle);
-    pendingMutationsRef.current += 1;
-    mutationSeqRef.current += 1;
-    return handle;
-  }, []);
+  const beginMutation = useCallback(
+    (id: string, prev: FeedbackRecord, wasListed: boolean, deltas: CountDeltas): InFlight => {
+      const prior = inFlightRef.current.get(id) ?? null;
+      const handle: InFlight = {
+        prev,
+        wasListed,
+        undo: [{ deltas, countsGen: countsGenRef.current }],
+        listGen: listGenRef.current,
+        state: "pending",
+        next: null,
+        prior,
+      };
+      if (prior) prior.next = handle;
+      inFlightRef.current.set(id, handle);
+      pendingMutationsRef.current += 1;
+      mutationSeqRef.current += 1;
+      return handle;
+    },
+    [],
+  );
 
   /**
    * Settle a mutation. Returns true when its outcome is the record's latest
@@ -529,12 +558,21 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
       handle.state = ok ? "ok" : "failed";
       pendingMutationsRef.current -= 1;
       recountIfIdle();
-      if (inFlightRef.current.get(id) === handle) inFlightRef.current.delete(id);
+      if (inFlightRef.current.get(id) === handle) {
+        // Failing as the latest hands the feedback back to the nearest earlier
+        // mutation still pending: the rollback shows its optimistic record, so
+        // the next mutation must chain behind it.
+        let prior = ok ? null : handle.prior;
+        while (prior !== null && prior.state !== "pending") prior = prior.prior;
+        if (prior === null) inFlightRef.current.delete(id);
+        else inFlightRef.current.set(id, prior);
+      }
       let later = handle.next;
       while (later !== null && later.state === "failed") later = later.next;
       if (later === null) return true;
       if (!ok && later.state === "pending") {
         later.prev = handle.prev;
+        later.wasListed = handle.wasListed;
         later.undo = [...handle.undo, ...later.undo];
       }
       return false;
@@ -551,7 +589,9 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
   const rollback = useCallback(
     (id: string, handle: InFlight, optimistic: FeedbackRecord | null, focusMovedTo: string | null | undefined) => {
       if (handle.listGen === listGenRef.current) {
-        const { inserted } = placeRecord(id, handle.prev);
+        // A row the step brought in (a drawer change, an undo) leaves again.
+        const { removedAt, inserted } = placeRecord(id, handle.wasListed ? handle.prev : null);
+        if (removedAt !== -1 && focusedIdRef.current === id) moveFocusAfterRemoval(itemsRef.current, removedAt);
         if (inserted && focusMovedTo !== undefined && focusedIdRef.current === focusMovedTo) {
           focusedIdRef.current = id;
           setFocusedId(id);
@@ -568,7 +608,7 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
       commitCounts(nextCounts);
       if (optimistic !== null && openedCacheRef.current === optimistic) commitOpenedCache(handle.prev);
     },
-    [placeRecord, commitCounts, commitOpenedCache],
+    [placeRecord, moveFocusAfterRemoval, commitCounts, commitOpenedCache],
   );
 
   const applyStatusChange = useCallback(
@@ -585,7 +625,11 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
       const epoch = projectEpochRef.current;
       // Captured for undos too: a FAILED undo leaves the status change
       // standing, so the undo affordance must survive the rollback.
-      const undoBefore = { pending: pendingUndoRef.current, record: undoRecordRef.current };
+      const undoBefore = {
+        pending: pendingUndoRef.current,
+        record: undoRecordRef.current,
+        entry: undoEntryRef.current,
+      };
 
       const previous = record.status;
       const now = new Date();
@@ -606,12 +650,13 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
         : [];
 
       const wasFocused = focusedIdRef.current === id;
+      const wasListed = itemsRef.current.some((f) => f.id === id);
       const { removedAt } = placeRecord(id, optimistic);
       const focusMovedTo =
         wasFocused && removedAt !== -1 ? moveFocusAfterRemoval(itemsRef.current, removedAt) : undefined;
       if (openedCacheRef.current?.id === id) commitOpenedCache(optimistic);
       commitCounts(adjustCounts(countsRef.current, deltas));
-      const handle = beginMutation(id, record, deltas);
+      const handle = beginMutation(id, record, wasListed, deltas);
       if (isUndo) {
         commitPendingUndo(null);
         undoRecordRef.current = null;
@@ -619,16 +664,26 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
         commitPendingUndo({ id, previousStatus: previous });
         undoRecordRef.current = optimistic;
       }
-      const undoGen = undoGenRef.current;
+      const undoEntry = undoEntryRef.current;
 
       try {
         const saved = await srcRef.current.setStatus(id, projectRef.current, nextStatus);
         // A later mutation on this feedback owns the row now — don't clobber its optimistic state.
         if (settleMutation(id, handle, true)) {
           // Place, not map: a page refetched meanwhile may still hold the
-          // pre-change row, which must leave if the saved status doesn't fit.
-          const { removedAt } = placeRecord(id, saved);
-          if (removedAt !== -1 && focusedIdRef.current === id) moveFocusAfterRemoval(itemsRef.current, removedAt);
+          // pre-change row, which must leave if the saved status doesn't fit,
+          // or lack it although it now fits. Such a row comes back only inside
+          // the loaded window — older than every loaded row, it sits on a page
+          // not loaded yet, and appending it would misplace it.
+          const list = itemsRef.current;
+          const createdAt = saved.createdAt.getTime();
+          if (
+            list.some((f) => f.id === id || f.createdAt.getTime() < createdAt) ||
+            (totalRef.current !== null && list.length >= totalRef.current)
+          ) {
+            const { removedAt } = placeRecord(id, saved);
+            if (removedAt !== -1 && focusedIdRef.current === id) moveFocusAfterRemoval(itemsRef.current, removedAt);
+          }
           if (openedCacheRef.current?.id === id) commitOpenedCache(saved);
           if (undoRecordRef.current?.id === id) undoRecordRef.current = saved;
         }
@@ -639,8 +694,8 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
         // After a project switch the list, counts and undo belong to another project.
         if (projectEpochRef.current === epoch) {
           if (latest) rollback(id, handle, optimistic, focusMovedTo);
-          if (undoGenRef.current === undoGen) {
-            commitPendingUndo(undoBefore.pending);
+          if (undoEntryRef.current === undoEntry) {
+            commitPendingUndo(undoBefore.pending, undoBefore.entry);
             undoRecordRef.current = undoBefore.record;
           }
         }
@@ -681,7 +736,11 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
       if (!record) return;
 
       const epoch = projectEpochRef.current;
-      const undoBefore = { pending: pendingUndoRef.current, record: undoRecordRef.current };
+      const undoBefore = {
+        pending: pendingUndoRef.current,
+        record: undoRecordRef.current,
+        entry: undoEntryRef.current,
+      };
       const deltas: CountDeltas = matchesBase(record)
         ? [
             [record.status, -1],
@@ -691,11 +750,12 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
 
       const wasFocused = focusedIdRef.current === id;
       const wasOpened = openedIdRef.current === id;
+      const wasListed = itemsRef.current.some((f) => f.id === id);
       const { removedAt } = placeRecord(id, null);
       const focusMovedTo =
         wasFocused && removedAt !== -1 ? moveFocusAfterRemoval(itemsRef.current, removedAt) : undefined;
       commitCounts(adjustCounts(countsRef.current, deltas));
-      const handle = beginMutation(id, record, deltas);
+      const handle = beginMutation(id, record, wasListed, deltas);
       if (wasOpened) {
         openedIdRef.current = null;
         setOpenedId(null);
@@ -705,7 +765,7 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
         commitPendingUndo(null);
         undoRecordRef.current = null;
       }
-      const undoGen = undoGenRef.current;
+      const undoEntry = undoEntryRef.current;
 
       try {
         await srcRef.current.remove(id, projectRef.current);
@@ -723,8 +783,8 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
               setOpenedId(id);
             }
           }
-          if (undoGenRef.current === undoGen) {
-            commitPendingUndo(undoBefore.pending);
+          if (undoEntryRef.current === undoEntry) {
+            commitPendingUndo(undoBefore.pending, undoBefore.entry);
             undoRecordRef.current = undoBefore.record;
           }
         }
@@ -756,11 +816,11 @@ export function useSitepingInbox(options: UseSitepingInboxOptions): InboxState {
       setProjectState(p);
       setFocusedId(null);
       setOpenedId(null);
-      setPendingUndo(null);
+      commitPendingUndo(null);
       undoRecordRef.current = null;
       commitOpenedCache(null);
     },
-    [commitOpenedCache],
+    [commitPendingUndo, commitOpenedCache],
   );
 
   const setStatus = useCallback((s: InboxStatusFilter) => setStatusFilter(s), []);

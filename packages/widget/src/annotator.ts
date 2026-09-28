@@ -1,11 +1,12 @@
 import type { AnnotationPayload, FeedbackType, ScreenshotRegion } from "@siteping/core";
 import { INSTANT_ANNOTATION_SIZE, Z_INDEX_MAX } from "./constants.js";
-import { findAnchorElement, generateAnchor, rectToPercentages } from "./dom/anchor.js";
+import { deepElementFromPoint, findAnchorElement, generateAnchor, rectToPercentages } from "./dom/anchor.js";
 import { el, setText } from "./dom-utils.js";
 import type { EventBus, WidgetEvents } from "./events.js";
-import { isWidgetChrome } from "./focus-tracker.js";
+import { deepFocusTarget, isWidgetChrome } from "./focus-tracker.js";
 import type { TFunction } from "./i18n/index.js";
 import { Popup } from "./popup.js";
+import { NO_VIEWPORT_INSETS, type ViewportInsets } from "./popup-placement.js";
 import { type AnnotatedScreenshot, captureAnnotatedScreenshot } from "./screenshot.js";
 import type { ThemeColors } from "./styles/theme.js";
 import { isCoarsePointer, isCompactViewport } from "./viewport.js";
@@ -18,6 +19,13 @@ export interface AnnotationComplete {
   type: FeedbackType;
   message: string;
   /**
+   * Idempotency key of this feedback, minted once per popup session: every
+   * resend from the same popup carries it, so the server (and the retry
+   * queue) dedupe a resend against an earlier attempt instead of storing
+   * the feedback twice. See `PopupSession`.
+   */
+  clientId: string;
+  /**
    * Base64 JPEG `data:` URL captured by html2canvas-pro, or null when capture
    * is disabled / failed / the peer dep is missing.
    */
@@ -28,6 +36,31 @@ export interface AnnotationComplete {
    * `screenshotDataUrl` is null.
    */
   screenshotRegion?: ScreenshotRegion | null | undefined;
+}
+
+/**
+ * State shared by every submit attempt from one popup session (the popup
+ * restores the form after a failure so the user can resend).
+ *
+ * `clientId` is reused even when the user edits the message before
+ * resending. If the first attempt landed although it timed out on our side,
+ * the server dedupes the resend and returns the original record, so that
+ * edit is lost — accepted: it takes a commit whose response never arrived,
+ * and minting a new id on edit would store a duplicate in that same case.
+ */
+interface PopupSession {
+  readonly clientId: string;
+  /** Captured on the first attempt (`undefined` until then) and reused on every retry. */
+  screenshot?: AnnotatedScreenshot | null;
+}
+
+function newPopupSession(): PopupSession {
+  // crypto.randomUUID() throws in non-secure contexts (plain HTTP)
+  try {
+    return { clientId: crypto.randomUUID() };
+  } catch {
+    return { clientId: `${Date.now()}-${Math.random().toString(36).slice(2)}` };
+  }
 }
 
 /**
@@ -130,13 +163,15 @@ export class Annotator {
     // activation, so the active element here is only the widget's 0x0 shadow
     // host — fall back to the last page element the focus tracker recorded
     // instead of silently dead-ending the Enter path. See issue #162.
+    // Focus inside a web component reports its host — annotate the focused
+    // element itself, as the pointer path does (#177).
     const active = document.activeElement;
     this.keyboardTarget =
       active instanceof HTMLElement &&
       active !== document.body &&
       active !== document.documentElement &&
       !isWidgetChrome(active)
-        ? active
+        ? deepFocusTarget(active)
         : (this.getFallbackTarget?.() ?? null);
 
     // Lock page scroll
@@ -221,7 +256,7 @@ export class Annotator {
         transition:all 0.2s ease;
       `;
       setText(cancelBtn, this.t("annotator.cancel"));
-      cancelBtn.addEventListener("click", () => this.deactivate());
+      cancelBtn.addEventListener("click", () => this.cancelSession());
       cancelBtn.addEventListener("mouseenter", () => {
         cancelBtn.style.borderColor = this.colors.typeBug;
         cancelBtn.style.color = this.colors.typeBug;
@@ -271,12 +306,41 @@ export class Annotator {
     this.overlay.focus({ preventScroll: true });
   }
 
+  /**
+   * Viewport band covered by the toolbar, measured rather than assumed: its
+   * height depends on fonts and zoom, and a host may restyle or move it.
+   */
+  private toolbarInsets(): ViewportInsets {
+    if (!this.toolbar) return NO_VIEWPORT_INSETS;
+    const toolbarRect = this.toolbar.getBoundingClientRect();
+    if (toolbarRect.height === 0) return NO_VIEWPORT_INSETS;
+    const viewportHeight = window.innerHeight;
+    const sitsInTopHalf = toolbarRect.top + toolbarRect.height / 2 < viewportHeight / 2;
+    return sitsInTopHalf
+      ? { top: Math.max(0, toolbarRect.bottom), bottom: 0 }
+      : { top: 0, bottom: Math.max(0, viewportHeight - toolbarRect.top) };
+  }
+
+  /**
+   * User-initiated end of the session (toolbar Cancel, Escape). Closes an open
+   * comment form first so it is not left floating with nothing behind it — the
+   * popup's own focus restore runs before the annotator hands focus back to the
+   * pre-activation element. While a submission is in flight the popup refuses
+   * to close, and the session stays active too: deactivating here would clear
+   * `isActive` and emit `annotation:end` while the popup still waits on
+   * `feedback:sent`, letting a second annotation overwrite its resolver and
+   * submit handler. The session ends once the pending popup settles; the
+   * send bounds its network and store waits (#342), so the hold ends too.
+   */
+  private cancelSession(): void {
+    if (!this.isActive) return;
+    this.popup.dismiss();
+    if (this.popup.isOpen) return;
+    this.deactivate();
+  }
+
   private deactivate(): void {
     if (!this.isActive) return;
-    // Never tear the session down around an open popup: it could still submit
-    // (annotation:complete after annotation:end) and a later right-click would
-    // re-enter show(), orphaning this one's promise.
-    this.popup.cancel();
     this.isActive = false;
     this.isDrawing = false;
     this.instantMode = false;
@@ -313,8 +377,7 @@ export class Annotator {
   }
 
   private onKeyDown = (e: KeyboardEvent): void => {
-    // Mid-submission the popup holds the user until the server answers.
-    if (e.key === "Escape" && !this.popup.isSubmitting) this.deactivate();
+    if (e.key === "Escape") this.cancelSession();
   };
 
   /**
@@ -480,10 +543,13 @@ export class Annotator {
     await this.finishDrawing(touch.clientX, touch.clientY);
   };
 
-  /** The page element under a point, seen through the overlay — null for widget chrome and the page root. */
+  /**
+   * The page element under a point, seen through the overlay and into open
+   * shadow roots like the drag path — null for widget chrome and the page root.
+   */
   private elementAt(x: number, y: number): HTMLElement | null {
     if (this.overlay) this.overlay.style.pointerEvents = "none";
-    const hit = document.elementFromPoint(x, y);
+    const hit = deepElementFromPoint(x, y);
     if (this.overlay) this.overlay.style.pointerEvents = "auto";
     // An icon's <path> is no target — take the element hosting the <svg>.
     const target = hit instanceof SVGElement ? (hit.ownerSVGElement ?? hit).parentElement : hit;
@@ -611,17 +677,20 @@ export class Annotator {
   }
 
   /**
-   * Open the feedback form for a selection; it submits through
-   * `runSubmission`. Resolves null when the user cancels.
+   * Open the feedback form for a selection as one popup session (see
+   * `PopupSession`); it submits through `runSubmission`. Resolves null when
+   * the user cancels.
    */
   private openForm(
     annotation: AnnotationPayload,
     rect: DOMRect,
     captureRect: DOMRect = rect,
   ): ReturnType<Popup["show"]> {
-    const screenshotCache: { value?: AnnotatedScreenshot | null } = {};
-    const shown = this.popup.show(rect, (formResult) =>
-      this.runSubmission(annotation, formResult, captureRect, screenshotCache),
+    const session = newPopupSession();
+    const shown = this.popup.show(
+      rect,
+      (formResult) => this.runSubmission(annotation, formResult, captureRect, session),
+      this.toolbarInsets(),
     );
     this.revealSelection(rect);
     return shown;
@@ -645,7 +714,8 @@ export class Annotator {
 
   /**
    * Submit handler passed into `popup.show()`. Captures the screenshot once
-   * (cached across retries) and emits `annotation:complete` on the bus, then
+   * (cached across retries in the popup `session`, like its `clientId`) and
+   * emits `annotation:complete` on the bus, then
    * waits for one of three terminal signals:
    *
    * - `feedback:sent` — resolve (popup closes).
@@ -662,15 +732,15 @@ export class Annotator {
     annotation: AnnotationPayload,
     formResult: { type: FeedbackType; message: string },
     rectBounds: DOMRect,
-    screenshotCache: { value?: AnnotatedScreenshot | null },
+    session: PopupSession,
   ): Promise<void> {
     // Screenshot capture is the slow part. Capture once and reuse the
     // cached data URL + region on every retry — re-running html2canvas-pro after
     // each failed submit would punish the user for a network blip.
-    if (screenshotCache.value === undefined) {
+    if (session.screenshot === undefined) {
       // The rect is in viewport coordinates of the selection moment — follow
       // any scroll since (revealSelection) so the capture frames the same content.
-      screenshotCache.value = await this.maybeCapture(
+      session.screenshot = await this.maybeCapture(
         new DOMRect(
           rectBounds.x + annotation.scrollX - window.scrollX,
           rectBounds.y + annotation.scrollY - window.scrollY,
@@ -679,7 +749,7 @@ export class Annotator {
         ),
       );
     }
-    const capture = screenshotCache.value;
+    const capture = session.screenshot;
 
     await new Promise<void>((resolve, reject) => {
       const cleanup = () => {
@@ -713,6 +783,7 @@ export class Annotator {
         annotation,
         type: formResult.type,
         message: formResult.message,
+        clientId: session.clientId,
         screenshotDataUrl: capture?.dataUrl ?? null,
         screenshotRegion: capture?.region ?? null,
       });

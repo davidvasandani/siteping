@@ -183,23 +183,31 @@ describe("SitepingInbox — keyboard", () => {
     await waitFor(() => expect(listRows()).toHaveLength(3)); // o1 reinstated
   });
 
-  it("e still toasts under a non-BCP-47 locale tag (fr_FR)", async () => {
+  /** Mount under a backend-style tag Intl rejects, and wait until the French dictionary is in. */
+  async function readyInFrFR(): Promise<HTMLElement> {
     renderInbox({ locale: "fr_FR" });
     const listbox = await ready();
+    await screen.findByRole("region", { name: "Boîte de réception des feedbacks" });
+    return listbox;
+  }
+
+  it("renders a backend-style fr_FR tag in French, with a valid lang, and e still toasts", async () => {
+    const listbox = await readyInFrFR();
+    expect(listbox.closest(".spd-root")?.getAttribute("lang")).toBe("fr-FR");
     fireEvent.keyDown(listbox, { key: "j" });
     fireEvent.keyDown(listbox, { key: "e" });
-    // "fr_FR" isn't a BCP-47 tag, so the strings fall back to English.
-    expect(await screen.findByText("Marked as resolved")).toBeTruthy();
+    expect(await screen.findByText("Marqué comme résolu")).toBeTruthy();
   });
 
-  it("opening a feedback with diagnostics under a non-BCP-47 locale tag keeps the inbox mounted", async () => {
-    renderInbox({ locale: "fr_FR" });
-    const listbox = await ready();
+  it("opening a feedback with diagnostics under fr_FR keeps the inbox mounted", async () => {
+    const listbox = await readyInFrFR();
     fireEvent.keyDown(listbox, { key: "j" });
     fireEvent.keyDown(listbox, { key: "j" }); // o2 carries diagnostics
     fireEvent.keyDown(listbox, { key: "Enter" });
-    const dialog = await screen.findByRole("dialog", { name: /Feedback details/ });
-    expect(dialog.querySelectorAll("time.spd-diag-time").length).toBeGreaterThan(0);
+    const dialog = await screen.findByRole("dialog", { name: /Détail du feedback/ });
+    const times = dialog.querySelectorAll("time.spd-diag-time");
+    expect(times.length).toBeGreaterThan(0);
+    for (const time of times) expect(time.textContent).toMatch(/\d/);
   });
 
   it("p marks the focused row in progress and it leaves the open tab", async () => {
@@ -281,6 +289,27 @@ describe("SitepingInbox — keyboard", () => {
 
     // The focused listbox unmounted: focus must not fall to <body>, or every
     // shortcut dies until the user clicks back into the inbox.
+    const root = document.querySelector(".spd-root");
+    expect(root?.contains(document.activeElement)).toBe(true);
+
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "4" }); // shortcuts still work
+    await waitFor(() => expect(listRows().map((row) => row.getAttribute("data-status"))).toEqual(["resolved"]));
+  });
+
+  it("keeps keyboard focus in the inbox when the drawer closes over an emptied tab", async () => {
+    const only = makeRecord({ id: "solo", status: "open", message: "The only open one" });
+    renderInbox({}, [only]);
+    const listbox = await ready();
+    listbox.focus();
+    fireEvent.keyDown(listbox, { key: "j" });
+    fireEvent.keyDown(listbox, { key: "Enter" }); // overlay drawer takes focus
+    const dialog = await screen.findByRole("dialog", { name: /Feedback details/ });
+    fireEvent.keyDown(dialog, { key: "e" }); // resolved from the drawer → the empty state replaces the listbox
+    await waitFor(() => expect(screen.queryByRole("listbox")).toBeNull());
+
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: /Feedback details/ })).toBeNull());
+    // No listbox to return to: focus must stay in the inbox, not fall to <body>.
     const root = document.querySelector(".spd-root");
     expect(root?.contains(document.activeElement)).toBe(true);
 
