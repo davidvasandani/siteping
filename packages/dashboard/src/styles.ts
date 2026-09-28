@@ -369,6 +369,7 @@ export const INBOX_CSS = `
 .spd-list { outline: none; transition: opacity 120ms var(--spd-ease); }
 .spd-list[aria-busy="true"] { opacity: 0.6; pointer-events: none; }
 .spd-list:focus-visible { outline: none; }
+.spd-root:focus { outline: none; }
 
 /* ------------------------------------------------------------------ rows */
 .spd-row {
