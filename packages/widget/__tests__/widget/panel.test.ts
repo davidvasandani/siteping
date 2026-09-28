@@ -1,12 +1,17 @@
 // @vitest-environment jsdom
 
-import type { FeedbackResponse } from "@siteping/core";
+import type {
+  FeedbackResponse,
+  SitepingPanelAction,
+  SitepingPanelActionContext,
+  SitepingPanelActionFeedback,
+} from "@siteping/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventBus, type WidgetEvents } from "../../src/events.js";
 import { createT, tWithParams } from "../../src/i18n/index.js";
 import { Panel } from "../../src/panel.js";
 import { buildThemeColors } from "../../src/styles/theme.js";
-import { createShadowRoot, mockMediaQueries, PHONE_MEDIA } from "../helpers.js";
+import { createShadowRoot, mockMediaQueries, PHONE_MEDIA, trackClickListeners } from "../helpers.js";
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -386,22 +391,6 @@ describe("Panel", () => {
       await vi.waitFor(() => {
         expect(shadow.querySelector<HTMLElement>('[data-feedback-id="fb-ip"]')).not.toBeNull();
       });
-    });
-
-    it("page markers (and the FAB badge they drive) ignore the panel's status tab", async () => {
-      const open = makeFeedback({ id: "fb-open", status: "open", url: "/" });
-      const done = makeFeedback({ id: "fb-done", status: "resolved", url: "/" });
-      apiClient.getFeedbacks.mockImplementation(async (_project: string, opts?: { statuses?: unknown }) =>
-        opts?.statuses ? { feedbacks: [done], total: 1 } : { feedbacks: [open, done], total: 2 },
-      );
-      await panel.open();
-
-      shadow.querySelector<HTMLButtonElement>('[data-status-filter="resolved"]')!.click();
-      await vi.waitFor(() => expect(shadow.querySelector('[data-feedback-id="fb-open"]')).toBeNull());
-
-      // The open marker must survive — otherwise the badge drops to 0 and
-      // stays there after the panel closes.
-      await vi.waitFor(() => expect(markers.render.mock.calls.at(-1)?.[0]).toEqual([open, done]));
     });
 
     it("keeps a wont_fix feedback visible under the Resolved tab", async () => {
@@ -1186,6 +1175,23 @@ describe("Panel", () => {
         expect(panelIsOpen()).toBe(true);
       });
 
+      it.each([
+        [".sp-filter-dropdown-btn", ".sp-filter-dropdown-menu"],
+        [".sp-sort-btn", ".sp-sort-menu"],
+        [".sp-export-btn", ".sp-export-menu--open"],
+      ])("menu opened by %s, with focus still on its trigger", (trigger, menu) => {
+        const btn = shadow.querySelector<HTMLButtonElement>(trigger)!;
+        btn.click();
+        btn.focus();
+        expect(shadow.querySelector(menu)).not.toBeNull();
+
+        escapeOn(btn);
+
+        expect(shadow.querySelector(menu)).toBeNull();
+        expect(panelIsOpen()).toBe(true);
+        expect(shadow.activeElement).toBe(btn);
+      });
+
       it("delete-all confirm dialog", async () => {
         shadow.querySelector<HTMLButtonElement>(".sp-btn-delete-all")!.click();
         await vi.waitFor(() => expect(shadow.querySelector(".sp-confirm-backdrop")).not.toBeNull());
@@ -1486,6 +1492,24 @@ describe("Panel", () => {
       scrollSpy.mockRestore();
     });
 
+    it("keeps 'Go to annotation' for another page's feedback when markers are not scoped by URL", async () => {
+      panel.destroy();
+      panel = new Panel(shadow, colors, bus, apiClient as never, "test-project", markers as never, t, "fr", {
+        getScope: () => ({ url: "/", urlPattern: null }),
+        scopeAnnotationsByUrl: false,
+      });
+      const elsewhere = makeFeedback({ id: "elsewhere", url: "/pricing", annotations: [annotation] });
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [elsewhere], total: 1 });
+
+      await panel.open();
+      shadow.querySelector<HTMLButtonElement>('[data-scope-filter="all"]')!.click();
+      await vi.waitFor(() => expect(shadow.querySelector('[data-feedback-id="elsewhere"]')).not.toBeNull());
+      shadow.querySelector<HTMLElement>('[data-feedback-id="elsewhere"]')!.click();
+
+      // Markers render for every URL here, so the detail view keeps the jump.
+      expect(shadow.querySelector(".sp-detail-btn-goto")).not.toBeNull();
+    });
+
     it("detail onGoToAnnotation scrolls and pins the highlight", async () => {
       // url = the current page scope (pathname) — as the launcher stores it
       const fb = makeFeedback({ id: "fb-1", url: "/", annotations: [annotation] });
@@ -1750,6 +1774,37 @@ describe("Panel", () => {
       });
     });
 
+    it.each(["resolve", "delete"] as const)(
+      "checkboxes still follow the selection after a successful bulk %s",
+      async (action) => {
+        const fb1 = makeFeedback({ id: "fb-1" });
+        const fb2 = makeFeedback({ id: "fb-2" });
+        const fb3 = makeFeedback({ id: "fb-3" });
+        apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [fb1, fb2, fb3], total: 3 });
+        apiClient.resolveFeedback.mockResolvedValue(undefined);
+        apiClient.deleteFeedback.mockResolvedValue(undefined);
+        const checkbox = (selector: string) => shadow.querySelector<HTMLElement>(`${selector} .sp-bulk-checkbox`)!;
+
+        await panel.open();
+        checkbox('[data-feedback-id="fb-1"]').click();
+        apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [fb2, fb3], total: 2 });
+        const button = shadow.querySelector<HTMLButtonElement>(`.sp-bulk-btn-${action}`)!;
+        button.click();
+        await vi.waitFor(() => expect(shadow.querySelector('[data-feedback-id="fb-1"]')).toBeNull());
+        await vi.waitFor(() => expect(button.disabled).toBe(false));
+
+        // The reloaded list's checkboxes must still be wired to the selection.
+        checkbox('[data-feedback-id="fb-2"]').click();
+        expect(checkbox('[data-feedback-id="fb-2"]').getAttribute("aria-checked")).toBe("true");
+        checkbox(".sp-bulk-select-all").click();
+        expect(checkbox(".sp-bulk-select-all").getAttribute("aria-checked")).toBe("true");
+        expect(checkbox('[data-feedback-id="fb-3"]').getAttribute("aria-checked")).toBe("true");
+        expect(shadow.querySelector(".sp-bulk-bar-count")!.textContent).toBe(
+          tWithParams(t, "bulk.selected", { count: 2 }),
+        );
+      },
+    );
+
     it("selection stays visible on cards after a re-render (group toggle / sort / load more)", async () => {
       const fb1 = makeFeedback({ id: "fb-1" });
       const fb2 = makeFeedback({ id: "fb-2" });
@@ -1768,6 +1823,32 @@ describe("Panel", () => {
       expect(card.classList.contains("sp-card--selected")).toBe(true);
       const other = shadow.querySelector<HTMLElement>('[data-feedback-id="fb-2"]')!;
       expect(other.classList.contains("sp-card--selected")).toBe(false);
+    });
+
+    it("keeps the selection checked across Load more, with stats over both pages", async () => {
+      const page1 = [makeFeedback({ id: "fb-1" }), makeFeedback({ id: "fb-2" })];
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: page1, total: 3 });
+      const checked = (selector: string) =>
+        shadow.querySelector(`${selector} .sp-bulk-checkbox`)!.getAttribute("aria-checked");
+
+      await panel.open();
+      shadow.querySelector<HTMLElement>(".sp-bulk-select-all .sp-bulk-checkbox")!.click();
+      shadow.querySelector<HTMLButtonElement>(".sp-group-toggle")!.click();
+      expect(checked(".sp-bulk-select-all")).toBe("true");
+
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [makeFeedback({ id: "fb-3" })], total: 3 });
+      shadow.querySelector<HTMLButtonElement>(".sp-btn-load-more")!.click();
+      await vi.waitFor(() => expect(shadow.querySelector('[data-feedback-id="fb-3"]')).not.toBeNull());
+
+      expect(checked('[data-feedback-id="fb-1"]')).toBe("true");
+      expect(checked('[data-feedback-id="fb-2"]')).toBe("true");
+      expect(checked('[data-feedback-id="fb-3"]')).toBe("false");
+      expect(checked(".sp-bulk-select-all")).toBe("false");
+      expect(shadow.querySelector(".sp-bulk-bar-count")!.textContent).toBe(
+        tWithParams(t, "bulk.selected", { count: 2 }),
+      );
+      // The first stat is the open count, over both pages.
+      expect(shadow.querySelector(".sp-stats-value")!.textContent).toBe("3");
     });
 
     it("bulkResolve skips already-closed feedbacks (keeps wont_fix and resolvedAt)", async () => {
@@ -1851,12 +1932,19 @@ describe("Panel", () => {
       apiClient.getFeedbacks.mockClear();
       apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [fb2], total: 1 });
 
-      shadow.querySelector<HTMLButtonElement>(".sp-bulk-btn-delete")!.click();
+      const deleteBtn = shadow.querySelector<HTMLButtonElement>(".sp-bulk-btn-delete")!;
+      deleteBtn.click();
 
       await vi.waitFor(() => expect(errorListener).toHaveBeenCalledWith(expect.any(Error)));
       expect(deletedListener).toHaveBeenCalledWith("fb-1");
       expect(deletedListener).not.toHaveBeenCalledWith("fb-2");
       expect(apiClient.getFeedbacks).toHaveBeenCalled();
+
+      // Only the failed item stays selected, ready for a retry.
+      await vi.waitFor(() => expect(deleteBtn.disabled).toBe(false));
+      const checkbox = shadow.querySelector('[data-feedback-id="fb-2"] .sp-bulk-checkbox')!;
+      expect(checkbox.getAttribute("aria-checked")).toBe("true");
+      expect(deleteBtn.textContent).toBe(`${t("bulk.delete")} 1`);
     });
 
     it("bulkResolve partial failure still reloads the list", async () => {
@@ -1873,10 +1961,18 @@ describe("Panel", () => {
       shadow.querySelector<HTMLElement>(".sp-bulk-select-all .sp-bulk-checkbox")!.click();
       apiClient.getFeedbacks.mockClear();
 
-      shadow.querySelector<HTMLButtonElement>(".sp-bulk-btn-resolve")!.click();
+      const resolveBtn = shadow.querySelector<HTMLButtonElement>(".sp-bulk-btn-resolve")!;
+      resolveBtn.click();
 
       await vi.waitFor(() => expect(errorListener).toHaveBeenCalledWith(expect.any(Error)));
       expect(apiClient.getFeedbacks).toHaveBeenCalled();
+
+      await vi.waitFor(() => expect(resolveBtn.disabled).toBe(false));
+      const checked = (id: string) =>
+        shadow.querySelector(`[data-feedback-id="${id}"] .sp-bulk-checkbox`)!.getAttribute("aria-checked");
+      expect(checked("fb-1")).toBe("false");
+      expect(checked("fb-2")).toBe("true");
+      expect(resolveBtn.textContent).toBe(`${t("bulk.resolve")} 1`);
     });
 
     it("bulkDelete emits feedback:error on failure", async () => {
@@ -1898,7 +1994,41 @@ describe("Panel", () => {
       await vi.waitFor(() => {
         expect(errorListener).toHaveBeenCalledWith(expect.any(Error));
       });
+      // Nothing was deleted: the selection is kept for a retry.
+      await vi.waitFor(() => expect(deleteBtn.disabled).toBe(false));
+      const checkbox = shadow.querySelector('[data-feedback-id="fb-1"] .sp-bulk-checkbox')!;
+      expect(checkbox.getAttribute("aria-checked")).toBe("true");
     });
+
+    it.each(["resolve", "delete"] as const)(
+      "a bulk %s that fails for every item reports one error, without a reload",
+      async (action) => {
+        const fb1 = makeFeedback({ id: "fb-1" });
+        const fb2 = makeFeedback({ id: "fb-2" });
+        apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [fb1, fb2], total: 2 });
+        apiClient.resolveFeedback.mockRejectedValue(new Error("offline"));
+        apiClient.deleteFeedback.mockRejectedValue(new Error("offline"));
+        const errorListener = vi.fn();
+        bus.on("feedback:error", errorListener);
+        const checked = (selector: string) =>
+          shadow.querySelector(`${selector} .sp-bulk-checkbox`)!.getAttribute("aria-checked");
+
+        await panel.open();
+        shadow.querySelector<HTMLElement>(".sp-bulk-select-all .sp-bulk-checkbox")!.click();
+        // During an outage the reload would fail too.
+        apiClient.getFeedbacks.mockClear();
+        apiClient.getFeedbacks.mockRejectedValue(new Error("offline"));
+        const button = shadow.querySelector<HTMLButtonElement>(`.sp-bulk-btn-${action}`)!;
+        button.click();
+        await vi.waitFor(() => expect(button.disabled).toBe(false));
+
+        expect(errorListener).toHaveBeenCalledTimes(1);
+        expect(apiClient.getFeedbacks).not.toHaveBeenCalled();
+        expect(checked('[data-feedback-id="fb-1"]')).toBe("true");
+        expect(checked('[data-feedback-id="fb-2"]')).toBe("true");
+        expect(checked(".sp-bulk-select-all")).toBe("true");
+      },
+    );
   });
 
   // -------------------------------------------------------------------------
@@ -2267,47 +2397,6 @@ describe("Panel", () => {
       vi.restoreAllMocks();
     });
 
-    it("clicking the trigger again closes the menu once the outside-click handler is armed", async () => {
-      vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb: FrameRequestCallback) => {
-        cb(0);
-        return 0;
-      });
-      await panel.open();
-
-      const typeBtn = shadow.querySelector<HTMLButtonElement>(".sp-filter-dropdown-btn")!;
-      typeBtn.click();
-      expect(shadow.querySelector(".sp-filter-dropdown-menu")).not.toBeNull();
-
-      // At document level the click target is retargeted to the shadow host.
-      typeBtn.click();
-      expect(shadow.querySelector(".sp-filter-dropdown-menu")).toBeNull();
-      expect(typeBtn.getAttribute("aria-expanded")).toBe("false");
-
-      vi.restoreAllMocks();
-    });
-
-    it("destroying the panel before the next frame leaves no document click listener behind", async () => {
-      await panel.open();
-      // Manual frame queue honouring cancelAnimationFrame
-      const frames = new Map<number, FrameRequestCallback>();
-      let nextFrame = 0;
-      vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb: FrameRequestCallback) => {
-        frames.set(++nextFrame, cb);
-        return nextFrame;
-      });
-      vi.spyOn(window, "cancelAnimationFrame").mockImplementation((id: number) => void frames.delete(id));
-      const addSpy = vi.spyOn(document, "addEventListener");
-      try {
-        shadow.querySelector<HTMLButtonElement>(".sp-filter-dropdown-btn")!.click();
-        panel.destroy();
-        for (const cb of frames.values()) cb(0);
-
-        expect(addSpy.mock.calls.filter(([type]) => type === "click")).toEqual([]);
-      } finally {
-        vi.restoreAllMocks();
-      }
-    });
-
     it("clicking the trigger again while menu is open closes it", async () => {
       await panel.open();
 
@@ -2317,6 +2406,43 @@ describe("Panel", () => {
 
       typeBtn.click();
       expect(shadow.querySelector(".sp-filter-dropdown-menu")).toBeNull();
+    });
+
+    it("toggles on its trigger and closes on any other click from a closed shadow root", async () => {
+      const host = document.createElement("div");
+      document.body.appendChild(host);
+      const root = host.attachShadow({ mode: "closed" });
+      const closedPanel = new Panel(root, colors, bus, apiClient as never, "test-project", markers as never, t, "fr");
+      await closedPanel.open();
+      const typeBtn = root.querySelector<HTMLButtonElement>(".sp-filter-dropdown-btn")!;
+      const menuOpen = () => root.querySelector(".sp-filter-dropdown-menu") !== null;
+
+      // The trigger itself, elsewhere in the same shadow tree, the host page.
+      for (const target of [typeBtn, root.querySelector<HTMLElement>(".sp-search")!, document.body]) {
+        typeBtn.click();
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        expect(menuOpen()).toBe(true);
+        target.click();
+        expect(menuOpen()).toBe(false);
+      }
+
+      closedPanel.destroy();
+      host.remove();
+    });
+
+    it("leaves no click listener behind when the menu closes in the frame it opened", async () => {
+      await panel.open();
+      const liveClickListeners = trackClickListeners(document, shadow);
+      try {
+        const typeBtn = shadow.querySelector<HTMLButtonElement>(".sp-filter-dropdown-btn")!;
+        typeBtn.click();
+        typeBtn.click();
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+        expect(liveClickListeners()).toEqual([]);
+      } finally {
+        vi.restoreAllMocks();
+      }
     });
   });
 
@@ -2341,24 +2467,87 @@ describe("Panel", () => {
       expect(card.classList.contains("sp-anim-flash")).toBe(true);
     });
 
-    it("a marker click that opens the panel flashes its card once the list has rendered", async () => {
-      const fb = makeFeedback({ id: "fb-marker" });
-      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [fb], total: 1 });
-      const scrollSpy = vi.fn();
-      const original = Element.prototype.scrollIntoView;
-      Element.prototype.scrollIntoView = scrollSpy; // jsdom lacks it
-      try {
-        // markers.ts: emit panel:toggle, then synchronously dispatch the click
+    describe("while the list loads", () => {
+      const scrollIntoView = vi.fn();
+      const findCard = (id: string) => shadow.querySelector<HTMLElement>(`[data-feedback-id="${id}"]`);
+      /** What markers.ts does on a marker click: open the panel, then ask it to reveal the card. */
+      const clickMarker = (feedbackId: string) => {
         bus.emit("panel:toggle", true);
-        document.dispatchEvent(new CustomEvent("sp-marker-click", { detail: { feedbackId: "fb-marker" } }));
+        document.dispatchEvent(new CustomEvent("sp-marker-click", { detail: { feedbackId } }));
+      };
+      const deferLoad = () => {
+        let resolve!: (value: { feedbacks: FeedbackResponse[]; total: number }) => void;
+        apiClient.getFeedbacks.mockReturnValueOnce(new Promise((r) => (resolve = r)));
+        return resolve;
+      };
 
-        await vi.waitFor(() => expect(shadow.querySelector('[data-feedback-id="fb-marker"]')).not.toBeNull());
-        const card = shadow.querySelector<HTMLElement>('[data-feedback-id="fb-marker"]')!;
+      const originalScrollIntoView = Element.prototype.scrollIntoView;
+
+      beforeEach(() => {
+        scrollIntoView.mockClear();
+        Element.prototype.scrollIntoView = scrollIntoView; // jsdom lacks it
+      });
+
+      afterEach(() => {
+        Element.prototype.scrollIntoView = originalScrollIntoView;
+      });
+
+      it("a marker click that opens the panel flashes its card once the list has rendered", async () => {
+        apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [makeFeedback({ id: "fb-marker" })], total: 1 });
+
+        clickMarker("fb-marker");
+
+        await vi.waitFor(() => expect(findCard("fb-marker")).not.toBeNull());
+        const card = findCard("fb-marker")!;
         expect(card.classList.contains("sp-anim-flash")).toBe(true);
-        expect(scrollSpy.mock.contexts).toContain(card);
-      } finally {
-        Element.prototype.scrollIntoView = original;
-      }
+        expect(scrollIntoView.mock.contexts).toContain(card);
+      });
+
+      it("a marker click that re-opens the panel flashes the reloaded card, not the one it replaces", async () => {
+        apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [makeFeedback({ id: "fb-marker" })], total: 1 });
+        await panel.open();
+        panel.close();
+        const staleCard = findCard("fb-marker")!;
+
+        clickMarker("fb-marker");
+
+        expect(staleCard.classList.contains("sp-anim-flash")).toBe(false);
+        await vi.waitFor(() => expect(findCard("fb-marker")).not.toBe(staleCard));
+        expect(findCard("fb-marker")!.classList.contains("sp-anim-flash")).toBe(true);
+      });
+
+      it("drops the marker click when the panel closes before the list renders", async () => {
+        const resolveLoad = deferLoad();
+        clickMarker("fb-marker");
+        panel.close();
+
+        resolveLoad({ feedbacks: [makeFeedback({ id: "fb-marker" })], total: 1 });
+
+        await vi.waitFor(() => expect(findCard("fb-marker")).not.toBeNull());
+        expect(findCard("fb-marker")!.classList.contains("sp-anim-flash")).toBe(false);
+        expect(scrollIntoView).not.toHaveBeenCalled();
+      });
+
+      it("drops the marker click once a load renders without its card", async () => {
+        apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [makeFeedback({ id: "fb-a" })], total: 1 });
+        await panel.open();
+
+        const resolveReload = deferLoad();
+        const reloading = panel.refresh();
+        document.dispatchEvent(new CustomEvent("sp-marker-click", { detail: { feedbackId: "fb-b" } }));
+        resolveReload({ feedbacks: [makeFeedback({ id: "fb-a" })], total: 1 });
+        await reloading;
+
+        // A later load that does list it must not flash it out of the blue
+        apiClient.getFeedbacks.mockResolvedValue({
+          feedbacks: [makeFeedback({ id: "fb-a" }), makeFeedback({ id: "fb-b" })],
+          total: 2,
+        });
+        await panel.refresh();
+
+        expect(findCard("fb-b")!.classList.contains("sp-anim-flash")).toBe(false);
+        expect(scrollIntoView).not.toHaveBeenCalled();
+      });
     });
   });
 
@@ -3845,6 +4034,154 @@ describe("Panel", () => {
     });
   });
 
+  describe("page markers under a list filter", () => {
+    const pageOpen = makeFeedback({ id: "fb-open", status: "open", url: "/" });
+    const pageDone = makeFeedback({ id: "fb-done", status: "resolved", url: "/" });
+    /** The list query under a status tab; the page-marker query has no filter. */
+    const isFiltered = (options?: { statuses?: unknown }) => options?.statuses !== undefined;
+    const clickStatusTab = (tab: string) =>
+      shadow.querySelector<HTMLButtonElement>(`[data-status-filter="${tab}"]`)!.click();
+    const lastMarkerRender = () => markers.render.mock.calls.at(-1)?.[0];
+
+    it("reuse the list on an unfiltered load of this page, with a single request", async () => {
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [pageOpen, pageDone], total: 2 });
+      await panel.open();
+
+      expect(apiClient.getFeedbacks).toHaveBeenCalledTimes(1);
+      expect(lastMarkerRender()).toEqual([pageOpen, pageDone]);
+    });
+
+    it("stay project-wide, like the launcher's, when scopeAnnotationsByUrl is false", async () => {
+      panel.destroy();
+      shadow.host.remove();
+      shadow = createShadowRoot();
+      bus = new EventBus<WidgetEvents>();
+      apiClient = createMockApiClient();
+      markers = createMockMarkers();
+      panel = new Panel(shadow, colors, bus, apiClient as never, "test-project", markers as never, t, "fr", {
+        getScope: () => ({ url: "/", urlPattern: null }),
+        scopeAnnotationsByUrl: false,
+      });
+      const elsewhere = makeFeedback({ id: "fb-elsewhere", url: "/other" });
+      apiClient.getFeedbacks.mockImplementation(async (_project: string, options?: { url?: unknown }) =>
+        options?.url === undefined
+          ? { feedbacks: [pageOpen, elsewhere], total: 2 }
+          : { feedbacks: [pageOpen], total: 1 },
+      );
+
+      // The default "This page" list is narrower than the markers' query
+      await panel.open();
+      expect(apiClient.getFeedbacks.mock.calls.map((call) => call[1])).toEqual([
+        { page: 1, limit: 20, url: "/" },
+        { limit: 20 },
+      ]);
+      await vi.waitFor(() => expect(lastMarkerRender()).toEqual([pageOpen, elsewhere]));
+
+      // The "All pages" list is the markers' query: it serves them
+      apiClient.getFeedbacks.mockClear();
+      shadow.querySelector<HTMLButtonElement>('[data-scope-filter="all"]')!.click();
+      await vi.waitFor(() => expect(shadow.querySelector('[data-feedback-id="fb-elsewhere"]')).not.toBeNull());
+      expect(apiClient.getFeedbacks).toHaveBeenCalledTimes(1);
+      expect(lastMarkerRender()).toEqual([pageOpen, elsewhere]);
+    });
+
+    it("keep the page's open markers, and the FAB badge they drive, under the Resolved tab", async () => {
+      apiClient.getFeedbacks.mockImplementation(async (_project: string, options?: { statuses?: unknown }) =>
+        isFiltered(options) ? { feedbacks: [pageDone], total: 1 } : { feedbacks: [pageOpen, pageDone], total: 2 },
+      );
+      await panel.open();
+
+      clickStatusTab("resolved");
+      await vi.waitFor(() => expect(shadow.querySelector('[data-feedback-id="fb-open"]')).toBeNull());
+
+      // The open marker must survive — otherwise the badge drops to 0 and
+      // stays there after the panel closes.
+      await vi.waitFor(() => expect(lastMarkerRender()).toEqual([pageOpen, pageDone]));
+    });
+
+    it("follow the page query, not the list, on a load under a filter", async () => {
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [pageOpen, pageDone], total: 2 });
+      await panel.open();
+      // The resolved feedback was deleted meanwhile
+      apiClient.getFeedbacks.mockImplementation(async (_project: string, options?: { statuses?: unknown }) =>
+        isFiltered(options) ? { feedbacks: [], total: 0 } : { feedbacks: [pageOpen], total: 1 },
+      );
+
+      clickStatusTab("resolved");
+
+      await vi.waitFor(() => expect(lastMarkerRender()).toEqual([pageOpen]));
+    });
+
+    it("fetch the page-marker query alongside the filtered list, not after it", async () => {
+      await panel.open();
+      apiClient.getFeedbacks.mockClear();
+      apiClient.getFeedbacks.mockImplementation((_project: string, options?: { statuses?: unknown }) =>
+        isFiltered(options) ? new Promise(() => {}) : Promise.resolve({ feedbacks: [pageOpen], total: 1 }),
+      );
+
+      clickStatusTab("resolved");
+
+      // The list is still loading, and the markers already show the page
+      expect(apiClient.getFeedbacks).toHaveBeenCalledTimes(2);
+      expect(apiClient.getFeedbacks.mock.calls[1]?.[1]).toEqual({ limit: 20, url: "/" });
+      await vi.waitFor(() => expect(lastMarkerRender()).toEqual([pageOpen]));
+    });
+
+    it("drop a page-marker response that a newer load overtook", async () => {
+      await panel.open();
+      let resolveStaleMarkers!: (value: { feedbacks: FeedbackResponse[]; total: number }) => void;
+      apiClient.getFeedbacks
+        .mockResolvedValueOnce({ feedbacks: [pageDone], total: 1 }) // Resolved tab: list
+        .mockReturnValueOnce(new Promise((resolve) => (resolveStaleMarkers = resolve))) // …and its markers
+        .mockResolvedValue({ feedbacks: [pageOpen], total: 1 }); // Open tab: list and markers
+      clickStatusTab("resolved");
+      clickStatusTab("open");
+      await vi.waitFor(() => expect(lastMarkerRender()).toEqual([pageOpen]));
+
+      resolveStaleMarkers({ feedbacks: [], total: 0 });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(lastMarkerRender()).toEqual([pageOpen]);
+    });
+
+    it("keep the current markers, without an error, when the page-marker query fails", async () => {
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [pageOpen], total: 1 });
+      await panel.open();
+      const errorListener = vi.fn();
+      bus.on("feedback:error", errorListener);
+      markers.render.mockClear();
+      apiClient.getFeedbacks.mockImplementation(async (_project: string, options?: { statuses?: unknown }) => {
+        if (!isFiltered(options)) throw new Error("markers down");
+        return { feedbacks: [], total: 0 };
+      });
+
+      clickStatusTab("resolved");
+      await vi.waitFor(() => expect(shadow.querySelector('[data-feedback-id="fb-open"]')).toBeNull());
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(markers.render).not.toHaveBeenCalled();
+      expect(errorListener).not.toHaveBeenCalled();
+    });
+
+    it("leave the markers alone when Load more appends a filtered page", async () => {
+      const resolvedPage = (prefix: string, length: number) =>
+        Array.from({ length }, (_, i) => makeFeedback({ id: `${prefix}-${i}`, status: "resolved", url: "/" }));
+      apiClient.getFeedbacks.mockImplementation(async (_project: string, options?: { statuses?: unknown }) =>
+        isFiltered(options) ? { feedbacks: resolvedPage("fb-p1", 20), total: 25 } : { feedbacks: [pageOpen], total: 1 },
+      );
+      await panel.open();
+      clickStatusTab("resolved");
+      await vi.waitFor(() => expect(shadow.querySelector(".sp-btn-load-more")).not.toBeNull());
+      await vi.waitFor(() => expect(lastMarkerRender()).toEqual([pageOpen]));
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: resolvedPage("fb-p2", 5), total: 25 });
+
+      shadow.querySelector<HTMLButtonElement>(".sp-btn-load-more")!.click();
+      await vi.waitFor(() => expect(shadow.querySelectorAll(".sp-card")).toHaveLength(25));
+
+      expect(lastMarkerRender()).toEqual([pageOpen]);
+    });
+  });
+
   describe("loadFeedbacks error handling with prior content", () => {
     it("error after prior content keeps content visible and emits feedback:error", async () => {
       const fb = makeFeedback({ id: "fb-1" });
@@ -3871,6 +4208,257 @@ describe("Panel", () => {
       // The card from the first load should still be there (no error UI replacement)
       const card = shadow.querySelector<HTMLElement>('[data-feedback-id="fb-1"]');
       expect(card).not.toBeNull();
+    });
+  });
+
+  describe("panelActions plumbing", () => {
+    /** Rebuild the panel with host actions (same harness as the custom getScope test above). */
+    function rebuildWithActions(panelActions: SitepingPanelAction[]): Error[] {
+      panel.destroy();
+      shadow.host.remove();
+      shadow = createShadowRoot();
+      bus = new EventBus<WidgetEvents>();
+      apiClient = createMockApiClient();
+      markers = createMockMarkers();
+      const actionErrors: Error[] = [];
+      bus.on("panel:action-error", (e) => actionErrors.push(e));
+      panel = new Panel(shadow, colors, bus, apiClient as never, "test-project", markers as never, t, "fr", {
+        getScope: () => ({ url: "/", urlPattern: null }),
+        scopeAnnotationsByUrl: true,
+        panelActions,
+      });
+      return actionErrors;
+    }
+
+    async function openDetail(fb: FeedbackResponse): Promise<void> {
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [fb], total: 1 });
+      await panel.open();
+      shadow.querySelector<HTMLElement>(`[data-feedback-id="${fb.id}"]`)!.click();
+    }
+
+    const detailEl = () => shadow.querySelector<HTMLElement>(".sp-detail")!;
+
+    it("wires panelActions through to the detail view and reports a rejection on panel:action-error only", async () => {
+      const onAction = vi.fn().mockRejectedValue(new Error("dispatch failed"));
+      const actionErrors = rebuildWithActions([{ id: "a1", label: "Do it", onAction }]);
+      // `feedback:error` settles the annotator's pending submission — a host
+      // action failure must never be emitted there.
+      const feedbackErrors = vi.fn();
+      bus.on("feedback:error", feedbackErrors);
+      await openDetail(makeFeedback({ id: "fb-1" }));
+
+      const customBtn = shadow.querySelector<HTMLButtonElement>(".sp-detail-btn-custom")!;
+      expect(customBtn).not.toBeNull();
+      customBtn.click();
+
+      await vi.waitFor(() => expect(onAction).toHaveBeenCalled());
+      await vi.waitFor(() => expect(actionErrors[0]?.message).toBe("dispatch failed"));
+      expect(feedbackErrors).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(customBtn.disabled).toBe(false));
+    });
+
+    it("contains host callbacks that throw synchronously or throw non-Errors", async () => {
+      const actionErrors = rebuildWithActions([
+        {
+          id: "sync",
+          label: "Sync throw",
+          onAction: () => {
+            throw "not an Error";
+          },
+        },
+        {
+          id: "hidden",
+          label: "Never shown",
+          onAction: () => {},
+          visible: () => {
+            throw new Error("visible failed");
+          },
+        },
+      ]);
+      await openDetail(makeFeedback({ id: "fb-1" }));
+      expect(actionErrors.map((e) => e.message)).toEqual(["visible failed"]);
+      expect(shadow.querySelector('[data-action-id="hidden"]')).toBeNull();
+
+      const btn = shadow.querySelector<HTMLButtonElement>('[data-action-id="sync"]')!;
+      btn.click();
+      await vi.waitFor(() => expect(actionErrors).toHaveLength(2));
+      expect(actionErrors[1]).toBeInstanceOf(Error);
+      expect(actionErrors[1]?.message).toBe("not an Error");
+      await vi.waitFor(() => expect(btn.disabled).toBe(false));
+    });
+
+    it("context.refresh() reloads the list and re-renders the detail with the updated record", async () => {
+      const fb = makeFeedback({ id: "fb-1", status: "open" });
+      const onAction = vi.fn(async (_fb: SitepingPanelActionFeedback, ctx: SitepingPanelActionContext) => {
+        // The host moved the feedback forward server-side.
+        apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [{ ...fb, status: "in_progress" }], total: 1 });
+        await ctx.refresh();
+      });
+      rebuildWithActions([{ id: "ticket", label: "Create ticket", onAction }]);
+      await openDetail(fb);
+      apiClient.getFeedbacks.mockClear();
+      markers.render.mockClear();
+
+      shadow.querySelector<HTMLButtonElement>('[data-action-id="ticket"]')!.click();
+
+      await vi.waitFor(() => expect(shadow.querySelector(".sp-detail-status-pill--in-progress")).not.toBeNull());
+      expect(apiClient.getFeedbacks).toHaveBeenCalledOnce();
+      expect(markers.render).toHaveBeenCalledOnce();
+      expect(detailEl().classList.contains("sp-detail--visible")).toBe(true);
+      // The re-rendered view is interactive again once the action settles.
+      await vi.waitFor(() =>
+        expect(shadow.querySelector<HTMLButtonElement>('[data-action-id="ticket"]')!.disabled).toBe(false),
+      );
+    });
+
+    it("context.refresh() keeps the view locked while the action is still running", async () => {
+      const fb = makeFeedback({ id: "fb-1", status: "open" });
+      let finish!: () => void;
+      const hostWork = new Promise<void>((r) => (finish = r));
+      const onAction = vi.fn(async (_fb: SitepingPanelActionFeedback, ctx: SitepingPanelActionContext) => {
+        apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [{ ...fb, status: "in_progress" }], total: 1 });
+        await ctx.refresh();
+        await hostWork; // the host keeps working after the refresh
+      });
+      rebuildWithActions([{ id: "ticket", label: "Create ticket", onAction }]);
+      await openDetail(fb);
+
+      shadow.querySelector<HTMLButtonElement>('[data-action-id="ticket"]')!.click();
+      await vi.waitFor(() => expect(shadow.querySelector(".sp-detail-status-pill--in-progress")).not.toBeNull());
+
+      const ticket = shadow.querySelector<HTMLButtonElement>('[data-action-id="ticket"]')!;
+      const resolve = shadow.querySelector<HTMLButtonElement>(".sp-detail-btn-resolve")!;
+      const del = shadow.querySelector<HTMLButtonElement>(".sp-detail-btn-delete")!;
+      expect([ticket.disabled, resolve.disabled, del.disabled]).toEqual([true, true, true]);
+      expect(ticket.getAttribute("aria-busy")).toBe("true");
+      ticket.click();
+      resolve.click();
+      del.click();
+      expect(onAction).toHaveBeenCalledOnce();
+      expect(apiClient.resolveFeedback).not.toHaveBeenCalled();
+      expect(apiClient.deleteFeedback).not.toHaveBeenCalled();
+
+      finish();
+      await vi.waitFor(() => expect(ticket.disabled).toBe(false));
+      expect(ticket.hasAttribute("aria-busy")).toBe(false);
+      expect(ticket.textContent).toBe("Create ticket");
+      expect([resolve.disabled, del.disabled]).toEqual([false, false]);
+    });
+
+    it("context.refresh() keeps the pages added by Load more, so a record from page 2 stays open", async () => {
+      // 21 records: page 1 holds 20, "Load more" brings the last one.
+      let records = Array.from({ length: 21 }, (_, i) => makeFeedback({ id: `fb-${i}` }));
+      rebuildWithActions([
+        {
+          id: "ticket",
+          label: "Create ticket",
+          onAction: async (fb, ctx) => {
+            records = records.map((r) => (r.id === fb.id ? { ...r, status: "in_progress" } : r));
+            await ctx.refresh();
+          },
+        },
+      ]);
+      apiClient.getFeedbacks.mockImplementation(async (_project: string, opts: { page: number; limit: number }) => ({
+        feedbacks: records.slice((opts.page - 1) * opts.limit, opts.page * opts.limit),
+        total: records.length,
+      }));
+      await panel.open();
+      shadow.querySelector<HTMLButtonElement>(".sp-btn-load-more")!.click();
+      await vi.waitFor(() => expect(shadow.querySelectorAll(".sp-card")).toHaveLength(21));
+      shadow.querySelector<HTMLElement>('[data-feedback-id="fb-20"]')!.click();
+      apiClient.getFeedbacks.mockClear();
+
+      shadow.querySelector<HTMLButtonElement>('[data-action-id="ticket"]')!.click();
+
+      await vi.waitFor(() => expect(shadow.querySelector(".sp-detail-status-pill--in-progress")).not.toBeNull());
+      expect(detailEl().classList.contains("sp-detail--visible")).toBe(true);
+      expect(apiClient.getFeedbacks.mock.calls.map(([, opts]) => opts.page)).toEqual([1, 2]);
+      expect(shadow.querySelectorAll(".sp-card")).toHaveLength(21);
+      expect(shadow.querySelector(".sp-btn-load-more")).toBeNull();
+    });
+
+    it("context.refresh() goes back to the list when the feedback no longer matches", async () => {
+      rebuildWithActions([
+        {
+          id: "close-it",
+          label: "Close in tracker",
+          onAction: async (_fb, ctx) => {
+            apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [], total: 0 });
+            await ctx.refresh();
+          },
+        },
+      ]);
+      await openDetail(makeFeedback({ id: "fb-1" }));
+
+      shadow.querySelector<HTMLButtonElement>('[data-action-id="close-it"]')!.click();
+
+      await vi.waitFor(() => expect(detailEl().classList.contains("sp-detail--visible")).toBe(false));
+    });
+
+    it("context.refresh() leaves the detail alone once the user moved to another feedback", async () => {
+      const a = makeFeedback({ id: "fb-a" });
+      const b = makeFeedback({ id: "fb-b", message: "second feedback" });
+      let release!: () => void;
+      rebuildWithActions([
+        {
+          id: "slow",
+          label: "Slow",
+          onAction: async (_fb, ctx) => {
+            await new Promise<void>((r) => (release = r));
+            await ctx.refresh();
+          },
+        },
+      ]);
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [a, b], total: 2 });
+      await panel.open();
+      shadow.querySelector<HTMLElement>('[data-feedback-id="fb-a"]')!.click();
+      shadow.querySelector<HTMLButtonElement>('[data-action-id="slow"]')!.click();
+
+      shadow.querySelector<HTMLElement>('[data-feedback-id="fb-b"]')!.click();
+      release();
+
+      await vi.waitFor(() => expect(apiClient.getFeedbacks).toHaveBeenCalledTimes(2));
+      await new Promise((r) => setTimeout(r, 0));
+      expect(detailEl().classList.contains("sp-detail--visible")).toBe(true);
+      expect(shadow.querySelector(".sp-detail-message")?.textContent).toBe("second feedback");
+    });
+
+    it("context.refresh() and context.close() do nothing once the panel is destroyed", async () => {
+      let ctx: SitepingPanelActionContext | undefined;
+      rebuildWithActions([
+        {
+          id: "keep",
+          label: "Keep",
+          onAction: (_fb, c) => {
+            ctx = c;
+          },
+        },
+      ]);
+      await openDetail(makeFeedback({ id: "fb-1" }));
+      shadow.querySelector<HTMLButtonElement>('[data-action-id="keep"]')!.click();
+      await vi.waitFor(() => expect(ctx).toBeDefined());
+      const closed = vi.fn();
+      bus.on("close", closed);
+
+      panel.destroy();
+      apiClient.getFeedbacks.mockClear();
+      markers.render.mockClear();
+      await ctx?.refresh();
+      ctx?.close();
+
+      expect(apiClient.getFeedbacks).not.toHaveBeenCalled();
+      expect(markers.render).not.toHaveBeenCalled();
+      expect(closed).not.toHaveBeenCalled();
+    });
+
+    it("context.close() closes the panel", async () => {
+      rebuildWithActions([{ id: "go", label: "Go", onAction: (_fb, ctx) => ctx.close() }]);
+      await openDetail(makeFeedback({ id: "fb-1" }));
+
+      shadow.querySelector<HTMLButtonElement>('[data-action-id="go"]')!.click();
+
+      await vi.waitFor(() => expect(panel.isCurrentlyOpen).toBe(false));
+      expect(detailEl().classList.contains("sp-detail--visible")).toBe(false);
     });
   });
 });

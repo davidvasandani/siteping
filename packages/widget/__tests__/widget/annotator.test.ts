@@ -50,6 +50,8 @@ const popupMocks = vi.hoisted(() => {
     showCount: 0,
     /** Tracks whether the mock popup is currently open. */
     isOpenState: false,
+    /** True while the last `onSubmit` is pending — the real popup refuses to close then. */
+    submitInFlight: false,
     /** Viewport y where the popup's phone sheet starts — null when not a sheet. */
     sheetTop: null as number | null,
     /** Anchor rect passed to the last `show()` call. */
@@ -78,7 +80,12 @@ vi.mock(new URL("../../src/popup.js", import.meta.url).pathname, () => ({
           if (popupMocks.nextResult && onSubmit) {
             const submit = onSubmit(popupMocks.nextResult);
             popupMocks.lastSubmitPromise = submit;
-            void submit.catch(() => {});
+            popupMocks.submitInFlight = true;
+            void submit
+              .catch(() => {})
+              .finally(() => {
+                popupMocks.submitInFlight = false;
+              });
           }
           // `keepShowPending` mirrors the real popup keeping `show()` unresolved
           // while `runSubmission` is in flight — the overlay therefore stays up,
@@ -95,14 +102,19 @@ vi.mock(new URL("../../src/popup.js", import.meta.url).pathname, () => ({
         popupMocks.destroyCount += 1;
         popupMocks.isOpenState = false;
       }),
-      cancel: vi.fn(),
+      // Like the real dismiss(): closes an open popup, but is a no-op while a
+      // submission is in flight. The real-popup suite
+      // (annotator-popup-reentry.test.ts) pins the user-visible behavior.
+      dismiss: vi.fn().mockImplementation(() => {
+        if (popupMocks.submitInFlight) return;
+        popupMocks.isOpenState = false;
+      }),
       get isOpen() {
         return popupMocks.isOpenState;
       },
       get sheetTop() {
         return popupMocks.sheetTop;
       },
-      isSubmitting: false,
     };
   }),
 }));
@@ -120,6 +132,8 @@ vi.mock(new URL("../../src/screenshot.js", import.meta.url).pathname, () => ({
 
 // Mock anchor helpers to avoid @medv/finder dependency in jsdom
 vi.mock(new URL("../../src/dom/anchor.js", import.meta.url).pathname, () => ({
+  // No shadow roots here: the hit test is the document's own
+  deepElementFromPoint: vi.fn((x: number, y: number) => document.elementFromPoint(x, y)),
   findAnchorElement: vi.fn().mockReturnValue(document.body),
   generateAnchor: vi.fn().mockReturnValue({
     cssSelector: "body",
@@ -136,7 +150,7 @@ vi.mock(new URL("../../src/dom/anchor.js", import.meta.url).pathname, () => ({
 }));
 
 import { Annotator } from "../../src/annotator.js";
-import { generateAnchor } from "../../src/dom/anchor.js";
+import { deepElementFromPoint, generateAnchor } from "../../src/dom/anchor.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -179,6 +193,7 @@ describe("Annotator", () => {
     popupMocks.capturedOnSubmit = null;
     popupMocks.keepShowPending = false;
     popupMocks.isOpenState = false;
+    popupMocks.submitInFlight = false;
     popupMocks.destroyCount = 0;
     popupMocks.showCount = 0;
     popupMocks.sheetTop = null;
@@ -651,6 +666,53 @@ describe("Annotator", () => {
       target.remove();
     });
 
+    it("Enter annotates the element focused inside an open shadow root, not its host (#177)", async () => {
+      const host = document.createElement("div");
+      document.body.appendChild(host);
+      const target = document.createElement("button");
+      host.attachShadow({ mode: "open" }).appendChild(target);
+      vi.spyOn(target, "getBoundingClientRect").mockReturnValue(new DOMRect(10, 20, 100, 40));
+      target.focus();
+      expect(document.activeElement).toBe(host);
+
+      const completeListener = vi.fn();
+      bus.on("annotation:complete", completeListener);
+
+      bus.emit("annotation:start");
+      findOverlay()!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+
+      await vi.waitFor(() => {
+        expect(completeListener).toHaveBeenCalledOnce();
+      });
+      expect(generateAnchor).toHaveBeenLastCalledWith(target);
+
+      host.remove();
+    });
+
+    it("Enter annotates the host when focus sits on a 0x0 control inside its shadow root", async () => {
+      // Form components keep a visually hidden native control in their root:
+      // annotating it would dead-end on its empty box.
+      const host = document.createElement("div");
+      document.body.appendChild(host);
+      const control = document.createElement("input");
+      host.attachShadow({ mode: "open" }).appendChild(control);
+      vi.spyOn(host, "getBoundingClientRect").mockReturnValue(new DOMRect(10, 20, 200, 40));
+      control.focus();
+
+      const completeListener = vi.fn();
+      bus.on("annotation:complete", completeListener);
+
+      bus.emit("annotation:start");
+      findOverlay()!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+
+      await vi.waitFor(() => {
+        expect(completeListener).toHaveBeenCalledOnce();
+      });
+      expect(generateAnchor).toHaveBeenLastCalledWith(host);
+
+      host.remove();
+    });
+
     it("Enter on overlay without pre-focused element does nothing", async () => {
       // Blur everything so there's no activeElement with bounds
       (document.activeElement as HTMLElement)?.blur?.();
@@ -837,7 +899,9 @@ describe("Annotator", () => {
 
     it("shows a fixed-position highlight over the target and removes it on deactivate", async () => {
       // Keep show() pending so the popup stays "open" — the window in which
-      // the highlight must persist, exactly like a pointer-drawn rect.
+      // the highlight must persist, exactly like a pointer-drawn rect. No
+      // result: an open, unsent popup, the state where Escape really closes it.
+      popupMocks.nextResult = null;
       popupMocks.keepShowPending = true;
 
       const pageButton = document.createElement("button");
@@ -1586,6 +1650,70 @@ describe("Annotator", () => {
       }
     });
   });
+  // -------------------------------------------------------------------------
+  // clientId — one per popup session, shared by every resend from it (#307)
+  // -------------------------------------------------------------------------
+
+  describe("clientId per popup session", () => {
+    function draw(): void {
+      const overlay = findOverlay()!;
+      overlay.dispatchEvent(new MouseEvent("mousedown", { clientX: 50, clientY: 50, bubbles: true }));
+      overlay.dispatchEvent(new MouseEvent("mouseup", { clientX: 200, clientY: 150, bubbles: true }));
+    }
+
+    it("reuses one clientId across resends from the same popup, and mints a new one per popup", async () => {
+      // Keep show() pending so the popup stays "open" across the retry.
+      popupMocks.keepShowPending = true;
+      const completeListener = vi.fn();
+      bus.on("annotation:complete", completeListener);
+
+      bus.emit("annotation:start");
+      draw();
+      await vi.waitFor(() => {
+        expect(completeListener).toHaveBeenCalledOnce();
+      });
+
+      // Fail the first submission, then resend (edited) through the same
+      // onSubmit the popup holds — what the real popup's retry does.
+      bus.emit("feedback:error", new Error("network blip"));
+      await expect(popupMocks.lastSubmitPromise!).rejects.toThrow("network blip");
+      void popupMocks.capturedOnSubmit!({ type: "bug", message: "Edited before resending" }).catch(() => {});
+      await vi.waitFor(() => {
+        expect(completeListener).toHaveBeenCalledTimes(2);
+      });
+
+      const first = completeListener.mock.calls[0]![0].clientId;
+      expect(first).toMatch(/\S/);
+      // A fresh id here would let the queued first attempt replay as a duplicate.
+      expect(completeListener.mock.calls[1]![0].clientId).toBe(first);
+
+      // The popup closes; the next drawing is a new feedback with its own id.
+      popupMocks.isOpenState = false;
+      draw();
+      await vi.waitFor(() => {
+        expect(completeListener).toHaveBeenCalledTimes(3);
+      });
+      expect(completeListener.mock.calls[2]![0].clientId).not.toBe(first);
+    });
+
+    it("falls back to a Date.now()-based id when crypto.randomUUID throws (non-secure context)", async () => {
+      vi.spyOn(crypto, "randomUUID").mockImplementation(() => {
+        throw new Error("Insecure context");
+      });
+      const completeListener = vi.fn();
+      bus.on("annotation:complete", completeListener);
+
+      bus.emit("annotation:start");
+      draw();
+      await vi.waitFor(() => {
+        expect(completeListener).toHaveBeenCalledOnce();
+      });
+
+      // Still URL-safe for the server's clientId pattern: "<timestamp>-<random>".
+      expect(completeListener.mock.calls[0]![0].clientId).toMatch(/^\d+-[a-z0-9]+$/);
+      vi.restoreAllMocks();
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1626,6 +1754,7 @@ describe("Annotator on touch screens", () => {
     screenshotMocks.captureAnnotatedScreenshot.mockReset();
     screenshotMocks.captureAnnotatedScreenshot.mockResolvedValue(null);
     vi.mocked(generateAnchor).mockClear();
+    vi.mocked(deepElementFromPoint).mockClear();
     ({ annotator, bus } = createAnnotator());
   });
 
@@ -1667,6 +1796,21 @@ describe("Annotator on touch screens", () => {
     touch(findOverlay()!, { x: 60, y: 620 });
 
     await vi.waitFor(() => expect(generateAnchor).toHaveBeenCalledWith(button));
+  });
+
+  it("a tap inside an open shadow root selects the element under the finger, not its host", async () => {
+    const host = pageElement("div", { x: 0, y: 560, width: 400, height: 120 });
+    const button = document.createElement("button");
+    host.attachShadow({ mode: "open" }).appendChild(button);
+    button.getBoundingClientRect = () => new DOMRect(10, 600, 200, 40);
+    vi.mocked(deepElementFromPoint).mockReturnValueOnce(button);
+
+    bus.emit("annotation:start");
+    touch(findOverlay()!, { x: 60, y: 620 });
+
+    await vi.waitFor(() => expect(generateAnchor).toHaveBeenCalledWith(button));
+    expect(deepElementFromPoint).toHaveBeenCalledWith(60, 620);
+    expect(popupMocks.lastRect).toMatchObject({ x: 10, y: 600, width: 200, height: 40 });
   });
 
   it("a tap on the page root or on widget chrome selects nothing", async () => {

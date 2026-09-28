@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { POPUP_HIDE_TRANSITION_MS } from "../../src/constants.js";
 import { createT, type TFunction, type Translations } from "../../src/i18n/index.js";
 import { Popup } from "../../src/popup.js";
 import { buildThemeColors } from "../../src/styles/theme.js";
-import { mockMediaQueries, mockVisualViewport, PHONE_MEDIA } from "../helpers.js";
+import { mockMatchMedia, mockMediaQueries, mockVisualViewport, PHONE_MEDIA } from "../helpers.js";
 
 // jsdom does not implement window.matchMedia — provide a stub
 Object.defineProperty(window, "matchMedia", {
@@ -141,23 +142,63 @@ describe("Popup", () => {
 
     it("flips up when not enough vertical space below", () => {
       // Simulate small viewport: bottom of rect is near the window bottom
-      // window.innerHeight defaults to 768 in jsdom
+      // window.innerHeight defaults to 768 in jsdom; jsdom has no layout, so
+      // the popup is placed with its 280px fallback height
       popup.show(makeBounds({ top: 500, bottom: 600 }));
 
       const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
-      // Should flip up: top = rectTop - 220 - 8 = 500 - 228 = 272
-      expect(dialog.style.top).toBe("272px");
+      // Should flip up: top = rectTop - 280 - 8 = 500 - 288 = 212
+      expect(dialog.style.top).toBe("212px");
     });
 
     it("clamps to viewport bottom when rect is too tall to fit popup above or below", () => {
       // Tall rect that spans most of the viewport (jsdom default 1024x768)
-      // — neither below (rect.bottom + 8 + 220 > 768) nor above
-      // (rect.top - 220 - 8 < 8) leaves room.
+      // — neither below (rect.bottom + 8 + 280 > 768) nor above
+      // (rect.top - 280 - 8 < 8) leaves room.
       popup.show(makeBounds({ top: 50, bottom: 750 }));
 
       const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
-      // top = innerHeight - popupH - 8 = 768 - 220 - 8 = 540
-      expect(dialog.style.top).toBe("540px");
+      // top = innerHeight - popupH - 8 = 768 - 280 - 8 = 480
+      expect(dialog.style.top).toBe("480px");
+    });
+
+    it("keeps clear of reserved viewport bands, such as the annotation toolbar", () => {
+      // Above would be 300 - 8 - 280 = 12, under a 53px top toolbar
+      popup.show(makeBounds({ top: 300, bottom: 700 }), undefined, { top: 53, bottom: 0 });
+
+      const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+      // Clamped inside the band instead: 768 - 8 - 280 = 480
+      expect(dialog.style.top).toBe("480px");
+    });
+
+    it("caps its height and scrolls when taller than the usable band, then resets on the next show", () => {
+      // jsdom is 768px tall; reserving 400px at the top and 200px at the
+      // bottom leaves a 152px band, shorter than the 280px fallback popup.
+      popup.show(makeBounds({ top: 450, bottom: 500 }), undefined, { top: 400, bottom: 200 });
+
+      const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+      expect(dialog.style.top).toBe("408px");
+      expect(dialog.style.overflowY).toBe("auto");
+      // The 16px vertical padding and 1px borders are excluded from the content-box cap.
+      expect(dialog.style.maxHeight).toBe(`${152 - 34}px`);
+
+      popup.show(makeBounds({ bottom: 200 }));
+      expect(dialog.style.maxHeight).toBe("");
+      expect(dialog.style.overflowY).toBe("");
+    });
+
+    it("caps its whole box when the host page resets box-sizing to border-box", () => {
+      const hostReset = document.head.appendChild(document.createElement("style"));
+      hostReset.textContent = "* { box-sizing: border-box; }";
+      try {
+        popup.show(makeBounds({ top: 450, bottom: 500 }), undefined, { top: 400, bottom: 200 });
+
+        const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+        // max-height already covers the padding and borders: the whole 152px band
+        expect(dialog.style.maxHeight).toBe("152px");
+      } finally {
+        hostReset.remove();
+      }
     });
 
     it("resolves to null when cancelled (via cancel button)", async () => {
@@ -180,6 +221,16 @@ describe("Popup", () => {
 
       const result = await promise;
       expect(result).toBeNull();
+    });
+
+    it("resolves to null when Escape is pressed on a type button", async () => {
+      const promise = popup.show(makeBounds());
+
+      const typeBtn = document.querySelector<HTMLButtonElement>('[data-type="question"]')!;
+      typeBtn.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+      expect(popup.isOpen).toBe(false);
+      expect(await promise).toBeNull();
     });
   });
 
@@ -445,26 +496,164 @@ describe("Popup", () => {
         expect(btn.getAttribute("aria-pressed")).toBe("false");
       }
     });
+
+    describe("pending close transition", () => {
+      const findCancelButton = () =>
+        Array.from(document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')).find(
+          (button) => button.textContent === t("popup.cancel"),
+        )!;
+
+      beforeEach(() => {
+        vi.useFakeTimers();
+      });
+
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      it("stays visible when re-shown before the previous close transition ends", async () => {
+        const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+        const firstSession = popup.show(makeBounds());
+        findCancelButton().click();
+        await firstSession;
+
+        // Re-open inside the fade-out window of the dismissed session
+        vi.advanceTimersByTime(100);
+        popup.show(makeBounds());
+        vi.advanceTimersByTime(1000);
+
+        expect(dialog.style.display).toBe("block");
+        expect(popup.isOpen).toBe(true);
+      });
+
+      it("stays visible when re-shown after Cancel was clicked twice during the fade-out", async () => {
+        const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+        const firstSession = popup.show(makeBounds());
+        findCancelButton().click();
+        await firstSession;
+
+        // A double-click reaches the fading popup's Cancel again
+        vi.advanceTimersByTime(50);
+        findCancelButton().click();
+        vi.advanceTimersByTime(50);
+        popup.show(makeBounds());
+        vi.advanceTimersByTime(1000);
+
+        expect(dialog.style.display).toBe("block");
+        expect(popup.isOpen).toBe(true);
+      });
+
+      it("a second Cancel during the fade-out does not postpone the hide", async () => {
+        const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+        const session = popup.show(makeBounds());
+        findCancelButton().click();
+        await session;
+
+        vi.advanceTimersByTime(POPUP_HIDE_TRANSITION_MS - 50);
+        findCancelButton().click();
+        vi.advanceTimersByTime(50);
+
+        expect(dialog.style.display).toBe("none");
+      });
+
+      it("still hides after the close transition when not re-shown", async () => {
+        const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+        const session = popup.show(makeBounds());
+        popup.dismiss();
+        await session;
+
+        vi.advanceTimersByTime(POPUP_HIDE_TRANSITION_MS);
+
+        expect(dialog.style.display).toBe("none");
+      });
+
+      it("drops a close transition still pending at teardown", async () => {
+        const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+        const session = popup.show(makeBounds());
+        popup.dismiss();
+        await session;
+
+        popup.destroy();
+        vi.advanceTimersByTime(1000);
+
+        // The pending `display: none` never fires on the detached root
+        expect(dialog.isConnected).toBe(false);
+        expect(dialog.style.display).toBe("block");
+      });
+    });
   });
 
-  describe("stale hide timer", () => {
-    afterEach(() => {
-      vi.useRealTimers();
+  // -------------------------------------------------------------------------
+  // Open/close transition (#343)
+  // -------------------------------------------------------------------------
+
+  describe("open/close transition", () => {
+    const nextFrame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    const findDialog = () => document.querySelector<HTMLElement>('[role="dialog"]')!;
+    const findCancelButton = () =>
+      Array.from(findDialog().querySelectorAll<HTMLButtonElement>("button")).find(
+        (button) => button.textContent === t("popup.cancel"),
+      )!;
+
+    it("keeps its transition after show(), so it still fades in and out", () => {
+      const declared = findDialog().style.transition;
+      expect(declared).toContain("opacity");
+
+      popup.show(makeBounds());
+
+      expect(findDialog().style.transition).toBe(declared);
     });
 
-    it("a hide timer from the previous session does not hide a freshly re-opened popup", async () => {
-      vi.useFakeTimers();
-      const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
-      const first = popup.show(makeBounds());
-      dialog.querySelector("textarea")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-      await first;
-
-      vi.advanceTimersByTime(100);
+    it("is inert while it fades out, and interactive again on the next show()", () => {
+      const dialog = findDialog();
       popup.show(makeBounds());
-      vi.advanceTimersByTime(200);
+      expect(dialog.hasAttribute("inert")).toBe(false);
 
-      expect(popup.isOpen).toBe(true);
-      expect(dialog.style.display).toBe("block");
+      findCancelButton().click();
+      expect(dialog.hasAttribute("inert")).toBe(true);
+
+      popup.show(makeBounds());
+      expect(dialog.hasAttribute("inert")).toBe(false);
+    });
+
+    it("stays closed when cancelled before show()'s first frame", async () => {
+      const previous = document.body.appendChild(document.createElement("button"));
+      try {
+        previous.focus();
+        popup.show(makeBounds());
+        findCancelButton().click(); // Same task as show()
+
+        await nextFrame();
+
+        expect(findDialog().style.opacity).toBe("0");
+        expect(document.activeElement).toBe(previous);
+      } finally {
+        previous.remove();
+      }
+    });
+
+    it("stays transparent when destroyed before show()'s first frame", async () => {
+      const dialog = findDialog();
+      popup.show(makeBounds());
+      popup.destroy();
+
+      await nextFrame();
+
+      expect(dialog.style.opacity).toBe("0");
+    });
+
+    it("hides at once under prefers-reduced-motion", () => {
+      mockMatchMedia(true);
+      try {
+        const dialog = findDialog();
+        popup.show(makeBounds());
+
+        findCancelButton().click();
+
+        expect(dialog.style.display).toBe("none");
+      } finally {
+        mockMatchMedia(false);
+      }
     });
   });
 
@@ -618,14 +807,6 @@ describe("Popup", () => {
       const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
       // Should flip: left = right - 300 = 950 - 300 = 650
       expect(Number.parseInt(dialog.style.left, 10)).toBeLessThan(900);
-    });
-
-    it("stays inside the viewport when the rect extends past the right edge", () => {
-      // Keyboard path: a focused element wider than the viewport (innerWidth 1024)
-      popup.show(makeBounds({ left: 900, right: 1400, bottom: 100, top: 50 }));
-
-      const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
-      expect(Number.parseInt(dialog.style.left, 10) + 300).toBeLessThanOrEqual(1024 - 8);
     });
   });
 
@@ -1311,7 +1492,7 @@ describe("Popup on phones", () => {
       // The keyboard covers the home indicator — no safe-area gap above it
       expect(dialog().style.padding).toBe("8px 16px 16px");
 
-      popup.cancel();
+      popup.dismiss();
       expect(dialog().style.transform).toBe("translateY(100%)");
       vv.keyboard(120);
       expect(dialog().style.bottom).toBe("300px");
@@ -1335,7 +1516,7 @@ describe("Popup on phones", () => {
 
   it("goes back to the anchored card when the viewport is no longer compact", () => {
     void popup.show(makeBounds());
-    popup.cancel();
+    popup.dismiss();
     mockMediaQueries(["(pointer: coarse)"]); // a tablet: touch, but wide
     void popup.show(makeBounds());
     const el = dialog();
@@ -1366,12 +1547,15 @@ describe("Popup placement", () => {
     popup.destroy();
   });
 
-  it("places the card from its measured height, not a fixed estimate", () => {
+  it("places the card from its measured size, not a fixed estimate", () => {
     const el = document.querySelector<HTMLElement>('[role="dialog"][aria-label]')!;
+    // Touch sizing makes the card taller than the no-layout fallback size
+    Object.defineProperty(el, "offsetWidth", { value: 334, configurable: true });
     Object.defineProperty(el, "offsetHeight", { value: 300, configurable: true });
-    // Below: 558 + 300 > 768 → flips above: 500 - 300 - 8
+    // Below: 558 + 300 > 768 - 8 → flips above: 500 - 8 - 300
     void popup.show(makeBounds({ top: 500, bottom: 550 }));
     expect(el.style.top).toBe("192px");
-    expect(el.style.maxHeight).toBe(`${window.innerHeight - 16}px`);
+    // It fits the viewport, so no height cap
+    expect(el.style.maxHeight).toBe("");
   });
 });

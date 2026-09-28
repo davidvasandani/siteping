@@ -1,8 +1,14 @@
 import type { FeedbackType } from "@siteping/core";
-import { Z_INDEX_MAX } from "./constants.js";
+import { POPUP_HIDE_TRANSITION_MS, Z_INDEX_MAX } from "./constants.js";
 import { el, parseSvg, setText } from "./dom-utils.js";
 import type { TFunction, Translations } from "./i18n/index.js";
 import { ICON_BUG, ICON_CHANGE, ICON_OTHER, ICON_QUESTION } from "./icons.js";
+import {
+  computePopupPosition,
+  NO_VIEWPORT_INSETS,
+  POPUP_FALLBACK_SIZE,
+  type ViewportInsets,
+} from "./popup-placement.js";
 import { getTypeBgColor, getTypeColor, type ThemeColors } from "./styles/theme.js";
 import { isCoarsePointer, isCompactViewport, trackKeyboardInset } from "./viewport.js";
 
@@ -25,6 +31,18 @@ function isMacPlatform(): boolean {
   return uaData
     ? uaData.platform === "macOS"
     : (navigator.platform?.includes("Mac") ?? /Macintosh|Mac OS X/i.test(navigator.userAgent));
+}
+
+/**
+ * The popup's open/close animation. Declared once: `show()` swaps it for
+ * `none` under reduced motion and must restore this exact value, since the
+ * root has no other transition (an empty inline value removes it).
+ */
+const POPUP_TRANSITION = `opacity ${POPUP_HIDE_TRANSITION_MS}ms cubic-bezier(0.16, 1, 0.3, 1),transform ${POPUP_HIDE_TRANSITION_MS}ms cubic-bezier(0.16, 1, 0.3, 1)`;
+
+/** Read live, not cached at construction, so an OS setting change applies to the next open or close. */
+function prefersReducedMotion(): boolean {
+  return typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
 interface PopupResult {
@@ -70,10 +88,19 @@ export class Popup {
   private onKeydownTrap: ((e: KeyboardEvent) => void) | null = null;
   private onSubmit: PopupSubmitHandler | null = null;
   private submittingState = false;
+  /**
+   * Frame in which `show()` fades the popup in and focuses it. A close that
+   * comes first cancels it, or it would bring the closed popup back.
+   */
+  private showFrame: number | null = null;
+  /**
+   * Pending `display: none` scheduled by `hideElement()` once the fade-out
+   * ends. Cleared by `show()` so a popup reopened inside the transition window
+   * is not hidden by the previous session's timer.
+   */
+  private hideTimeoutId: ReturnType<typeof setTimeout> | null = null;
   /** WAAPI handle for the running spinner — cancelled when submitting ends. */
   private spinnerAnimation: Animation | null = null;
-  /** Pending `display:none` after the hide transition — cleared by `show()`. */
-  private hideTimer: ReturnType<typeof setTimeout> | null = null;
   /** Rendered as a bottom sheet — decided per `show()` from the viewport. */
   private sheet = false;
   private stopKeyboardTracking: (() => void) | null = null;
@@ -87,11 +114,6 @@ export class Popup {
    */
   get isOpen(): boolean {
     return this.resolve !== null;
-  }
-
-  /** True while `onSubmit` is pending — the popup holds the session until it settles. */
-  get isSubmitting(): boolean {
-    return this.submittingState;
   }
 
   /** Where the open bottom sheet begins (viewport y), or null when not shown as a sheet. */
@@ -118,8 +140,8 @@ export class Popup {
         font-family:"Inter",system-ui,-apple-system,sans-serif;
         opacity:0;
         transform:translateY(8px) scale(0.98);
-        transition:opacity 0.25s cubic-bezier(0.16, 1, 0.3, 1),transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-        display:none;overflow-y:auto;
+        transition:${POPUP_TRANSITION};
+        display:none;
         -webkit-font-smoothing:antialiased;
       `,
     });
@@ -250,7 +272,7 @@ export class Popup {
       font-size:13px;font-weight:500;cursor:pointer;
       transition:all 0.2s ease;
     `;
-    this.cancelBtn.addEventListener("click", () => this.cancel());
+    this.cancelBtn.addEventListener("click", () => this.dismiss());
     this.cancelBtn.addEventListener("mouseenter", () => {
       if (this.submittingState) return;
       this.cancelBtn.style.borderColor = this.colors.accent;
@@ -344,12 +366,17 @@ export class Popup {
    * runs — the submit button shows a spinner, every other control is
    * disabled. On success the popup closes; on rejection it restores so the
    * user can retry without re-entering the form.
+   *
+   * `insets` reserves viewport bands the popup must not cover (the
+   * annotation toolbar), so its actions never land behind them.
    */
-  show(rectBounds: DOMRect, onSubmit?: PopupSubmitHandler): Promise<PopupResult | null> {
+  show(
+    rectBounds: DOMRect,
+    onSubmit?: PopupSubmitHandler,
+    insets: ViewportInsets = NO_VIEWPORT_INSETS,
+  ): Promise<PopupResult | null> {
     return new Promise((resolve) => {
-      // A re-show within the previous hide transition must not be hidden by it.
-      if (this.hideTimer) clearTimeout(this.hideTimer);
-      this.hideTimer = null;
+      this.cancelPendingTransition();
       this.resolve = resolve;
       this.onSubmit = onSubmit ?? null;
       this.selectedType = null;
@@ -374,13 +401,14 @@ export class Popup {
       this.textarea.style.minHeight = this.sheet ? "96px" : "72px";
       this.hint.style.display = touch ? "none" : "";
       this.root.style.transform = this.hiddenTransform();
+      this.root.removeAttribute("inert");
       this.root.style.display = "block";
-      this.layout(rectBounds);
+      this.layout(rectBounds, insets);
 
-      // Install focus trap. Escape cancels from any control, not just the
-      // textarea — it then bubbles on so the annotator can end the session.
+      // Install focus trap. Escape cancels from any control, not only the
+      // textarea, and bubbles on so the annotator ends the session too.
       this.onKeydownTrap = (e: KeyboardEvent) => {
-        if (e.key === "Escape") this.cancel();
+        if (e.key === "Escape") this.dismiss();
         if (e.key === "Tab") {
           const focusableEls = Array.from(
             this.root.querySelectorAll<HTMLElement>(
@@ -406,15 +434,13 @@ export class Popup {
       };
       this.root.addEventListener("keydown", this.onKeydownTrap);
 
-      // Check prefers-reduced-motion live (not cached at construction time)
-      const reduceMotion =
-        typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      this.root.style.transition = reduceMotion ? "none" : "";
+      this.root.style.transition = prefersReducedMotion() ? "none" : POPUP_TRANSITION;
 
       // Trigger animation. Touch: focus the first type button rather than
       // the textarea, so the keyboard doesn't cover the sheet before the user
       // has even picked a type.
-      requestAnimationFrame(() => {
+      this.showFrame = requestAnimationFrame(() => {
+        this.showFrame = null;
         this.root.style.opacity = "1";
         this.root.style.transform = "translateY(0) scale(1)";
         (touch ? this.typeRow.querySelector("button") : this.textarea)?.focus();
@@ -423,7 +449,7 @@ export class Popup {
   }
 
   /** Card next to the annotated rect, or — on phones — a bottom sheet above the keyboard. */
-  private layout(rectBounds: DOMRect): void {
+  private layout(rectBounds: DOMRect, insets: ViewportInsets): void {
     const style = this.root.style;
     this.handle.style.display = this.sheet ? "block" : "none";
     style.width = this.sheet ? "auto" : "300px";
@@ -439,6 +465,7 @@ export class Popup {
       style.top = "auto";
       style.left = "0";
       style.right = "0";
+      style.overflowY = "auto";
       const fit = (inset: number, visibleHeight = window.innerHeight) => {
         style.bottom = `${inset}px`;
         style.maxHeight = `${visibleHeight - 8}px`;
@@ -451,43 +478,55 @@ export class Popup {
     }
     style.right = "";
     style.bottom = "";
-    style.maxHeight = `${window.innerHeight - 16}px`;
     style.padding = "16px";
 
-    // Position: bottom-left of rect, 8px below. Measured, not assumed: touch
-    // sizing and long translations make it taller than the desktop 220px
-    // (jsdom has no layout — hence the fallback).
-    const popupH = this.root.offsetHeight || 220;
-    const popupW = 300;
-    let top = rectBounds.bottom + 8;
-    let left = rectBounds.left;
-
-    // Vertical: prefer below; fall back to above; otherwise clamp inside viewport
-    if (top + popupH > window.innerHeight) {
-      const aboveTop = rectBounds.top - popupH - 8;
-      if (aboveTop >= 8) {
-        top = aboveTop;
-      } else {
-        // Rect is taller than the viewport allows on either side —
-        // clamp to keep the popup fully visible.
-        top = window.innerHeight - popupH - 8;
-      }
-    }
-    // Collision: flip right if not enough space on left
-    if (left + popupW > window.innerWidth) {
-      left = rectBounds.right - popupW;
-    }
-    // The flip alone overflows when the rect itself extends past the right
-    // edge (keyboard path: a focused element wider than the viewport).
-    left = Math.max(8, Math.min(left, window.innerWidth - popupW - 8));
-    top = Math.max(8, top);
-
+    // Laid out while still transparent so placement uses its real size — it
+    // varies with the locale's label lengths, font metrics, touch sizing and
+    // the host's box-sizing. Any height cap from a previous show is dropped
+    // first so the natural height is what gets measured.
+    style.maxHeight = "";
+    style.overflowY = "";
+    const { top, left, maxHeight } = computePopupPosition(
+      rectBounds,
+      this.measure(),
+      { width: window.innerWidth, height: window.innerHeight },
+      insets,
+    );
     style.top = `${top}px`;
     style.left = `${left}px`;
+    if (maxHeight !== null) {
+      // Taller than the usable band (short viewport, high zoom, long
+      // localized labels): cap it and let it scroll, starting from the top
+      // so the type buttons that enable Send are in view.
+      style.maxHeight = `${Math.max(0, maxHeight - this.verticalChromeHeight())}px`;
+      style.overflowY = "auto";
+      this.root.scrollTop = 0;
+    }
   }
 
   private hiddenTransform(): string {
     return this.sheet ? "translateY(100%)" : "translateY(8px) scale(0.98)";
+  }
+
+  /** Rendered size, ignoring the entry transform; falls back when there is no layout. */
+  private measure(): { width: number; height: number } {
+    const width = this.root.offsetWidth;
+    const height = this.root.offsetHeight;
+    return width > 0 && height > 0 ? { width, height } : POPUP_FALLBACK_SIZE;
+  }
+
+  /**
+   * Vertical padding + border of the popup: with the default `content-box`, a
+   * `max-height` covering its whole rendered height must exclude them. A host
+   * page that resets `box-sizing` to `border-box` already includes them.
+   */
+  private verticalChromeHeight(): number {
+    const computed = window.getComputedStyle(this.root);
+    if (computed.boxSizing === "border-box") return 0;
+    return [computed.paddingTop, computed.paddingBottom, computed.borderTopWidth, computed.borderBottomWidth].reduce(
+      (total, value) => total + (Number.parseFloat(value) || 0),
+      0,
+    );
   }
 
   private selectType(type: FeedbackType, container: HTMLElement): void {
@@ -557,9 +596,15 @@ export class Popup {
       });
   }
 
-  /** Close as cancelled (`show()` resolves null). No-op while submitting. */
-  cancel(): void {
-    if (this.submittingState) return;
+  /**
+   * Close the popup as cancelled (`show()` resolves null): its Cancel button,
+   * Escape, and the annotation session ending from outside the popup (toolbar
+   * Cancel, Escape). No-op when the popup is already closed, or while a
+   * submission is in flight: abandoning mid-upload would leak a half-sent
+   * feedback.
+   */
+  dismiss(): void {
+    if (this.submittingState || !this.isOpen) return;
     this.resolve?.(null);
     this.resolve = null;
     this.hideElement();
@@ -651,13 +696,9 @@ export class Popup {
       border-radius:50%;
       box-sizing:border-box;
     `;
-    const reduceMotion =
-      typeof window !== "undefined" &&
-      typeof window.matchMedia === "function" &&
-      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     // Web Animations API is available in every browser we target; the guard
     // is defensive for jsdom in tests, where `animate` may be undefined.
-    if (!reduceMotion && typeof spinner.animate === "function") {
+    if (!prefersReducedMotion() && typeof spinner.animate === "function") {
       this.spinnerAnimation = spinner.animate([{ transform: "rotate(0deg)" }, { transform: "rotate(360deg)" }], {
         duration: 600,
         iterations: Infinity,
@@ -668,6 +709,7 @@ export class Popup {
   }
 
   private hideElement(): void {
+    this.cancelPendingTransition();
     // Remove focus trap
     if (this.onKeydownTrap) {
       this.root.removeEventListener("keydown", this.onKeydownTrap);
@@ -683,18 +725,36 @@ export class Popup {
     // Restore focus to the previously focused element
     this.previouslyFocused?.focus();
     this.previouslyFocused = null;
-    this.hideTimer = setTimeout(() => {
-      this.hideTimer = null;
+    // Out of hit-testing and the Tab order while it fades: the transparent
+    // popup sits above the overlay and the page, and would take the next
+    // drag, click or Shift+Tab. The attribute, not the property, so jsdom
+    // (which does not implement `inert`) can observe it.
+    this.root.toggleAttribute("inert", true);
+    if (prefersReducedMotion()) {
       this.root.style.display = "none";
-    }, 250);
+      return;
+    }
+    this.hideTimeoutId = setTimeout(() => {
+      this.hideTimeoutId = null;
+      this.root.style.display = "none";
+    }, POPUP_HIDE_TRANSITION_MS);
+  }
+
+  /** Drop the fade-in frame or the `display: none` still pending from an earlier show or close. */
+  private cancelPendingTransition(): void {
+    if (this.showFrame !== null) cancelAnimationFrame(this.showFrame);
+    if (this.hideTimeoutId !== null) clearTimeout(this.hideTimeoutId);
+    this.showFrame = null;
+    this.hideTimeoutId = null;
   }
 
   destroy(): void {
     // Settle a pending `show()` promise so it cannot outlive teardown — a
     // `destroy()` mid-submit would otherwise leak the awaiting closure (and
     // whatever it retains: the annotation, the base64 screenshot). Resolving
-    // with `null` reads as "cancelled", matching `cancel()`.
+    // with `null` reads as "cancelled", matching `dismiss()`.
     if (this.submittingState) this.exitSubmittingState();
+    this.cancelPendingTransition();
     this.resolve?.(null);
     this.resolve = null;
     this.onSubmit = null;
@@ -703,7 +763,7 @@ export class Popup {
       this.onKeydownTrap = null;
     }
     this.stopKeyboardTracking?.();
-    if (this.hideTimer) clearTimeout(this.hideTimer);
+    this.stopKeyboardTracking = null;
     this.root.remove();
   }
 }

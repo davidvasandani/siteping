@@ -42,7 +42,7 @@ npx @siteping/cli sync --schema prisma/schema.prisma
 
 - crée les deux modèles s'ils sont absents,
 - ajoute les champs et blocs `@@index` manquants,
-- réécrit les champs SitePing dont le type ou les attributs ont dérivé de la forme attendue — en gardant ce qui vous appartient : noms de colonne `@map`, `@ignore`, noms de relation et commentaires,
+- réécrit les champs SitePing dont le type ou les attributs ont dérivé de la forme attendue — en gardant ce qui vous appartient (noms de colonne `@map`, noms de relation, `onUpdate` d'une relation, commentaires) ; un `@ignore` compte comme une dérive, car l'adapter écrit toutes les colonnes SitePing,
 - **ne touche jamais aux champs que vous avez ajoutés vous-même.**
 
 Quand quelque chose a changé, il vous rappelle de lancer `npx prisma db push`. Le lancer deux fois de suite ne fait rien.
@@ -76,6 +76,8 @@ npx @siteping/cli doctor --url https://app.example.com --api-key "$SITEPING_API_
 
 `doctor` envoie une requête GET à votre serveur en fonctionnement et vous dit si un handler SitePing a répondu (timeout de 10 secondes). Passez **à la fois** `--url` et `--endpoint` pour l'exécuter sans interaction — celle que vous omettez devient une question. Quand l'endpoint est configuré avec un `apiKey` et que `GET` n'est pas public, passez la clé avec `--api-key` ; sans elle, un `401` s'accompagne d'une indication.
 
+`--url` est l'URL de base de votre site, pas celle de l'endpoint : un chemin qu'elle contient (un `basePath` Next.js, par exemple) se place devant `--endpoint`. Avec `--url https://example.com/app --endpoint /api/siteping`, `doctor` interroge `https://example.com/app/api/siteping`.
+
 Il ne vérifie que la réponse HTTP — il ne lit jamais votre schéma. Pour vérifier le schéma, utilisez `status`.
 
 ## Codes de sortie
@@ -99,4 +101,4 @@ Quand vous ne passez pas `--schema`, le CLI teste trois emplacements dans l'ordr
 2. `schema.prisma`
 3. `prisma/schema/schema.prisma`
 
-Un fichier de schéma situé dans un dossier `schema/` (comme `prisma/schema/schema.prisma`) est traité comme une partie d'un schéma multi-fichiers, comme le fait Prisma : chaque fichier `.prisma` de ce dossier compte. Les modèles SitePing sont trouvés et mis à jour dans le fichier qui les contient ; ceux qui manquent sont ajoutés au fichier indiqué.
+Un fichier de schéma situé dans un dossier `schema/` (comme `prisma/schema/schema.prisma`) est traité comme une partie d'un schéma multi-fichiers, comme le fait Prisma : chaque fichier `.prisma` de ce dossier et de ses sous-dossiers compte, sauf sous `node_modules` et dans les dossiers cachés. Les modèles SitePing sont trouvés et mis à jour dans le fichier qui les contient ; ceux qui manquent sont ajoutés au fichier indiqué. Un dossier qui contient un `package.json` est la racine d'un projet, jamais un dossier de schéma, même s'il s'appelle `schema`. Un dossier de schéma multi-fichiers portant un autre nom n'est pas détecté : le CLI ne voit alors que le fichier que vous lui indiquez.

@@ -1,3 +1,4 @@
+import { ANCHOR_ELEMENT_ID_MAX, ANCHOR_ELEMENT_TAG_MAX, IDENTITY_FIELD_MAX_LENGTH } from "@siteping/core";
 import { describe, expect, it } from "vitest";
 import {
   feedbackCreateSchema,
@@ -51,12 +52,34 @@ describe("feedbackCreateSchema", () => {
     expect(result.success).toBe(false);
   });
 
+  it("caps authorName / authorEmail at the length the widget's identity modal enforces", () => {
+    const max = IDENTITY_FIELD_MAX_LENGTH;
+    // Labels stay within the pattern's 63-char limit: 64 + 1 + 61 + 61 + (length - 191) + 4 chars.
+    const email = (length: number) =>
+      `${"a".repeat(64)}@${"b".repeat(60)}.${"c".repeat(60)}.${"d".repeat(length - 191)}.com`;
+    expect(feedbackCreateSchema.safeParse({ ...validPayload, authorName: "n".repeat(max) }).success).toBe(true);
+    expect(feedbackCreateSchema.safeParse({ ...validPayload, authorName: "n".repeat(max + 1) }).success).toBe(false);
+    expect(feedbackCreateSchema.safeParse({ ...validPayload, authorEmail: email(max) }).success).toBe(true);
+    expect(feedbackCreateSchema.safeParse({ ...validPayload, authorEmail: email(max + 1) }).success).toBe(false);
+  });
+
   it("rejects invalid email", () => {
     const result = feedbackCreateSchema.safeParse({
       ...validPayload,
       authorEmail: "not-an-email",
     });
     expect(result.success).toBe(false);
+  });
+
+  it.each(["user@हिंदी.भारत", "françois@exemple.fr".normalize("NFD")])(
+    "accepts the internationalised email %s",
+    (authorEmail) => {
+      expect(feedbackCreateSchema.safeParse({ ...validPayload, authorEmail }).success).toBe(true);
+    },
+  );
+
+  it.each(["a@b.-com", "a@b.com-"])("rejects %s (final label starts or ends with a hyphen)", (authorEmail) => {
+    expect(feedbackCreateSchema.safeParse({ ...validPayload, authorEmail }).success).toBe(false);
   });
 
   it("rejects empty url", () => {
@@ -171,16 +194,30 @@ describe("feedbackCreateSchema", () => {
     expect(withViewport(1920, 2_147_483_648)).toBe(false);
   });
 
-  it("caps anchor elementTag at 200 chars and elementId at 500 chars", () => {
-    const withAnchor = (anchor: Partial<typeof validAnnotation.anchor>) =>
+  describe("anchor elementTag / elementId caps (the limits the widget captures within)", () => {
+    const parseAnchor = (anchor: Partial<typeof validAnnotation.anchor>) =>
       feedbackCreateSchema.safeParse({
         ...validPayload,
         annotations: [{ ...validAnnotation, anchor: { ...validAnnotation.anchor, ...anchor } }],
-      }).success;
+      });
 
-    expect(withAnchor({ elementTag: "X".repeat(200), elementId: "i".repeat(500) })).toBe(true);
-    expect(withAnchor({ elementTag: "X".repeat(201) })).toBe(false);
-    expect(withAnchor({ elementId: "i".repeat(501) })).toBe(false);
+    it("accepts both at their cap", () => {
+      const result = parseAnchor({
+        elementTag: "X".repeat(ANCHOR_ELEMENT_TAG_MAX),
+        elementId: "i".repeat(ANCHOR_ELEMENT_ID_MAX),
+      });
+      expect(result.data?.annotations[0]?.anchor.elementId).toBe("i".repeat(ANCHOR_ELEMENT_ID_MAX));
+    });
+
+    it("rejects a longer elementTag", () => {
+      expect(parseAnchor({ elementTag: "X".repeat(ANCHOR_ELEMENT_TAG_MAX + 1) }).success).toBe(false);
+    });
+
+    it("drops a longer elementId instead of rejecting the feedback (widgets before the cap send it unbounded)", () => {
+      const result = parseAnchor({ elementId: "i".repeat(ANCHOR_ELEMENT_ID_MAX + 1) });
+      expect(result.success).toBe(true);
+      expect(result.data?.annotations[0]?.anchor.elementId).toBeUndefined();
+    });
   });
 
   it("accepts empty strings for text context fields", () => {

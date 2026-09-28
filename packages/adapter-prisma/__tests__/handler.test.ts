@@ -131,6 +131,40 @@ describe("createSitepingHandler", () => {
       consoleSpy.mockRestore();
     });
 
+    it("processes a retry afresh after the create for its clientId failed", async () => {
+      // A failed create must leave the in-flight registry: a retry that joined
+      // the settled rejection would answer 500 forever for that clientId.
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      prisma.sitepingFeedback.create.mockRejectedValueOnce({ code: "P1001" });
+      const post = () =>
+        handler.POST(
+          new Request("http://localhost/api/siteping", {
+            method: "POST",
+            body: JSON.stringify(validPayloadNoAnnotations),
+          }),
+        );
+
+      expect((await post()).status).toBe(500);
+      expect((await post()).status).toBe(201);
+      expect(prisma.sitepingFeedback.create).toHaveBeenCalledTimes(2);
+      consoleSpy.mockRestore();
+    });
+
+    it("runs its own replay lookup once an earlier create of the same clientId has settled", async () => {
+      const post = () =>
+        handler.POST(
+          new Request("http://localhost/api/siteping", {
+            method: "POST",
+            body: JSON.stringify(validPayloadNoAnnotations),
+          }),
+        );
+
+      expect((await post()).status).toBe(201);
+      expect((await post()).status).toBe(201);
+      // One replay lookup per request: the second never joined the first's settled outcome.
+      expect(prisma.sitepingFeedback.findUnique).toHaveBeenCalledTimes(2);
+    });
+
     it("does not insert again when the clientId was already stored (replay)", async () => {
       prisma.sitepingFeedback.findUnique.mockResolvedValue({ id: "fb-1", ...validPayloadNoAnnotations });
       const req = new Request("http://localhost/api/siteping", {
@@ -746,14 +780,19 @@ describe("createSitepingHandler", () => {
 // classes this handler's `instanceof` checks don't know.
 // ---------------------------------------------------------------------------
 
-describe("createSitepingHandler — store errors thrown by another copy of core", () => {
-  /** Same `code` as core's store errors, different class identity. */
-  class ForeignStoreError extends Error {
-    constructor(readonly code: "STORE_NOT_FOUND" | "STORE_DUPLICATE") {
-      super(code);
-    }
-  }
+type StoreErrorCode = "STORE_NOT_FOUND" | "STORE_DUPLICATE";
 
+/** Same `code` as core's store errors, different class identity. */
+class ForeignStoreError extends Error {
+  constructor(readonly code: StoreErrorCode) {
+    super(code);
+  }
+}
+
+describe.each<[string, (code: StoreErrorCode) => unknown]>([
+  ["an Error class from another copy of core", (code) => new ForeignStoreError(code)],
+  ["a plain { code } object", (code) => ({ code })],
+])("createSitepingHandler — store errors thrown as %s", (_label, storeError) => {
   /** A third-party store without the optional `verifyProjectOwnership`. */
   function foreignStore(overrides: Partial<SitepingStore>): SitepingStore {
     return {
@@ -768,7 +807,7 @@ describe("createSitepingHandler — store errors thrown by another copy of core"
   }
 
   it("PATCH of an unknown id returns 404", async () => {
-    const store = foreignStore({ updateFeedback: vi.fn().mockRejectedValue(new ForeignStoreError("STORE_NOT_FOUND")) });
+    const store = foreignStore({ updateFeedback: vi.fn().mockRejectedValue(storeError("STORE_NOT_FOUND")) });
     const handler = createSitepingHandler({ store, requireAuthForDestructive: false });
 
     const res = await handler.PATCH(
@@ -782,7 +821,7 @@ describe("createSitepingHandler — store errors thrown by another copy of core"
   });
 
   it("DELETE of an unknown id returns 404", async () => {
-    const store = foreignStore({ deleteFeedback: vi.fn().mockRejectedValue(new ForeignStoreError("STORE_NOT_FOUND")) });
+    const store = foreignStore({ deleteFeedback: vi.fn().mockRejectedValue(storeError("STORE_NOT_FOUND")) });
     const handler = createSitepingHandler({ store, requireAuthForDestructive: false });
 
     const res = await handler.DELETE(
@@ -803,7 +842,7 @@ describe("createSitepingHandler — store errors thrown by another copy of core"
     const store = foreignStore({
       // Not there at the replay check, inserted by the racing request right after.
       findByClientId: vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce(existing),
-      createFeedback: vi.fn().mockRejectedValue(new ForeignStoreError("STORE_DUPLICATE")),
+      createFeedback: vi.fn().mockRejectedValue(storeError("STORE_DUPLICATE")),
     });
     const handler = createSitepingHandler({ store });
 

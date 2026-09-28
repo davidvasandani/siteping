@@ -1,5 +1,5 @@
 import {
-  type AnnotationPayload,
+  canonicalizeLocale,
   type DiagnosticsSnapshot,
   type FeedbackPayload,
   IDENTITY_FIELD_MAX_LENGTH,
@@ -197,7 +197,9 @@ export function launch(config: SitepingConfig): SitepingInstance {
     return skippedInstance();
   }
 
-  const locale = config.locale ?? "en";
+  // Canonical once, here: every consumer (dictionary lookup, Intl date
+  // formatting in the panel, tooltip and detail view) gets a tag it accepts.
+  const locale = canonicalizeLocale(config.locale ?? "en");
   // Kick off the locale fetch immediately. English is bundled synchronously
   // and used as the fallback while the chunk is in flight. The launcher
   // awaits `localeReady` before rendering markers and re-localizes the FAB
@@ -265,6 +267,10 @@ export function launch(config: SitepingConfig): SitepingInstance {
   if (config.onClose) bus.on("close", config.onClose);
   if (config.onFeedbackSent) bus.on("feedback:sent", config.onFeedbackSent);
   if (config.onError) bus.on("feedback:error", config.onError);
+  if (config.onError) bus.on("panel:action-error", config.onError);
+  // A failing panel action is a bug in the host's own code, with no widget UI
+  // to show it: always log it, even when onError handles it too.
+  bus.on("panel:action-error", (err) => console.error("[siteping] Panel action failed:", err));
   if (config.onAnnotationStart) bus.on("annotation:start", config.onAnnotationStart);
   if (config.onAnnotationEnd) bus.on("annotation:end", config.onAnnotationEnd);
 
@@ -368,6 +374,7 @@ export function launch(config: SitepingConfig): SitepingInstance {
         panelInstance = new mod.Panel(shadow, colors, bus, client, config.projectName, markers, t, locale, {
           getScope,
           scopeAnnotationsByUrl,
+          panelActions: config.panelActions,
         });
         return panelInstance;
       });
@@ -477,12 +484,6 @@ export function launch(config: SitepingConfig): SitepingInstance {
   // listener hung forever. We emit `submission:cancelled` so the waiter
   // unblocks as a benign abort (the popup restores, `onError` is not called).
   let submitting = false;
-  // One clientId per annotation session. The annotator re-emits the SAME
-  // `annotation` object on every resend from its popup (the session its
-  // screenshot cache is scoped to), so a resend after a transient failure
-  // reuses the clientId of the attempt api-client queued for replay — the
-  // server dedupes them instead of storing the feedback twice.
-  const clientIds = new WeakMap<AnnotationPayload, string>();
   const unsubAnnotation = bus.on("annotation:complete", async (data) => {
     if (submitting) {
       bus.emit("submission:cancelled");
@@ -490,7 +491,7 @@ export function launch(config: SitepingConfig): SitepingInstance {
     }
     submitting = true;
     try {
-      const { annotation, type, message, screenshotDataUrl, screenshotRegion } = data;
+      const { annotation, type, message, clientId, screenshotDataUrl, screenshotRegion } = data;
 
       // Ensure identity — config wins (host-provided), then localStorage,
       // then prompt the user as a last resort. Host-provided identity is
@@ -507,17 +508,6 @@ export function launch(config: SitepingConfig): SitepingInstance {
           return;
         }
         saveIdentity(identity);
-      }
-
-      // crypto.randomUUID() throws in non-secure contexts (plain HTTP)
-      let clientId = clientIds.get(annotation);
-      if (!clientId) {
-        try {
-          clientId = crypto.randomUUID();
-        } catch {
-          clientId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        }
-        clientIds.set(annotation, clientId);
       }
 
       // Use scope.url as the single source of truth — same identifier the
@@ -879,6 +869,12 @@ function promptIdentity(shadowRoot: ShadowRoot, t: TFunction): Promise<Identity 
     const submitBtn = document.createElement("button");
     submitBtn.className = "sp-btn-primary";
     submitBtn.textContent = t("identity.submit");
+    const setInvalid = (input: HTMLInputElement, invalid: boolean) => {
+      input.style.borderColor = invalid ? "var(--sp-type-bug, #ef4444)" : "";
+      if (invalid) input.setAttribute("aria-invalid", "true");
+      else input.removeAttribute("aria-invalid");
+    };
+
     submitBtn.addEventListener("click", () => {
       const name = nameInput.value.trim();
       const email = emailInput.value.trim();
@@ -887,14 +883,11 @@ function promptIdentity(shadowRoot: ShadowRoot, t: TFunction): Promise<Identity 
       // modal accepts here is persisted and replayed on every submission, so
       // it must never be something the server rejects. `maxlength` covers
       // typing; this covers values set around it.
-      if (name.length > IDENTITY_FIELD_MAX_LENGTH) {
-        nameInput.style.borderColor = "var(--sp-type-bug, #ef4444)";
-        return;
-      }
-      if (email.length > IDENTITY_FIELD_MAX_LENGTH || !isValidEmail(email)) {
-        emailInput.style.borderColor = "var(--sp-type-bug, #ef4444)";
-        return;
-      }
+      const nameInvalid = name.length > IDENTITY_FIELD_MAX_LENGTH;
+      const emailInvalid = email.length > IDENTITY_FIELD_MAX_LENGTH || !isValidEmail(email);
+      setInvalid(nameInput, nameInvalid);
+      setInvalid(emailInput, emailInvalid);
+      if (nameInvalid || emailInvalid) return;
       closeModal({ name, email });
     });
 

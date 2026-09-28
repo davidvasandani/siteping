@@ -215,19 +215,22 @@ describe("ExportButton", () => {
     expect(document.body.contains(button.element)).toBe(false);
   });
 
-  it("clicking the trigger again closes the menu inside a shadow root", () => {
+  it("toggles on its trigger and closes on any other click from a closed shadow root", () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
+    const root = host.attachShadow({ mode: "closed" });
     const button = new ExportButton(buildThemeColors(), () => [makeFeedback()], createT("en"));
-    host.attachShadow({ mode: "open" }).appendChild(button.element);
+    const elsewhere = document.createElement("button");
+    root.append(button.element, elsewhere);
     const trigger = button.element.querySelector<HTMLButtonElement>(".sp-export-btn")!;
 
-    trigger.click();
-    expect(trigger.getAttribute("aria-expanded")).toBe("true");
-
-    // At document level the click target is retargeted to the shadow host.
-    trigger.click();
-    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    // The trigger itself, elsewhere in the same shadow tree, the host page.
+    for (const target of [trigger, elsewhere, document.body]) {
+      trigger.click();
+      expect(trigger.getAttribute("aria-expanded")).toBe("true");
+      target.click();
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    }
 
     button.destroy();
     host.remove();

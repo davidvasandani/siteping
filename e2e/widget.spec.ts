@@ -176,6 +176,40 @@ test.describe("Panel", () => {
     await s.waitForHidden(".sp-panel--open");
     expect(await s.query(".sp-panel--open")).toBe(false);
   });
+
+  test("filter, sort and export menus toggle on their trigger and close on any other click", async ({ page }) => {
+    const s = shadow(page);
+    await s.click(".sp-fab");
+    await s.waitFor('[data-item-id="chat"]');
+    await s.click('[data-item-id="chat"]');
+    await s.waitFor(".sp-panel--open");
+
+    // Real pointer clicks: the outside-click listeners must tell the trigger,
+    // the rest of the shadow tree and the host page apart.
+    for (const [trigger, menu] of [
+      [".sp-filter-dropdown-btn", ".sp-filter-dropdown-menu"],
+      [".sp-sort-btn", ".sp-sort-menu"],
+      [".sp-export-btn", ".sp-export-menu--open"],
+    ] as const) {
+      const open = page.locator(menu);
+      for (const dismiss of [
+        () => page.click(trigger),
+        () => page.click(".sp-panel-title"),
+        () => page.mouse.click(40, 360),
+      ]) {
+        await page.click(trigger);
+        await expect(open).toHaveCount(1);
+        await dismiss();
+        await expect(open).toHaveCount(0);
+      }
+    }
+
+    // The group toggle shares the sort button's bar.
+    await page.click(".sp-sort-btn");
+    await expect(page.locator(".sp-sort-menu")).toHaveCount(1);
+    await page.click(".sp-group-toggle");
+    await expect(page.locator(".sp-sort-menu")).toHaveCount(0);
+  });
 });
 
 test.describe("Annotation mode", () => {
@@ -247,6 +281,135 @@ test.describe("Annotation mode", () => {
     );
 
     await page.mouse.up();
+  });
+});
+
+test.describe("Annotation popup lifecycle", () => {
+  async function drawAndOpenPopup(page: Page) {
+    const s = shadow(page);
+    await s.click(".sp-fab");
+    await s.waitFor('[data-item-id="annotate"]');
+    await s.click('[data-item-id="annotate"]');
+    await page.waitForFunction(() => !!document.querySelector("div[style*='crosshair']"));
+
+    const box = await page.locator("#target-element").boundingBox();
+    await page.mouse.move(box!.x + 10, box!.y + 10);
+    await page.mouse.down();
+    await page.mouse.move(box!.x + 250, box!.y + 60, { steps: 5 });
+    await page.mouse.up();
+    const dialog = page.locator('body > [role="dialog"][data-siteping-ignore]');
+    await expect(dialog).toHaveCSS("opacity", "1");
+    return dialog;
+  }
+
+  test("keeps its open/close transition after show()", async ({ page }) => {
+    const dialog = await drawAndOpenPopup(page);
+    await expect(dialog).toHaveCSS("transition-duration", "0.25s, 0.25s");
+  });
+
+  test("is not hit-testable while it fades out", async ({ page }) => {
+    await drawAndOpenPopup(page);
+    // Cancel and hit-test in the same task: deterministic, whatever the fade's timing
+    const hit = await page.evaluate(() => {
+      const dialog = document.querySelector<HTMLElement>('body > [role="dialog"][data-siteping-ignore]')!;
+      const textarea = dialog.querySelector("textarea")!.getBoundingClientRect();
+      Array.from(dialog.querySelectorAll("button"))
+        .find((button) => button.textContent === "Cancel")!
+        .click();
+      const target = document.elementFromPoint(textarea.left + textarea.width / 2, textarea.top + textarea.height / 2);
+      return { display: getComputedStyle(dialog).display, insideDialog: dialog.contains(target) };
+    });
+    expect(hit.display).toBe("block");
+    expect(hit.insideDialog).toBe(false);
+  });
+
+  test("the toolbar Cancel closes an open popup and ends the session", async ({ page }) => {
+    const dialog = await drawAndOpenPopup(page);
+
+    await page.locator("body > div[data-siteping-ignore] > button", { hasText: "Cancel" }).click();
+
+    await expect(dialog).toBeHidden();
+    await expect(page.locator("div[style*='crosshair']")).toHaveCount(0);
+  });
+});
+
+test.describe("Annotation popup placement", () => {
+  const toolbarCancel = (page: Page) =>
+    page.locator("body > div[data-siteping-ignore] > button", { hasText: "Cancel" });
+
+  async function startAnnotating(page: Page) {
+    const s = shadow(page);
+    await s.click(".sp-fab");
+    await s.waitFor('[data-item-id="annotate"]');
+    await s.click('[data-item-id="annotate"]');
+    await page.waitForFunction(() => !!document.querySelector("div[style*='crosshair']"));
+  }
+
+  async function drawRectangle(page: Page, fromY: number, toY: number) {
+    await page.mouse.move(200, fromY);
+    await page.mouse.down();
+    await page.mouse.move(600, toY, { steps: 5 });
+    await page.mouse.up();
+    await page.waitForSelector("button[data-type='bug']");
+  }
+
+  /** Popup and toolbar boxes; the popup's from style.top + offsetHeight, which ignore its entry transform. */
+  async function readLayout(page: Page) {
+    const toolbar = await toolbarCancel(page).evaluate((button) => {
+      const rect = button.parentElement!.getBoundingClientRect();
+      return { top: rect.top, bottom: rect.bottom };
+    });
+    const popup = await page.locator('body > [role="dialog"]').evaluate((dialog: HTMLElement) => {
+      const top = Number.parseFloat(dialog.style.top);
+      return { top, bottom: top + dialog.offsetHeight };
+    });
+    return { toolbar, popup, viewportHeight: await page.evaluate(() => window.innerHeight) };
+  }
+
+  test("does not flip above the rectangle into the top toolbar", async ({ page }) => {
+    await startAnnotating(page);
+    // Too tall to fit the popup below, and "above" lands inside the toolbar band
+    await drawRectangle(page, 250, 650);
+
+    const { toolbar, popup, viewportHeight } = await readLayout(page);
+    expect(popup.top).toBeGreaterThanOrEqual(toolbar.bottom);
+    expect(popup.bottom).toBeLessThanOrEqual(viewportHeight);
+  });
+
+  test("keeps clear of a toolbar the host moves to the bottom edge", async ({ page }) => {
+    await startAnnotating(page);
+    // A host moving the toolbar out of the way, e.g. off a modal's header
+    await toolbarCancel(page).evaluate((button) => {
+      const toolbar = button.parentElement!;
+      toolbar.style.top = "auto";
+      toolbar.style.bottom = "0";
+    });
+    // Below the rectangle would overlap the relocated toolbar
+    await drawRectangle(page, 300, 420);
+
+    const { toolbar, popup, viewportHeight } = await readLayout(page);
+    expect(toolbar.top).toBeGreaterThan(viewportHeight / 2);
+    expect(popup.bottom).toBeLessThanOrEqual(toolbar.top);
+    expect(popup.top).toBeGreaterThanOrEqual(0);
+  });
+
+  test("caps a popup taller than the room left by the toolbar, scrolled to its type buttons", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 320 });
+    await startAnnotating(page);
+    await drawRectangle(page, 100, 200);
+    const dialog = page.locator('body > [role="dialog"]');
+    await expect(dialog).toHaveCSS("overflow-y", "auto");
+    await expect(dialog).toHaveCSS("opacity", "1");
+
+    const { toolbar, popup, viewportHeight } = await readLayout(page);
+    expect(popup.top).toBeGreaterThanOrEqual(toolbar.bottom);
+    expect(popup.bottom).toBeLessThanOrEqual(viewportHeight);
+    // The type buttons enable Send: the popup starts on them, not scrolled to its bottom
+    const typeRowOffset = await dialog.evaluate(
+      (element) =>
+        element.querySelector("button[data-type]")!.getBoundingClientRect().top - element.getBoundingClientRect().top,
+    );
+    expect(typeRowOffset).toBeGreaterThanOrEqual(0);
   });
 });
 
@@ -413,6 +576,102 @@ test.describe("Full annotation flow", () => {
     expect(data.total).toBe(1);
     expect(data.feedbacks[0].type).toBe("bug");
     expect(data.feedbacks[0].message).toBe("Le bouton est cassé");
+  });
+});
+
+test.describe("Shadow DOM anchoring (#177)", () => {
+  test("an annotation inside an open web component survives a reload", async ({ page }) => {
+    const s = shadow(page);
+
+    // A web component with an open shadow root, mounted on every navigation,
+    // plus a stored identity so the submit posts without the identity modal.
+    await page.addInitScript(() => {
+      customElements.define(
+        "e2e-card",
+        class extends HTMLElement {
+          constructor() {
+            super();
+            this.attachShadow({ mode: "open" }).innerHTML =
+              '<p id="shadow-target" style="margin:0;padding:32px;background:#fff4e5">Texte rendu dans un web component</p>';
+          }
+        },
+      );
+      document.addEventListener("DOMContentLoaded", () => {
+        const card = document.createElement("e2e-card");
+        card.id = "e2e-component";
+        card.style.cssText = "display:block;margin-bottom:20px";
+        document.getElementById("hero")?.after(card);
+      });
+      localStorage.setItem("siteping_identity", JSON.stringify({ name: "Test User", email: "test@example.com" }));
+    });
+
+    const ready = async () => {
+      await page.waitForFunction(() => {
+        const host = document.querySelector("siteping-widget");
+        return host?.shadowRoot?.querySelector(".sp-fab") !== null && !!document.getElementById("e2e-component");
+      });
+    };
+    await page.reload();
+    await ready();
+
+    // 1. Draw strictly inside the shadow paragraph.
+    await s.click(".sp-fab");
+    await s.waitFor('[data-item-id="annotate"]');
+    await s.click('[data-item-id="annotate"]');
+    await page.waitForFunction(() => !!document.querySelector("div[style*='crosshair']"));
+    const box = (await page.locator("#shadow-target").boundingBox())!;
+    await page.mouse.move(box.x + 8, box.y + 8);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width - 8, box.y + box.height - 8, { steps: 5 });
+    await page.mouse.up();
+
+    await page.waitForSelector("button[data-type='bug']");
+    await page.click("button[data-type='bug']");
+    await page.fill("textarea", "Le composant est mal aligné");
+    await page.evaluate(() => {
+      for (const b of document.querySelectorAll("button")) {
+        if (b.textContent === "Send") return b.click();
+      }
+    });
+
+    // 2. Capture pierced the boundary: one selector per tree, a shadow-rooted XPath.
+    const project = getProject(page);
+    await page.waitForFunction(
+      async (pn) => (await (await fetch(`/api/siteping?projectName=${pn}`)).json()).total >= 1,
+      project,
+      { timeout: 5000 },
+    );
+    const data = await (await page.request.get(`http://localhost:3999/api/siteping?projectName=${project}`)).json();
+    const annotation = data.feedbacks[0].annotations[0];
+    expect(annotation.cssSelector).toBe("#e2e-component >>> #shadow-target");
+    expect(annotation.xpath).toBe("./p[@id='shadow-target']");
+    expect(annotation.elementTag).toBe("P");
+
+    // 3. After a reload, resolution finds the element inside the shadow root:
+    //    the marker sits on the drawn rect's top-right corner, solid (not
+    //    "approximate").
+    await page.reload();
+    await ready();
+    const marker = page.locator("#siteping-markers [data-feedback-id]");
+    await expect(marker).toBeVisible();
+    const placed = await page.evaluate(() => {
+      const m = document.querySelector<HTMLElement>("#siteping-markers [data-feedback-id]");
+      const r = document.getElementById("e2e-component")?.shadowRoot?.getElementById("shadow-target");
+      const b = r?.getBoundingClientRect();
+      return m && b
+        ? {
+            top: Number.parseFloat(m.style.top),
+            left: Number.parseFloat(m.style.left),
+            expectedTop: b.top + window.scrollY + 8 - 13,
+            expectedLeft: b.right + window.scrollX - 8 - 13,
+            dashed: m.style.borderStyle === "dashed",
+          }
+        : null;
+    });
+    expect(placed).not.toBeNull();
+    expect(Math.abs(placed!.top - placed!.expectedTop)).toBeLessThan(2);
+    expect(Math.abs(placed!.left - placed!.expectedLeft)).toBeLessThan(2);
+    expect(placed!.dashed).toBe(false);
   });
 });
 
@@ -1004,6 +1263,134 @@ test.describe("Production guard at dist level (#104)", () => {
       return host?.shadowRoot?.querySelector(".sp-fab") !== null;
     });
     await expect(page.locator("siteping-widget")).toBeAttached();
+  });
+});
+
+test.describe("Panel actions", () => {
+  // Real-browser checks jsdom cannot make: icon inertness (Chromium runs an
+  // <img onerror> hoisted out of an <svg> parsed with createContextualFragment),
+  // link attributes as the browser resolves them, and layout geometry.
+  let feedbackId = "";
+  let external: string[] = [];
+
+  test.beforeEach(async ({ page, browserName }) => {
+    external = [];
+    await page.route(/^https?:\/\/evil\.test\//, (route) => route.abort());
+    page.on("request", (request) => {
+      const url = new URL(request.url());
+      if (url.protocol.startsWith("http") && url.host !== "localhost:3999") external.push(url.href);
+    });
+    const project = `e2e-${browserName}-actions`;
+    await page.request.get(`http://localhost:3999/api/reset?projectName=${project}`);
+    const created = await page.request.post("http://localhost:3999/api/siteping", {
+      data: {
+        projectName: project,
+        type: "bug",
+        message: "Panel actions feedback",
+        url: "http://localhost:3999",
+        viewport: "1280x720",
+        userAgent: "Playwright",
+        authorName: "Test",
+        authorEmail: "test@test.com",
+        annotations: [],
+      },
+    });
+    feedbackId = (await created.json()).id;
+    await page.goto(`http://localhost:3999?project=${project}&panelActions=1`);
+    const s = shadow(page);
+    await s.waitFor(".sp-fab");
+    await s.click(".sp-fab");
+    await s.waitFor('[data-item-id="chat"]');
+    await s.click('[data-item-id="chat"]');
+    await s.waitFor(".sp-card");
+    await s.click(".sp-card");
+    await s.waitFor(".sp-detail-actions--custom");
+  });
+
+  test("renders a sanitized icon that never runs nor fetches, and safe links", async ({ page }) => {
+    // Give a hoisted <img src="x"> ample time to 404 and fire onerror, and
+    // the icon's CSS-parsed attributes time to request their resources.
+    await page.waitForTimeout(500);
+    const result = await page.evaluate(() => {
+      const root = document.querySelector("siteping-widget")!.shadowRoot!;
+      const control = (id: string) => root.querySelector<HTMLElement>(`[data-action-id="${id}"]`)!;
+      const link = (id: string) => control(id) as HTMLAnchorElement;
+      return {
+        pwned: (window as { __pwned?: boolean }).__pwned ?? false,
+        imgs: document.querySelectorAll("img").length + root.querySelectorAll("img").length,
+        icon: control("record").querySelector("svg")?.outerHTML,
+        record: control("record").tagName,
+        tracker: {
+          tag: link("tracker").tagName,
+          href: link("tracker").href,
+          target: link("tracker").target,
+          rel: link("tracker").rel,
+        },
+        mail: { href: link("long").href, target: link("long").target },
+      };
+    });
+
+    expect(result.pwned).toBe(false);
+    expect(result.imgs).toBe(0);
+    expect(external).toEqual([]);
+    expect(result.icon).toBe(
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h16"></path>' +
+        '<rect width="8" height="8"></rect><rect x="8" width="8" height="8"></rect>' +
+        '<rect x="16" width="8" height="8"></rect></svg>',
+    );
+    expect(result.record).toBe("BUTTON");
+    expect(result.tracker).toEqual({
+      tag: "A",
+      href: `https://tracker.example/fb/${feedbackId}`,
+      target: "_blank",
+      rel: "noopener noreferrer",
+    });
+    expect(result.mail).toEqual({ href: "mailto:dev@example.com", target: "" });
+  });
+
+  test("a pending action disables the view and hands the host a frozen feedback", async ({ page }) => {
+    const s = shadow(page);
+    await s.click('[data-action-id="record"]');
+
+    expect(await s.attr('[data-action-id="record"]', "aria-busy")).toBe("true");
+    expect(await s.attr('[data-action-id="record"]', "aria-label")).toBe("Record");
+    expect(await s.attr(".sp-detail-btn-resolve", "disabled")).not.toBeNull();
+    expect(await s.attr(".sp-detail-btn-delete", "disabled")).not.toBeNull();
+    expect(await page.evaluate(() => (window as { __panelActionCalls?: unknown }).__panelActionCalls)).toEqual([
+      { id: feedbackId, frozen: true },
+    ]);
+
+    await page.evaluate(() => (window as { __releasePanelAction?: () => void }).__releasePanelAction?.());
+    await page.waitForFunction(() => {
+      const root = document.querySelector("siteping-widget")!.shadowRoot!;
+      return !root.querySelector<HTMLButtonElement>(".sp-detail-btn-resolve")!.disabled;
+    });
+    expect(await s.attr('[data-action-id="record"]', "aria-busy")).toBeNull();
+    expect(await s.text('[data-action-id="record"]')).toBe("Record");
+  });
+
+  test("host actions wrap and truncate instead of squashing Resolve/Delete", async ({ page }) => {
+    const layout = await page.evaluate(() => {
+      const root = document.querySelector("siteping-widget")!.shadowRoot!;
+      const row = root.querySelector<HTMLElement>(".sp-detail-actions--custom")!;
+      const rowRect = row.getBoundingClientRect();
+      const longLabel = root.querySelector<HTMLElement>('[data-action-id="long"] span')!;
+      return {
+        rowOverflow: row.scrollWidth - row.clientWidth,
+        outside: [...row.children].filter((c) => c.getBoundingClientRect().right > rowRect.right + 0.5).length,
+        lines: new Set([...row.children].map((c) => Math.round(c.getBoundingClientRect().top))).size,
+        truncated: longLabel.scrollWidth > longLabel.clientWidth,
+        textOverflow: getComputedStyle(longLabel).textOverflow,
+        resolveWidth: root.querySelector(".sp-detail-btn-resolve")!.getBoundingClientRect().width,
+      };
+    });
+
+    expect(layout.rowOverflow).toBeLessThanOrEqual(0);
+    expect(layout.outside).toBe(0);
+    expect(layout.lines).toBeGreaterThan(1);
+    expect(layout.truncated).toBe(true);
+    expect(layout.textOverflow).toBe("ellipsis");
+    expect(layout.resolveWidth).toBeGreaterThan(120);
   });
 });
 

@@ -1,5 +1,13 @@
 import type { AssertEqual, FeedbackPayload, FeedbackStatus, FeedbackType, Prettify } from "@siteping/core";
-import { CONSOLE_DIAGNOSTIC_LEVELS, EMAIL_PATTERN, FEEDBACK_STATUSES, FEEDBACK_TYPES } from "@siteping/core";
+import {
+  ANCHOR_ELEMENT_ID_MAX,
+  ANCHOR_ELEMENT_TAG_MAX,
+  CONSOLE_DIAGNOSTIC_LEVELS,
+  EMAIL_PATTERN,
+  FEEDBACK_STATUSES,
+  FEEDBACK_TYPES,
+  IDENTITY_FIELD_MAX_LENGTH,
+} from "@siteping/core";
 import * as zod from "zod";
 
 // Namespace import required: Zod publishes dual CJS/ESM, and bundlers (tsup, vitest) may
@@ -13,8 +21,13 @@ const anchorSchema = z.object({
   cssSelector: z.string().min(1).max(2000),
   xpath: z.string().min(1).max(2000),
   textSnippet: z.string().max(500),
-  elementTag: z.string().min(1).max(200),
-  elementId: z.string().max(500).optional(),
+  elementTag: z.string().min(1).max(ANCHOR_ELEMENT_TAG_MAX),
+  // A resolver hint: an over-long id is dropped, as the widget now does,
+  // rather than failing the whole payload — earlier widgets send it unbounded.
+  elementId: z
+    .string()
+    .transform((id) => (id.length <= ANCHOR_ELEMENT_ID_MAX ? id : undefined))
+    .optional(),
   textPrefix: z.string().max(200),
   textSuffix: z.string().max(200),
   fingerprint: z.string().max(200),
@@ -94,10 +107,11 @@ export const feedbackCreateSchema = z.object({
   urlPattern: z.string().max(2000).nullable().optional(),
   viewport: z.string().min(1).max(50),
   userAgent: z.string().min(1).max(500),
-  authorName: z.string().min(1).max(200),
-  // The widget's identity modal validates against the same core pattern, so
-  // an address the modal accepts (and persists) is never a 400 here.
-  authorEmail: z.email({ pattern: EMAIL_PATTERN }).max(200),
+  // The widget's identity modal validates against the same core pattern and
+  // length cap, so an identity the modal accepts (and persists) is never a
+  // 400 here.
+  authorName: z.string().min(1).max(IDENTITY_FIELD_MAX_LENGTH),
+  authorEmail: z.email({ pattern: EMAIL_PATTERN }).max(IDENTITY_FIELD_MAX_LENGTH),
   annotations: z.array(annotationSchema).max(50),
   // Restrict to URL-safe identifiers. The widget generates UUIDs (or a
   // Date+Math.random fallback), both of which match. Anything outside this

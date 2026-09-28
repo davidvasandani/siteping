@@ -1,4 +1,4 @@
-import type { FeedbackStatus } from "@siteping/core";
+import { type FeedbackStatus, intlLocale } from "@siteping/core";
 import type { CSSProperties, ReactElement, KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useCallback, useEffect, useInsertionEffect, useMemo, useRef, useState } from "react";
 import { buildDeepLink } from "../format.js";
@@ -26,13 +26,7 @@ const SIDE_BY_SIDE_MIN = 960;
  * where natural — German capitalizes nouns, so it keeps the original casing.
  */
 function toastStatusLabel(label: string, locale: string): string {
-  if (locale.toLowerCase().startsWith("de")) return label;
-  try {
-    return label.toLocaleLowerCase(locale);
-  } catch {
-    // Invalid BCP-47 tag from a custom locale ("fr_FR") — lowercase without one.
-    return label.toLowerCase();
-  }
+  return locale.toLowerCase().startsWith("de") ? label : label.toLocaleLowerCase(locale);
 }
 
 /**
@@ -73,6 +67,8 @@ export function SitepingInbox(props: SitepingInboxProps): ReactElement {
     void localeTick; // new identity once the dictionary is registered
     return createT(locale);
   }, [locale, localeTick]);
+  // What every Intl / toLocale* call gets — a tag like "fr_FR" would throw there.
+  const intlTag = intlLocale(locale);
 
   // ----- toast slot (single)
   const toastSeq = useRef(0);
@@ -108,11 +104,11 @@ export function SitepingInbox(props: SitepingInboxProps): ReactElement {
     async (id: string, status: FeedbackStatus): Promise<void> => {
       const ok = await runMutation(() => state.changeStatus(id, status));
       if (ok) {
-        const label = toastStatusLabel(getStatusLabel(status, t), locale);
+        const label = toastStatusLabel(getStatusLabel(status, t), intlTag);
         showToast(tWithParams(t, "inbox.markedAs", { status: label }), true);
       }
     },
-    [runMutation, state, showToast, t, locale],
+    [runMutation, state, showToast, t, intlTag],
   );
 
   const deleteFeedback = useCallback(
@@ -159,9 +155,11 @@ export function SitepingInbox(props: SitepingInboxProps): ReactElement {
     return () => observer.disconnect();
   }, []);
 
-  // ----- return keyboard focus to the listbox (after a drawer/toast unmounts)
+  // ----- return keyboard focus to the listbox (after a drawer/toast unmounts),
+  // or to the root when the pane shows none (empty state, error, skeleton)
   const focusList = useCallback(() => {
-    rootRef.current?.querySelector<HTMLElement>(".spd-list")?.focus();
+    const root = rootRef.current;
+    (root?.querySelector<HTMLElement>(".spd-list") ?? root)?.focus();
   }, []);
 
   // ----- keep keyboard focus in the inbox when the list pane swaps (the last
@@ -182,11 +180,11 @@ export function SitepingInbox(props: SitepingInboxProps): ReactElement {
   }, []);
   const pane = state.view === "ready" ? "list" : state.view;
   useEffect(() => {
+    void pane; // runs on every swap
     const active = document.activeElement;
     if (!focusInside.current || (active && active !== document.body && active !== rootRef.current)) return;
-    const list = pane === "list" ? rootRef.current?.querySelector<HTMLElement>(".spd-list") : null;
-    (list ?? rootRef.current)?.focus();
-  }, [pane]);
+    focusList();
+  }, [pane, focusList]);
 
   // ----- announce the result count whenever a fetch settles (separate from the toast)
   const [resultsMsg, setResultsMsg] = useState("");
@@ -329,7 +327,10 @@ export function SitepingInbox(props: SitepingInboxProps): ReactElement {
   );
 
   // ----- render
-  const ui = useMemo<InboxUiContextValue>(() => ({ t, locale, notify, focusList }), [t, locale, notify, focusList]);
+  const ui = useMemo<InboxUiContextValue>(
+    () => ({ t, locale: intlTag, notify, focusList }),
+    [t, intlTag, notify, focusList],
+  );
 
   const showSkeleton = state.view === "loading";
   const showError = state.view === "error";
@@ -344,7 +345,7 @@ export function SitepingInbox(props: SitepingInboxProps): ReactElement {
         style={rootStyle}
         data-theme={resolvedTheme}
         data-density={density}
-        lang={locale}
+        lang={intlTag}
         aria-label={t("inbox.regionLabel")}
         // Focus fallback when the listbox unmounts (see the pane effect above).
         tabIndex={-1}

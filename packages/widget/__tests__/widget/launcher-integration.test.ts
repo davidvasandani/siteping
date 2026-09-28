@@ -165,6 +165,7 @@ function makeAnnotationCompleteData() {
     },
     type: "bug",
     message: "Test annotation message",
+    clientId: "client-1",
   };
 }
 
@@ -753,7 +754,18 @@ describe("launcher — annotation:complete integration", () => {
       await new Promise((r) => setTimeout(r, 50));
       expect(emailInput.style.borderColor).toBeTruthy();
       expect(emailInput.style.borderColor).not.toBe("");
+      expect(emailInput.getAttribute("aria-invalid")).toBe("true");
+      expect(nameInput.hasAttribute("aria-invalid")).toBe(false);
       expect(mockSendFeedback).not.toHaveBeenCalled();
+      expect(modal.isConnected).toBe(true);
+
+      // A fixed field drops its error state; the next rejection marks the field at fault.
+      nameInput.value = "N".repeat(201);
+      emailInput.value = "alice@example.com";
+      submitBtn.click();
+      expect(emailInput.hasAttribute("aria-invalid")).toBe(false);
+      expect(emailInput.style.borderColor).toBe("");
+      expect(nameInput.getAttribute("aria-invalid")).toBe("true");
       expect(modal.isConnected).toBe(true);
 
       instance.destroy();
@@ -774,7 +786,7 @@ describe("launcher — annotation:complete integration", () => {
     it.each([
       ["name", "N".repeat(201), "alice@example.com"],
       ["email", "Alice", `${"a".repeat(64)}@${"b".repeat(60)}.${"c".repeat(60)}.${"d".repeat(60)}.com`],
-    ])("rejects a %s longer than the server accepts instead of persisting it", async (_field, name, email) => {
+    ])("rejects a %s longer than the server accepts instead of persisting it", async (field, name, email) => {
       // A persisted 201-char value is replayed on every submission — each one
       // a 400 from adapter-prisma (authorName / authorEmail max 200).
       mockGetIdentity.mockReturnValue(null);
@@ -790,6 +802,9 @@ describe("launcher — annotation:complete integration", () => {
       expect(mockSaveIdentity).not.toHaveBeenCalled();
       expect(mockSendFeedback).not.toHaveBeenCalled();
       expect(modal.isConnected).toBe(true);
+      const [rejected, accepted] = field === "name" ? [nameInput, emailInput] : [emailInput, nameInput];
+      expect(rejected.getAttribute("aria-invalid")).toBe("true");
+      expect(accepted.hasAttribute("aria-invalid")).toBe(false);
 
       instance.destroy();
     });
@@ -1016,78 +1031,22 @@ describe("launcher — annotation:complete integration", () => {
   });
 
   // -------------------------------------------------------------------------
-  // crypto.randomUUID failure fallback (line 207-208)
+  // clientId — minted per popup session by the annotator (see annotator tests)
   // -------------------------------------------------------------------------
 
-  describe("clientId fallback", () => {
-    it("falls back to Date.now()-based id when crypto.randomUUID throws", async () => {
-      const origRandomUUID = (globalThis.crypto as Crypto & { randomUUID: () => string }).randomUUID;
-      Object.defineProperty(globalThis.crypto, "randomUUID", {
-        value: () => {
-          throw new Error("Insecure context");
-        },
-        writable: true,
-        configurable: true,
-      });
-
-      try {
-        const response = makeFeedbackResponse();
-        mockSendFeedback.mockResolvedValue(response);
-
-        const instance = launch(defaultConfig());
-        capturedBus!.emit("annotation:complete", makeAnnotationCompleteData());
-
-        await vi.waitFor(() => {
-          expect(mockSendFeedback).toHaveBeenCalledOnce();
-        });
-
-        const payload = mockSendFeedback.mock.calls[0]![0];
-        // Fallback format: "<timestamp>-<random>"
-        expect(payload.clientId).toMatch(/^\d+-[a-z0-9]+$/);
-
-        instance.destroy();
-      } finally {
-        Object.defineProperty(globalThis.crypto, "randomUUID", {
-          value: origRandomUUID,
-          writable: true,
-          configurable: true,
-        });
-      }
-    });
-  });
-
-  describe("clientId across retries", () => {
-    it("a resend of the same annotation after a failure reuses its clientId (no duplicate with the queued retry)", async () => {
-      // The failed attempt is queued for replay by api-client; if the resend
-      // got a fresh clientId, the next page load would replay the first one
-      // and the server (deduping by clientId only) would store both.
-      mockSendFeedback.mockRejectedValueOnce(new Error("Network down")).mockResolvedValue(makeFeedbackResponse());
+  describe("clientId", () => {
+    it("posts the clientId the annotator minted for the popup session", async () => {
+      mockSendFeedback.mockResolvedValue(makeFeedbackResponse());
       const instance = launch(defaultConfig());
-      const errorListener = vi.fn();
-      capturedBus!.on("feedback:error", errorListener);
 
-      // The annotator re-emits the same `annotation` object on every retry.
-      const data = makeAnnotationCompleteData();
-      capturedBus!.emit("annotation:complete", data);
+      capturedBus!.emit("annotation:complete", { ...makeAnnotationCompleteData(), clientId: "session-42" });
       await vi.waitFor(() => {
-        expect(errorListener).toHaveBeenCalledOnce();
-      });
-      capturedBus!.emit("annotation:complete", { ...data, message: "Edited before resending" });
-      await vi.waitFor(() => {
-        expect(mockSendFeedback).toHaveBeenCalledTimes(2);
+        expect(mockSendFeedback).toHaveBeenCalledOnce();
       });
 
-      const first = mockSendFeedback.mock.calls[0]![0];
-      const resend = mockSendFeedback.mock.calls[1]![0];
-      expect(resend.clientId).toBe(first.clientId);
-
-      // A new annotation is a new feedback — it must get its own clientId.
-      capturedBus!.emit("annotation:complete", makeAnnotationCompleteData());
-      await vi.waitFor(() => {
-        expect(mockSendFeedback).toHaveBeenCalledTimes(3);
-      });
-      expect(mockSendFeedback.mock.calls[2]![0].clientId).not.toBe(first.clientId);
-
+      // A launcher-minted id would differ on every resend from the same popup,
+      // and the retry queue would later replay a duplicate (#307).
+      expect(mockSendFeedback.mock.calls[0]![0].clientId).toBe("session-42");
       instance.destroy();
     });
   });
@@ -1497,6 +1456,31 @@ describe("launcher — annotation:complete integration", () => {
       });
 
       instance.destroy();
+    });
+
+    it.each([
+      ["with", vi.fn()],
+      ["without", undefined],
+    ])("logs panel action failures %s onError and never emits them on feedback:error", (_, onError) => {
+      // A host bug in onAction has no widget UI to surface it: the console
+      // always shows it, even when onError is set (the React hook always
+      // sets one).
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      const instance = launch(defaultConfig(onError ? { onError } : {}));
+      try {
+        const publicFeedbackError = vi.fn();
+        instance.on("feedback:error", publicFeedbackError);
+
+        const error = new Error("ticket creation failed");
+        capturedBus!.emit("panel:action-error", error);
+
+        expect(consoleError).toHaveBeenCalledExactlyOnceWith("[siteping] Panel action failed:", error);
+        if (onError) expect(onError).toHaveBeenCalledExactlyOnceWith(error);
+        expect(publicFeedbackError).not.toHaveBeenCalled();
+      } finally {
+        instance.destroy();
+        consoleError.mockRestore();
+      }
     });
 
     it("non-Error rejections from sendFeedback are wrapped into Error instances", async () => {

@@ -76,21 +76,6 @@ describe("formatRelativeDate", () => {
     // English Intl.RelativeTimeFormat should return something with "15" and "min" or "ago"
     expect(result).toContain("15");
   });
-
-  it.each(["fr_FR", "pt_BR", ""])(
-    "falls back to English instead of throwing for a malformed locale tag (%j)",
-    (locale) => {
-      // PHP / WordPress hand out `fr_FR`-style tags; Intl rejects them with a
-      // RangeError, which crashed the panel list and tooltip rendering.
-      vi.useFakeTimers();
-      vi.setSystemTime(new Date("2025-06-15T12:00:00Z"));
-      expect(formatRelativeDate("2025-06-15T12:00:00Z", locale)).toBe(formatRelativeDate("2025-06-15T12:00:00Z", "en"));
-      const tenMinutesAgo = new Date(Date.now() - 10 * 60_000).toISOString();
-      expect(formatRelativeDate(tenMinutesAgo, locale)).toBe(formatRelativeDate(tenMinutesAgo, "en"));
-      const monthAgo = new Date(Date.now() - 30 * 86400_000).toISOString();
-      expect(formatRelativeDate(monthAgo, locale)).toBe(formatRelativeDate(monthAgo, "en"));
-    },
-  );
 });
 
 // ---------------------------------------------------------------------------

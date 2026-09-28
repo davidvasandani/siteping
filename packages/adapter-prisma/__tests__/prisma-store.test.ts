@@ -62,6 +62,15 @@ describe("PrismaStore — pagination clamp", () => {
     const args = prisma.sitepingFeedback.findMany.mock.calls[0]?.[0] as { skip: number; take: number };
     expect(args).toMatchObject({ skip: 40, take: 20 });
   });
+
+  it("answers an unreachable page from count alone, never forwarding the offset to findMany", async () => {
+    const prisma = spyDelegate();
+    prisma.sitepingFeedback.count.mockResolvedValue(7);
+    const result = await new PrismaStore(prisma).getFeedbacks({ projectName: "p", page: 1e18, limit: 100 });
+    expect(result).toEqual({ feedbacks: [], total: 7 });
+    expect(prisma.sitepingFeedback.findMany).not.toHaveBeenCalled();
+    expect(prisma.sitepingFeedback.count).toHaveBeenCalledWith({ where: { projectName: "p" } });
+  });
 });
 
 describe("PrismaStore — ordering", () => {
@@ -72,6 +81,20 @@ describe("PrismaStore — ordering", () => {
     await new PrismaStore(prisma).getFeedbacks({ projectName: "p", page: 2, limit: 10 });
     const args = prisma.sitepingFeedback.findMany.mock.calls[0]?.[0] as { orderBy: unknown };
     expect(args.orderBy).toEqual([{ createdAt: "desc" }, { id: "desc" }]);
+  });
+});
+
+describe("PrismaStore — verifyProjectOwnership", () => {
+  it("reads only projectName, never the whole row (inline screenshot, diagnostics)", async () => {
+    const prisma = spyDelegate();
+    prisma.sitepingFeedback.findUnique.mockResolvedValue({ projectName: "p" });
+
+    await expect(new PrismaStore(prisma).verifyProjectOwnership("fb-1", "p")).resolves.toBe(true);
+
+    expect(prisma.sitepingFeedback.findUnique).toHaveBeenCalledWith({
+      where: { id: "fb-1" },
+      select: { projectName: true },
+    });
   });
 });
 

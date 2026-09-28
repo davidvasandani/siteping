@@ -46,15 +46,10 @@ export function formatRelativeTime(date: Date, t: TFunction): string {
   return tWithParams(t, n === 1 ? "time.year" : "time.years", { n });
 }
 
-/** Full localized date + time, for row tooltips and the drawer meta grid. */
+/** Full localized date + time, for row tooltips and the drawer meta grid. `locale` must be Intl-valid. */
 export function formatAbsolute(date: Date, locale: string): string {
   if (!isValidDate(date)) return INVALID_DATE;
-  try {
-    return new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" }).format(date);
-  } catch {
-    // Invalid BCP-47 tag from a custom locale — fall back to English.
-    return new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(date);
-  }
+  return new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" }).format(date);
 }
 
 /**

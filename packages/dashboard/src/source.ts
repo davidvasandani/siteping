@@ -49,7 +49,7 @@ async function parseJsonAs<T>(response: Response): Promise<T> {
  *
  * Auth: `apiKey` becomes `Authorization: Bearer <apiKey>`; `headers` (static
  * or per-request function, sync or async) are merged on top, so an explicit
- * `Authorization` header wins over `apiKey`.
+ * `Authorization` header (in any casing) wins over `apiKey`.
  */
 export function createEndpointSource(options: EndpointSourceOptions): InboxSource {
   const { endpoint, apiKey, headers, fetchFn } = options;
@@ -63,9 +63,11 @@ export function createEndpointSource(options: EndpointSourceOptions): InboxSourc
     const extra = typeof headers === "function" ? await headers() : headers;
     // Header names are case-insensitive: drop a built-in the caller overrides
     // under another casing, or fetch sends both joined ("Bearer a, Bearer b").
+    // A plain object, not `Headers`: a `fetchFn` wrapper may spread or index it.
     for (const [name, value] of Object.entries(extra ?? {})) {
+      const lower = name.toLowerCase();
       for (const key of Object.keys(merged)) {
-        if (key.toLowerCase() === name.toLowerCase()) delete merged[key];
+        if (key.toLowerCase() === lower) delete merged[key];
       }
       merged[name] = value;
     }

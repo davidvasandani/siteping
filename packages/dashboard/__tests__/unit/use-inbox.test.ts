@@ -248,11 +248,14 @@ describe("useSitepingInbox — focus survives only in the list it points into", 
     expect(result.current.focusedId).toBeNull();
   });
 
-  it("openFeedback ignores an id that is neither listed nor cached", async () => {
+  it("openFeedback on an id not loaded yet opens it once its record loads (e.g. from a URL)", async () => {
     const { result } = await mountDemo();
-    act(() => result.current.openFeedback("ghost"));
-    expect(result.current.openedId).toBeNull();
-    expect(result.current.focusedId).toBeNull();
+    act(() => result.current.openFeedback("r5")); // resolved: not on the Open tab
+    expect(result.current.openedId).toBe("r5");
+    expect(result.current.opened).toBeNull();
+
+    act(() => result.current.setStatus("resolved"));
+    await waitFor(() => expect(result.current.opened?.id).toBe("r5"));
   });
 });
 
@@ -899,6 +902,118 @@ describe("useSitepingInbox — concurrent mutations roll back per record", () =>
     expect(result.current.counts).toMatchObject({ all: 6, open: 3, resolved: 1 });
   });
 
+  it("a change made after the latest one failed still chains behind an earlier one in flight", async () => {
+    const { source, result } = await mountDemo();
+    act(() => result.current.setStatus("all"));
+    await waitFor(() => expect(result.current.items).toHaveLength(6));
+    await settle();
+    const heldA = deferred<FeedbackRecord>();
+    const heldB = deferred<FeedbackRecord>();
+    source.setStatus.mockImplementationOnce(() => heldA.promise).mockImplementationOnce(() => heldB.promise);
+
+    // e, e (toggles back), B fails, e again (succeeds), then A fails.
+    let a!: Promise<unknown>;
+    let b!: Promise<unknown>;
+    act(() => {
+      a = result.current.changeStatus("r1", "resolved").catch((e: unknown) => e);
+    });
+    act(() => {
+      b = result.current.changeStatus("r1", "open").catch((e: unknown) => e);
+    });
+    await act(async () => {
+      heldB.reject(new Error("b failed"));
+      await b;
+    });
+    expect(result.current.items.find((r) => r.id === "r1")?.status).toBe("resolved");
+    await act(async () => {
+      await result.current.changeStatus("r1", "open");
+    });
+    await act(async () => {
+      heldA.reject(new Error("a failed"));
+      await a;
+    });
+
+    // The server holds r1 open: A's failure is superseded by the later success.
+    expect(source.records.find((r) => r.id === "r1")?.status).toBe("open");
+    expect(result.current.items.find((r) => r.id === "r1")?.status).toBe("open");
+    expect(result.current.counts).toMatchObject({ all: 6, open: 3, resolved: 1 });
+  });
+
+  it("an earlier failure never rebases onto a change started after a later success", async () => {
+    const { source, result } = await mountDemo();
+    act(() => result.current.setStatus("all"));
+    await waitFor(() => expect(result.current.items).toHaveLength(6));
+    await settle();
+    const heldA = deferred<FeedbackRecord>();
+    source.setStatus.mockImplementationOnce(() => heldA.promise);
+
+    let a!: Promise<unknown>;
+    act(() => {
+      a = result.current.changeStatus("r1", "resolved").catch((e: unknown) => e);
+    });
+    await act(async () => {
+      await result.current.changeStatus("r1", "open");
+    });
+    const heldD = deferred<FeedbackRecord>();
+    source.setStatus.mockImplementationOnce(() => heldD.promise);
+    let d!: Promise<unknown>;
+    act(() => {
+      d = result.current.changeStatus("r1", "resolved").catch((e: unknown) => e);
+    });
+    await act(async () => {
+      heldA.reject(new Error("a failed"));
+      await a;
+    });
+    await act(async () => {
+      heldD.reject(new Error("d failed"));
+      await d;
+    });
+
+    expect(result.current.items.find((r) => r.id === "r1")?.status).toBe("open");
+    expect(result.current.counts).toMatchObject({ all: 6, open: 3, resolved: 1 });
+  });
+
+  it("leaves no settled mutation behind to hide its row from loadMore", async () => {
+    const source = makeSource([
+      makeRecord({ id: "q", status: "resolved", createdAt: new Date("2026-07-20T10:09:00Z") }),
+      makeRecord({ id: "p", status: "open", createdAt: new Date("2026-07-20T10:08:00Z") }),
+    ]);
+    const { result } = renderHook(() => useSitepingInbox({ projects: "demo", source, pageSize: 1 }));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => result.current.setStatus("all"));
+    await waitFor(() => expect(ids(result.current.items)).toEqual(["q"]));
+    await settle();
+    await act(async () => {
+      await result.current.loadMore();
+    });
+    expect(ids(result.current.items)).toEqual(["q", "p"]);
+
+    // Z, A, B on p: A fails (rebased onto B), B fails as the latest, then Z fails.
+    const held = [deferred<FeedbackRecord>(), deferred<FeedbackRecord>(), deferred<FeedbackRecord>()] as const;
+    for (const gate of held) source.setStatus.mockImplementationOnce(() => gate.promise);
+    const runs: Promise<unknown>[] = [];
+    for (const next of ["resolved", "open", "resolved"] as const) {
+      act(() => {
+        runs.push(result.current.changeStatus("p", next).catch((e: unknown) => e));
+      });
+    }
+    for (const index of [1, 2, 0]) {
+      await act(async () => {
+        held[index]?.reject(new Error("patch failed"));
+        await runs[index];
+      });
+    }
+
+    await act(async () => {
+      await result.current.refresh();
+    });
+    await act(async () => {
+      await result.current.loadMore();
+    });
+    expect(ids(result.current.items)).toEqual(["q", "p"]);
+    expect(result.current.hasMore).toBe(false);
+  });
+
   it("a failed change keeps a refresh that was already in flight when it started", async () => {
     const { source, result } = await mountDemo();
     const r0 = makeRecord({ id: "r0", status: "open", createdAt: new Date("2026-07-20T10:07:00Z") });
@@ -922,6 +1037,15 @@ describe("useSitepingInbox — concurrent mutations roll back per record", () =>
       page.resolve({ feedbacks: [r0, ...open], total: 4 });
       await refreshing;
     });
+    // Those counts raced the change, so its settling starts a recount: hold it,
+    // or its fresh totals would mask what the rollback did to the counts.
+    const real = source.list.getMockImplementation();
+    if (!real) throw new Error("no list implementation");
+    const recount = deferred<void>();
+    source.list.mockImplementation(async (query) => {
+      if (query.limit === 1) await recount.promise;
+      return real(query);
+    });
     await act(async () => {
       held.reject(new Error("patch failed"));
       await change;
@@ -930,6 +1054,113 @@ describe("useSitepingInbox — concurrent mutations roll back per record", () =>
     expect(ids(result.current.items)).toEqual(["r0", "r1", "r2", "r3"]);
     expect(result.current.items.find((r) => r.id === "r2")?.status).toBe("open");
     expect(result.current.total).toBe(4);
+    // The refresh's counts already hold the server's view — the failure must not invert its deltas there.
+    expect(result.current.counts).toMatchObject({ all: 6, open: 3, resolved: 1 });
+    await act(async () => {
+      recount.resolve();
+    });
+    await settle();
+    expect(result.current.counts).toMatchObject({ all: 6, open: 3, resolved: 1 });
+  });
+});
+
+describe("useSitepingInbox — a failure on a record the loaded list no longer holds", () => {
+  /** m0..m3 open, pageSize 2: both pages loaded, m3 opened, then a refresh leaves it in the drawer only. */
+  async function mountDrawerOnly(status: "open" | "all") {
+    const source = makeSource(
+      Array.from({ length: 4 }, (_, i) =>
+        makeRecord({ id: `m${i}`, status: "open", createdAt: new Date(Date.UTC(2026, 6, 20, 10, 10 - i)) }),
+      ),
+    );
+    const hook = renderHook(() => useSitepingInbox({ projects: "demo", source, pageSize: 2 }));
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+    act(() => hook.result.current.setStatus(status));
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+    await settle();
+    await act(async () => {
+      await hook.result.current.loadMore();
+    });
+    act(() => hook.result.current.openFeedback("m3"));
+    await act(async () => {
+      await hook.result.current.refresh();
+    });
+    await settle();
+    expect(ids(hook.result.current.items)).toEqual(["m0", "m1"]);
+    expect(hook.result.current.opened?.id).toBe("m3");
+    return { source, ...hook };
+  }
+
+  it("a failed drawer change doesn't leave the record appended to the loaded page", async () => {
+    const { source, result } = await mountDrawerOnly("all");
+    source.setStatus.mockRejectedValueOnce(new Error("patch failed"));
+    await act(async () => {
+      await result.current.changeStatus("m3", "in_progress").catch(() => undefined);
+    });
+
+    expect(ids(result.current.items)).toEqual(["m0", "m1"]);
+    expect(result.current.total).toBe(4);
+    expect(result.current.counts).toMatchObject({ all: 4, open: 4, in_progress: 0 });
+    expect(result.current.opened?.status).toBe("open");
+  });
+
+  it("a failed drawer delete doesn't insert the record into the loaded page", async () => {
+    const { source, result } = await mountDrawerOnly("open");
+    source.remove.mockRejectedValueOnce(new Error("delete failed"));
+    await act(async () => {
+      await result.current.deleteFeedback("m3").catch(() => undefined);
+    });
+
+    expect(ids(result.current.items)).toEqual(["m0", "m1"]);
+    expect(result.current.total).toBe(4);
+    expect(result.current.counts).toMatchObject({ all: 4, open: 4 });
+    expect(result.current.opened?.id).toBe("m3");
+  });
+
+  it("a failed change leaves a page 1 refetched meanwhile as the server sent it", async () => {
+    const { source, result } = await mountDrawerOnly("open");
+    await act(async () => {
+      await result.current.loadMore();
+    });
+    const held = deferred<FeedbackRecord>();
+    source.setStatus.mockImplementationOnce(() => held.promise);
+    let change!: Promise<unknown>;
+    act(() => {
+      change = result.current.changeStatus("m3", "resolved").catch((e: unknown) => e);
+    });
+    await act(async () => {
+      await result.current.refresh(); // back to page 1: m3 sits on page 2 again
+    });
+    await act(async () => {
+      held.reject(new Error("patch failed"));
+      await change;
+    });
+
+    expect(ids(result.current.items)).toEqual(["m0", "m1"]);
+    expect(result.current.total).toBe(4);
+  });
+
+  it("a failed undo takes back the row it re-inserted, and the focus with it", async () => {
+    const { source, result } = await mountDemo();
+    await act(async () => {
+      await result.current.changeStatus("r1", "resolved");
+    });
+    const held = deferred<FeedbackRecord>();
+    source.setStatus.mockImplementationOnce(() => held.promise);
+    let undo!: Promise<unknown>;
+    act(() => {
+      undo = result.current.undo().catch((e: unknown) => e);
+    });
+    expect(ids(result.current.items)).toEqual(["r1", "r2", "r3"]);
+    act(() => result.current.focus("r1"));
+
+    await act(async () => {
+      held.reject(new Error("undo failed"));
+      await undo;
+    });
+
+    expect(ids(result.current.items)).toEqual(["r2", "r3"]);
+    expect(result.current.total).toBe(2);
+    expect(result.current.focusedId).toBe("r2");
   });
 });
 
@@ -1065,6 +1296,30 @@ describe("useSitepingInbox — counts racing a mutation", () => {
     expect(ids(result.current.items)).toEqual(["r2", "r3"]);
     expect(result.current.counts).toMatchObject({ all: 6, open: 2, resolved: 2 });
   });
+
+  it("starts no recount once unmounted", async () => {
+    const { source, result, unmount } = await mountDemo();
+    const held = deferred<FeedbackRecord>();
+    source.setStatus.mockImplementationOnce(() => held.promise);
+    let change!: Promise<unknown>;
+    act(() => {
+      change = result.current.changeStatus("r1", "resolved").catch((e: unknown) => e);
+    });
+    await act(async () => {
+      await result.current.refresh(); // its counts race the pending change: a recount is due
+    });
+
+    unmount();
+    source.list.mockClear();
+    const r1 = source.records.find((r) => r.id === "r1") as FeedbackRecord;
+    await act(async () => {
+      held.resolve({ ...r1, status: "resolved" });
+      await change;
+    });
+    await settle();
+
+    expect(source.list).not.toHaveBeenCalled();
+  });
 });
 
 describe("useSitepingInbox — a success landing in a list refetched meanwhile", () => {
@@ -1090,6 +1345,65 @@ describe("useSitepingInbox — a success landing in a list refetched meanwhile",
     expect(ids(result.current.items)).toEqual(["r2", "r3"]);
     expect(result.current.total).toBe(2);
     expect(result.current.focusedId).toBe("r2");
+  });
+
+  it("adds a saved record the refetched list lacks when it now fits there (e, then 4)", async () => {
+    const { source, result } = await mountDemo();
+    const gate = holdNextSetStatus(source);
+    let change!: Promise<void>;
+    act(() => {
+      change = result.current.changeStatus("r1", "resolved");
+    });
+    act(() => result.current.setStatus("resolved"));
+    // The Resolved tab loads before the server applied the change.
+    await waitFor(() => expect(ids(result.current.items)).toEqual(["r5"]));
+    await settle();
+
+    await act(async () => {
+      gate.resolve();
+      await change;
+    });
+
+    expect(ids(result.current.items)).toEqual(["r1", "r5"]);
+    expect(result.current.total).toBe(2);
+  });
+
+  it("does not append a saved record the refetched page no longer reaches", async () => {
+    const source = makeSource(
+      Array.from({ length: 6 }, (_, i) =>
+        makeRecord({ id: `m${i}`, status: "open", createdAt: new Date(Date.UTC(2026, 6, 20, 10, 10 - i)) }),
+      ),
+    );
+    const { result } = renderHook(() => useSitepingInbox({ projects: "demo", source, pageSize: 2 }));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => result.current.setStatus("all"));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await settle();
+    await act(async () => {
+      await result.current.loadMore();
+    });
+    expect(ids(result.current.items)).toEqual(["m0", "m1", "m2", "m3"]);
+
+    const gate = holdNextSetStatus(source);
+    let change!: Promise<void>;
+    act(() => {
+      change = result.current.changeStatus("m3", "in_progress"); // stays in the "all" tab
+    });
+    await act(async () => {
+      await result.current.refresh(); // back to page 1: m3 now sits on page 2
+    });
+    await act(async () => {
+      gate.resolve();
+      await change;
+    });
+
+    expect(ids(result.current.items)).toEqual(["m0", "m1"]);
+    expect(result.current.total).toBe(6);
+    await act(async () => {
+      await result.current.loadMore();
+    });
+    expect(ids(result.current.items)).toEqual(["m0", "m1", "m2", "m3"]);
+    expect(result.current.items[3]?.status).toBe("in_progress");
   });
 });
 
@@ -1150,6 +1464,77 @@ describe("useSitepingInbox — re-entering rows respect the whole query", () => 
   });
 });
 
+describe("useSitepingInbox — a server search broader than the local predicate", () => {
+  /** Searches "cafe" on a server that also matches "Café" (c2), like MySQL's accent-insensitive collations. */
+  async function mountCafeSearch(status: "open" | "all", pageSize = 50) {
+    const source = makeSource([
+      makeRecord({ id: "c1", status: "open", message: "Cafe typo", createdAt: new Date("2026-07-20T10:06:00Z") }),
+      makeRecord({ id: "c2", status: "open", message: "Café crash", createdAt: new Date("2026-07-20T10:05:00Z") }),
+      makeRecord({ id: "x1", status: "open", message: "unrelated", createdAt: new Date("2026-07-20T10:04:00Z") }),
+    ]);
+    const real = source.list.getMockImplementation();
+    if (!real) throw new Error("no list implementation");
+    const fold = (text: string) => text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+    source.list.mockImplementation(async ({ search, ...query }) => {
+      if (!search) return real(query);
+      const { page = 1, limit = 50 } = query;
+      const all = await real({ ...query, page: 1, limit: 100 });
+      const matching = all.feedbacks.filter((r) => fold(r.message).includes(fold(search)));
+      return { feedbacks: matching.slice((page - 1) * limit, page * limit), total: matching.length };
+    });
+    const hook = renderHook(() => useSitepingInbox({ projects: "demo", source, pageSize }));
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+    act(() => hook.result.current.setStatus(status));
+    act(() => hook.result.current.setSearch("cafe"));
+    await waitFor(() => expect(hook.result.current.total).toBe(2), { timeout: 1500 });
+    await settle();
+    expect(hook.result.current.counts).toMatchObject({ all: 2, open: 2, resolved: 0 });
+    return { source, ...hook };
+  }
+
+  it("keeps a row it listed and moves the counts on a change or a delete", async () => {
+    const { result } = await mountCafeSearch("all");
+    await act(async () => {
+      await result.current.changeStatus("c2", "resolved");
+    });
+    expect(ids(result.current.items)).toEqual(["c1", "c2"]);
+    expect(result.current.counts).toMatchObject({ all: 2, open: 1, resolved: 1 });
+
+    await act(async () => {
+      await result.current.deleteFeedback("c2");
+    });
+    expect(ids(result.current.items)).toEqual(["c1"]);
+    expect(result.current.counts).toMatchObject({ all: 1, open: 1, resolved: 0 });
+  });
+
+  it("brings a row it listed back on undo and on a failed change", async () => {
+    const { source, result } = await mountCafeSearch("open", 1);
+    await act(async () => {
+      await result.current.loadMore();
+    });
+    expect(ids(result.current.items)).toEqual(["c1", "c2"]);
+
+    await act(async () => {
+      await result.current.changeStatus("c2", "resolved");
+    });
+    expect(ids(result.current.items)).toEqual(["c1"]);
+    expect(result.current.counts).toMatchObject({ all: 2, open: 1, resolved: 1 });
+    await act(async () => {
+      await result.current.undo();
+    });
+    expect(ids(result.current.items)).toEqual(["c1", "c2"]);
+    expect(result.current.counts).toMatchObject({ all: 2, open: 2, resolved: 0 });
+
+    source.setStatus.mockRejectedValueOnce(new Error("patch failed"));
+    await act(async () => {
+      await result.current.changeStatus("c2", "resolved").catch(() => undefined);
+    });
+    expect(ids(result.current.items)).toEqual(["c1", "c2"]);
+    expect(result.current.total).toBe(2);
+    expect(result.current.counts).toMatchObject({ all: 2, open: 2, resolved: 0 });
+  });
+});
+
 describe("useSitepingInbox — undo state after a failed mutation", () => {
   it("does not restore another project's undo when a mutation fails after a project switch", async () => {
     const source = makeSource([
@@ -1205,5 +1590,87 @@ describe("useSitepingInbox — undo state after a failed mutation", () => {
     });
 
     expect(result.current.pendingUndo).toEqual({ id: "r2", previousStatus: "open" });
+  });
+
+  it("a failed delete that never touched the undo leaves it to the change that set it", async () => {
+    const { source, result } = await mountDemo();
+    const heldChange = deferred<FeedbackRecord>();
+    source.setStatus.mockImplementationOnce(() => heldChange.promise);
+    const heldDelete = deferred<void>();
+    source.remove.mockImplementationOnce(() => heldDelete.promise);
+
+    let change!: Promise<unknown>;
+    let del!: Promise<unknown>;
+    act(() => {
+      change = result.current.changeStatus("r1", "resolved").catch((e: unknown) => e);
+    });
+    act(() => {
+      del = result.current.deleteFeedback("r2").catch((e: unknown) => e);
+    });
+    await act(async () => {
+      heldDelete.reject(new Error("delete failed"));
+      await del;
+    });
+    expect(result.current.pendingUndo).toEqual({ id: "r1", previousStatus: "open" });
+    await act(async () => {
+      heldChange.reject(new Error("change failed"));
+      await change;
+    });
+
+    expect(ids(result.current.items)).toEqual(["r1", "r2", "r3"]);
+    expect(result.current.pendingUndo).toBeNull();
+  });
+
+  it("an earlier change still takes back the undo a later failed change handed back to it", async () => {
+    const { source, result } = await mountDemo();
+    const heldA = deferred<FeedbackRecord>();
+    const heldB = deferred<FeedbackRecord>();
+    source.setStatus.mockImplementationOnce(() => heldA.promise).mockImplementationOnce(() => heldB.promise);
+
+    let a!: Promise<unknown>;
+    let b!: Promise<unknown>;
+    act(() => {
+      a = result.current.changeStatus("r1", "resolved").catch((e: unknown) => e);
+    });
+    act(() => {
+      b = result.current.changeStatus("r2", "resolved").catch((e: unknown) => e);
+    });
+    await act(async () => {
+      heldB.reject(new Error("b failed"));
+      await b;
+    });
+    expect(result.current.pendingUndo).toEqual({ id: "r1", previousStatus: "open" });
+    await act(async () => {
+      heldA.reject(new Error("a failed"));
+      await a;
+    });
+
+    expect(ids(result.current.items)).toEqual(["r1", "r2", "r3"]);
+    expect(result.current.pendingUndo).toBeNull();
+  });
+
+  it("drops the undo as soon as the project switches — an undo in the same tick does nothing", async () => {
+    const source = makeSource([
+      makeRecord({ id: "a1", projectName: "A", status: "open" }),
+      makeRecord({ id: "b1", projectName: "B", status: "open" }),
+    ]);
+    const { result } = renderHook(() => useSitepingInbox({ projects: ["A", "B"], source }));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    // "All" tab: the resolved row stays listed, so only the cleared undo stops the undo.
+    act(() => result.current.setStatus("all"));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await settle();
+    await act(async () => {
+      await result.current.changeStatus("a1", "resolved");
+    });
+    source.setStatus.mockClear();
+
+    await act(async () => {
+      result.current.setProject("B");
+      await result.current.undo();
+    });
+
+    expect(source.setStatus).not.toHaveBeenCalled();
+    expect(result.current.pendingUndo).toBeNull();
   });
 });

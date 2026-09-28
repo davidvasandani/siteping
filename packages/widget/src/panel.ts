@@ -6,11 +6,12 @@ import {
   type FeedbackType,
   isClosedStatus,
   type PageScope,
+  type SitepingPanelAction,
 } from "@siteping/core";
 import type { GetFeedbacksOptions, WidgetClient } from "./api-client.js";
 import { SegmentedControl } from "./components/segmented-control.js";
 import { PAGE_SIZE } from "./constants.js";
-import { el, formatRelativeDate, parseSvg, setButtonLoading, setText } from "./dom-utils.js";
+import { el, formatRelativeDate, onClickOutside, parseSvg, setButtonLoading, setText } from "./dom-utils.js";
 import type { EventBus, WidgetEvents } from "./events.js";
 import { ExportButton } from "./export-utils.js";
 import { getStatusLabel, getTypeLabel, type TFunction, tWithParams } from "./i18n/index.js";
@@ -29,6 +30,7 @@ import {
   ICON_UNDO,
 } from "./icons.js";
 import type { MarkerManager } from "./markers.js";
+import { normalizePanelActions } from "./panel-actions.js";
 import { BulkActions } from "./panel-bulk.js";
 import { DetailView } from "./panel-detail.js";
 import { createPageGroupHeader, groupFeedbacksByPage, PanelSortControls, sortFeedbacks } from "./panel-sort.js";
@@ -60,9 +62,7 @@ export class Panel {
   private typeDropdownBtn!: HTMLButtonElement;
   private typeDropdownContainer!: HTMLElement;
   private typeDropdownMenu: HTMLElement | null = null;
-  private typeDropdownOutsideHandler: ((e: MouseEvent) => void) | null = null;
-  /** Pending frame that arms the outside-click handler — cancelled on close/destroy. */
-  private typeDropdownRaf: number | null = null;
+  private removeTypeDropdownOutsideClick: (() => void) | null = null;
   private statusSegmented!: SegmentedControl<"all" | FeedbackStatus>;
   private typeOptions!: ReadonlyArray<{ value: string; label: string; icon: string; color: string; bg: string }>;
   private feedbacks: FeedbackResponse[] = [];
@@ -72,10 +72,16 @@ export class Panel {
   private isOpen = false;
   private searchTimeout: ReturnType<typeof setTimeout> | null = null;
   private loadController: AbortController | null = null;
+  /** True while `loadFeedbacks()` waits for the list it will render. */
+  private isLoading = false;
+  /**
+   * Feedback a marker click asked to reveal while the list was loading (a
+   * marker click on a closed panel opens it first): scrolled to and flashed
+   * once that load renders, dropped if the panel closes meanwhile.
+   */
+  private pendingScrollId: string | null = null;
   /** Tracks feedback IDs with in-flight mutations to prevent spam-click race conditions */
   private pendingMutations = new Set<string>();
-  /** Marker-clicked feedback whose card wasn't rendered yet — flashed after the next render. */
-  private pendingScrollId: string | null = null;
 
   // New feature modules
   private readonly stats: PanelStats;
@@ -106,11 +112,15 @@ export class Panel {
     private readonly markers: MarkerManager,
     private readonly t: TFunction,
     private readonly locale: string,
-    pageScopeOptions?: { getScope: () => PageScope; scopeAnnotationsByUrl: boolean },
+    options?: {
+      getScope: () => PageScope;
+      scopeAnnotationsByUrl: boolean;
+      panelActions?: readonly SitepingPanelAction[] | undefined;
+    },
   ) {
     this.shadowRoot = shadowRoot;
-    this.getScope = pageScopeOptions?.getScope ?? (() => ({ url: window.location.pathname, urlPattern: null }));
-    this.scopeAnnotationsByUrl = pageScopeOptions?.scopeAnnotationsByUrl ?? true;
+    this.getScope = options?.getScope ?? (() => ({ url: window.location.pathname, urlPattern: null }));
+    this.scopeAnnotationsByUrl = options?.scopeAnnotationsByUrl ?? true;
 
     // Phone layout: dims the page behind the sheet; a tap on it closes the panel.
     this.scrim = el("div", { class: "sp-scrim" });
@@ -255,9 +265,18 @@ export class Panel {
             if (isCompactViewport()) this.close();
           }
         },
+        onCustomAction: async (action, fb) => {
+          try {
+            await action.onAction(fb, { refresh: () => this.refreshDetail(fb.id), close: () => this.close() });
+          } catch (error) {
+            this.reportActionError(error);
+          }
+        },
+        onCustomActionError: (error) => this.reportActionError(error),
       },
       this.t,
       locale,
+      normalizePanelActions(options?.panelActions),
     );
 
     // --- Keyboard Shortcuts ---
@@ -481,6 +500,7 @@ export class Panel {
     this.bus.emit("close");
     this.shortcuts.disable();
     this.detail.hide();
+    this.pendingScrollId = null;
     // Restore focus to the FAB
     const fab = (this.root.getRootNode() as ShadowRoot).querySelector<HTMLButtonElement>(".sp-fab");
     fab?.focus();
@@ -569,7 +589,11 @@ export class Panel {
     return isClosedStatus(tab) ? CLOSED_FEEDBACK_STATUSES : OPEN_FEEDBACK_STATUSES;
   }
 
-  private async loadFeedbacks(): Promise<void> {
+  /**
+   * Load the list from page 1. `pages` > 1 re-fetches that many pages before
+   * rendering, so a panel action's `refresh()` keeps what "Load more" added.
+   */
+  private async loadFeedbacks(pages = 1): Promise<void> {
     // Cancel any in-flight request to prevent stale responses from overwriting newer results
     this.loadController?.abort();
     this.loadController = new AbortController();
@@ -603,22 +627,42 @@ export class Panel {
     const hasContent = this.feedbacks.length > 0;
     if (!hasContent) this.showLoading();
 
+    // Page markers, and the FAB badge counted from them, show the page's
+    // feedbacks whatever the list's filters or scope: a "Resolved" tab must
+    // not wipe the open markers. The list result serves them when its query
+    // is theirs; otherwise their query runs alongside the list's.
+    const listIsMarkerQuery = this.isMarkerQuery(options, scope);
+    this.isLoading = true;
     try {
-      const { feedbacks, total } = await this.client.getFeedbacks(this.projectName, options);
+      const listRequest = this.client.getFeedbacks(this.projectName, options);
+      if (!listIsMarkerQuery) void this.loadPageMarkers(scope, signal);
+      let { feedbacks, total } = await listRequest;
+      let page = 1;
+      while (page < pages && feedbacks.length < total && !signal.aborted) {
+        page++;
+        const more = await this.client.getFeedbacks(this.projectName, { ...options, page });
+        feedbacks = [...feedbacks, ...more.feedbacks];
+        total = more.total;
+      }
       if (signal.aborted) return; // Stale response — a newer request superseded this one
+      this.currentPage = page;
       this.feedbacks = feedbacks;
       this.totalFeedbacks = total;
       this.stats.update(feedbacks, total);
       this.bulk.reset();
       this.renderList();
-      const pendingScrollId = this.pendingScrollId;
-      this.pendingScrollId = null;
-      if (pendingScrollId) this.flashCard(pendingScrollId);
-      await this.renderMarkers(scope, options, feedbacks, signal);
+      if (this.pendingScrollId) this.flashCard(this.pendingScrollId);
+      if (listIsMarkerQuery) this.renderPageMarkers(feedbacks, scope);
     } catch (error) {
       if (signal.aborted) return; // Expected abort, not a real error
       if (!hasContent) this.showError();
       this.bus.emit("feedback:error", error instanceof Error ? error : new Error(String(error)));
+    } finally {
+      // An aborted load leaves both to the load that superseded it
+      if (!signal.aborted) {
+        this.isLoading = false;
+        this.pendingScrollId = null;
+      }
     }
   }
 
@@ -663,8 +707,8 @@ export class Panel {
       this.feedbacks = [...this.feedbacks, ...feedbacks];
       this.stats.update(this.feedbacks, total);
       this.renderList();
-      // Extra pages only add markers when the panel shows the marker query.
-      if (this.isMarkerQuery(scope, options)) await this.renderMarkers(scope, options, this.feedbacks);
+      // Under a filter, the markers keep the page query's result
+      if (this.isMarkerQuery(options, scope)) this.renderPageMarkers(this.feedbacks, scope);
     } catch (error) {
       if (restoreBtn) restoreBtn();
       this.bus.emit("feedback:error", error instanceof Error ? error : new Error(String(error)));
@@ -673,40 +717,30 @@ export class Panel {
     }
   }
 
-  /**
-   * Page markers — and the FAB badge, derived from their open count — show the
-   * page's feedbacks, never the panel's status/type/search filters or a wider
-   * scope: a "Resolved" tab must not wipe the open markers and zero the badge
-   * (which then persists after the panel closes). Markers also stay strictly
-   * local to the current URL so out-of-context dots never appear. The panel's
-   * result is reused when its query is the marker query (the one the launcher
-   * loads); otherwise that query is fetched.
-   */
-  private async renderMarkers(
-    scope: PageScope,
-    options: GetFeedbacksOptions,
-    loaded: FeedbackResponse[],
-    signal?: AbortSignal,
-  ): Promise<void> {
-    const url = this.scopeAnnotationsByUrl ? scope.url : undefined;
-    let feedbacks = loaded;
-    if (!this.isMarkerQuery(scope, options)) {
-      const query = url ? { limit: PAGE_SIZE, url } : { limit: PAGE_SIZE };
-      try {
-        ({ feedbacks } = await this.client.getFeedbacks(this.projectName, query));
-      } catch {
-        return; // Non-critical — keep the current markers
-      }
-      if (signal?.aborted) return; // A newer load owns the markers
-    }
-    // Defensive client-side URL filter — the backend may ignore `url`.
-    this.markers.render(url ? feedbacks.filter((f) => f.url === url) : feedbacks);
+  /** Whether a list query returns the page markers' feedbacks too: no filter, and the markers' URL scope. */
+  private isMarkerQuery(options: GetFeedbacksOptions, scope: PageScope): boolean {
+    const markerUrl = this.scopeAnnotationsByUrl ? scope.url : undefined;
+    return !options.type && !options.statuses && !options.search && !options.urlPattern && options.url === markerUrl;
   }
 
-  /** Whether a panel query is exactly the page-marker query (no filter, marker URL scope). */
-  private isMarkerQuery(scope: PageScope, options: GetFeedbacksOptions): boolean {
-    const url = this.scopeAnnotationsByUrl ? scope.url : undefined;
-    return !options.type && !options.statuses && !options.search && !options.urlPattern && options.url === url;
+  /** Fetch the page markers' own query (the launcher's) when the list shows a filtered or wider one. */
+  private async loadPageMarkers(scope: PageScope, signal: AbortSignal): Promise<void> {
+    const query = this.scopeAnnotationsByUrl ? { limit: PAGE_SIZE, url: scope.url } : { limit: PAGE_SIZE };
+    try {
+      const { feedbacks } = await this.client.getFeedbacks(this.projectName, query);
+      if (!signal.aborted) this.renderPageMarkers(feedbacks, scope); // Else a newer load owns the markers
+    } catch {
+      // Non-critical: the current markers stay
+    }
+  }
+
+  /**
+   * Markers render only the current-URL slice, even when the panel shows a
+   * wider scope, so the user never sees out-of-context dots on the page. The
+   * filter is defensive: a backend may ignore the `url` query.
+   */
+  private renderPageMarkers(feedbacks: FeedbackResponse[], scope: PageScope): void {
+    this.markers.render(this.scopeAnnotationsByUrl ? feedbacks.filter((f) => f.url === scope.url) : feedbacks);
   }
 
   private renderList(): void {
@@ -897,27 +931,32 @@ export class Panel {
     const closed = new Set(this.feedbacks.filter((f) => isClosedStatus(f.status)).map((f) => f.id));
     const targets = ids.filter((id) => !closed.has(id));
     const results = await Promise.allSettled(targets.map((id) => this.client.resolveFeedback(id, true)));
-    await this.settleBulk(results);
+    await this.settleBulk(targets, results);
   }
 
   private async bulkDelete(ids: string[]): Promise<void> {
     const results = await Promise.allSettled(ids.map((id) => this.client.deleteFeedback(id)));
-    results.forEach((result, i) => {
-      const id = ids[i];
-      if (result.status === "fulfilled" && id) this.bus.emit("feedback:deleted", id);
+    ids.forEach((id, i) => {
+      if (results[i]?.status === "fulfilled") this.bus.emit("feedback:deleted", id);
     });
-    await this.settleBulk(results);
+    await this.settleBulk(ids, results);
   }
 
   /**
-   * Finish a bulk action. Always reload — items that succeeded must leave the
-   * list (and their markers the page) even when another item failed — then
-   * surface the first failure, rethrown so BulkActions restores its buttons.
+   * Finish a bulk action. Reload when any item succeeded — it must leave the
+   * list (and its markers the page) even when another item failed. When every
+   * item failed nothing changed, so skip the reload: during an outage it would
+   * only fail again and report a second error. Then re-select the failed items
+   * still listed, so the user can retry them, and surface the first failure,
+   * rethrown so BulkActions restores its buttons.
    */
-  private async settleBulk(results: PromiseSettledResult<unknown>[]): Promise<void> {
-    await this.loadFeedbacks();
+  private async settleBulk(ids: string[], results: PromiseSettledResult<unknown>[]): Promise<void> {
+    const failed = ids.filter((_, i) => results[i]?.status === "rejected");
+    if (failed.length < ids.length) await this.loadFeedbacks();
     const failure = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
     if (!failure) return;
+    const listed = new Set(this.feedbacks.map((f) => f.id));
+    this.bulk.selectAll(failed.filter((id) => listed.has(id)));
     const error = failure.reason instanceof Error ? failure.reason : new Error(String(failure.reason));
     this.bus.emit("feedback:error", error);
     throw error;
@@ -1122,6 +1161,14 @@ export class Panel {
       else this.openTypeDropdown();
     });
 
+    // Escape from the trigger too: a click leaves focus there, not in the menu.
+    this.typeDropdownContainer.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || !this.typeDropdownMenu) return;
+      e.stopPropagation(); // Close the menu only, not the panel
+      this.closeTypeDropdown();
+      this.typeDropdownBtn.focus();
+    });
+
     this.typeDropdownContainer.appendChild(this.typeDropdownBtn);
     return this.typeDropdownContainer;
   }
@@ -1196,25 +1243,8 @@ export class Panel {
 
     this.typeDropdownContainer.appendChild(this.typeDropdownMenu);
 
-    this.typeDropdownRaf = requestAnimationFrame(() => {
-      this.typeDropdownRaf = null;
-      this.typeDropdownOutsideHandler = (e: MouseEvent) => {
-        // composedPath, not e.target: at document level the target is
-        // retargeted to the shadow host, so every click looked "outside".
-        if (this.typeDropdownMenu && !e.composedPath().includes(this.typeDropdownContainer)) {
-          this.closeTypeDropdown();
-        }
-      };
-      document.addEventListener("click", this.typeDropdownOutsideHandler, true);
-    });
-
-    this.typeDropdownMenu.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") {
-        e.stopPropagation(); // Close the menu only, not the panel
-        this.closeTypeDropdown();
-        this.typeDropdownBtn.focus();
-      }
-    });
+    // Armed now (see PanelSortControls.openMenu): a frame could outlive the menu.
+    this.removeTypeDropdownOutsideClick = onClickOutside(this.typeDropdownContainer, () => this.closeTypeDropdown());
   }
 
   private closeTypeDropdown(): void {
@@ -1223,12 +1253,8 @@ export class Panel {
       this.typeDropdownMenu = null;
     }
     this.typeDropdownBtn.setAttribute("aria-expanded", "false");
-    if (this.typeDropdownRaf !== null) cancelAnimationFrame(this.typeDropdownRaf);
-    this.typeDropdownRaf = null;
-    if (this.typeDropdownOutsideHandler) {
-      document.removeEventListener("click", this.typeDropdownOutsideHandler, true);
-      this.typeDropdownOutsideHandler = null;
-    }
+    this.removeTypeDropdownOutsideClick?.();
+    this.removeTypeDropdownOutsideClick = null;
   }
 
   private selectTypeFilter(value: string): void {
@@ -1329,30 +1355,57 @@ export class Panel {
   }
 
   scrollToFeedback(feedbackId: string): void {
-    // A marker click on a closed panel opens it and lands here before the
-    // list has loaded — retry once the next load renders the cards.
-    this.pendingScrollId = this.flashCard(feedbackId) ? null : feedbackId;
+    // The rendered cards are about to be replaced (or not rendered yet, when
+    // the marker click opened the panel): wait for the load to render them.
+    if (this.isLoading) {
+      this.pendingScrollId = feedbackId;
+      return;
+    }
+    this.flashCard(feedbackId);
   }
 
-  /** Scroll a card into view and flash it. Returns false when it isn't rendered. */
-  private flashCard(feedbackId: string): boolean {
+  private flashCard(feedbackId: string): void {
     const escapedId = CSS.escape(feedbackId);
     const card = this.listContainer.querySelector<HTMLElement>(`[data-feedback-id="${escapedId}"]`);
-    if (!card) return false;
-    card.scrollIntoView({ behavior: "smooth", block: "center" });
-    card.classList.add("sp-anim-flash");
-    card.addEventListener(
-      "animationend",
-      () => {
-        card.classList.remove("sp-anim-flash");
-      },
-      { once: true },
-    );
-    // Phones: the sheet hides the pin that was tapped — open its details
-    // rather than leaving the user to find the card in the list.
-    const feedback = this.feedbacks.find((f) => f.id === feedbackId);
-    if (feedback && isCompactViewport()) this.detail.show(feedback, Number(card.dataset.number));
-    return true;
+    if (card) {
+      card.scrollIntoView({ behavior: "smooth", block: "center" });
+      card.classList.add("sp-anim-flash");
+      card.addEventListener(
+        "animationend",
+        () => {
+          card.classList.remove("sp-anim-flash");
+        },
+        { once: true },
+      );
+      // Phones: the sheet hides the pin that was tapped — open its details
+      // rather than leaving the user to find the card in the list.
+      const feedback = this.feedbacks.find((f) => f.id === feedbackId);
+      if (feedback && isCompactViewport()) this.detail.show(feedback, Number(card.dataset.number));
+    }
+  }
+
+  /**
+   * Host `panelActions` failures go to `config.onError` through their own
+   * event — never `feedback:error`, which settles a pending popup submission.
+   */
+  private reportActionError(error: unknown): void {
+    this.bus.emit("panel:action-error", error instanceof Error ? error : new Error(String(error)));
+  }
+
+  /**
+   * `refresh()` handed to panel actions: reload the list (every page loaded
+   * so far) and markers, then re-render the detail view with the updated
+   * record — or go back to the list when it no longer matches the filters.
+   * Leaves the view alone when the user has already moved on to another
+   * feedback.
+   */
+  private async refreshDetail(feedbackId: string): Promise<void> {
+    if (this.isOpen) await this.loadFeedbacks(this.currentPage);
+    if (this.detail.feedbackId !== feedbackId) return;
+    const index = this.feedbacks.findIndex((f) => f.id === feedbackId);
+    const fresh = this.feedbacks[index];
+    if (fresh) this.detail.show(fresh, index + 1);
+    else this.detail.hide();
   }
 
   /** Refresh the panel after a new feedback is submitted */
@@ -1368,6 +1421,9 @@ export class Panel {
   }
 
   destroy(): void {
+    // A panel action's context can outlive the widget: its refresh() and
+    // close() only act on an open panel.
+    this.isOpen = false;
     this.loadController?.abort();
     if (this.searchTimeout) clearTimeout(this.searchTimeout);
     this.listContainer.removeEventListener("click", this.onListClick);

@@ -38,16 +38,34 @@ export interface NetworkEntry {
 }
 
 /**
- * The URL as recorded: query string and hash dropped — they routinely carry
- * secrets (`?api_key=…`, OAuth `#access_token=…`) and the docs promise query
- * strings never leave the browser — then capped to the schema's length.
+ * The URL as recorded: credentials, query string and hash dropped — they
+ * routinely carry secrets (`https://user:pass@…`, `?api_key=…`, OAuth
+ * `#access_token=…`) and the docs promise query strings never leave the
+ * browser — then capped to the schema's length.
  */
 function recordableUrl(input: unknown): string {
-  const url = urlString(input);
+  const url = withoutCredentials(urlString(input));
   const cut = url.search(/[?#]/);
   const bare = cut === -1 ? url : url.slice(0, cut);
   if (bare.length <= MAX_URL_LENGTH) return bare;
   return `${bare.slice(0, MAX_URL_LENGTH - 1)}…`;
+}
+
+/**
+ * `url` without its userinfo, parsed against the page as fetch and XHR parse
+ * it. XHR sends a credentialed URL, and fetch rejects one, a failure the
+ * wrapper records. A URL without credentials comes back exactly as given.
+ */
+function withoutCredentials(url: string): string {
+  try {
+    const parsed = new URL(url, typeof location === "undefined" ? undefined : location.href);
+    if (!parsed.username && !parsed.password) return url;
+    parsed.username = "";
+    parsed.password = "";
+    return parsed.href;
+  } catch {
+    return url;
+  }
 }
 
 function urlString(input: unknown): string {
@@ -102,10 +120,12 @@ export class NetworkBuffer {
     }
     // A request left open > 10 min, an exotic method, or a non-standard
     // status (fetch allows up to 999 — LinkedIn answers 999) would each 400.
+    // An out-of-range status is recorded as 0 ("no usable status") rather
+    // than clamped to 599, which would pass it off as a real 5xx.
     this.entries.push({
       ...entry,
       method: entry.method.slice(0, MAX_METHOD_LENGTH),
-      status: Math.min(entry.status, MAX_STATUS),
+      status: entry.status <= MAX_STATUS ? entry.status : 0,
       durationMs: Math.min(Math.max(entry.durationMs, 0), MAX_DURATION_MS),
     });
   }
