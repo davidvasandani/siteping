@@ -461,6 +461,17 @@ describe("ApiClient", () => {
     expect(calledUrl).toContain("limit=10");
   });
 
+  it.each([
+    ["/api/siteping?tenant=acme", "/api/siteping?tenant=acme&projectName=test-project&limit=10"],
+    ["/api/siteping?", "/api/siteping?projectName=test-project&limit=10"],
+    ["/api/siteping#top", "/api/siteping?projectName=test-project&limit=10#top"],
+  ])("appends GET params to an endpoint that already has a query or hash (%s)", async (withQuery, expected) => {
+    // `${endpoint}?${params}` produced "?tenant=acme?projectName=…" — a 400.
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ feedbacks: [], total: 0 })));
+    await new ApiClient(withQuery, "test").getFeedbacks("test-project", { limit: 10 });
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe(expected);
+  });
+
   it("sends GET with the full set of optional query params (page/status/search)", async () => {
     vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ feedbacks: [], total: 0 })));
 
@@ -661,6 +672,20 @@ describe("ApiClient — auth & headers", () => {
     expect(lastHeaders().Authorization).toBe("Bearer from-headers");
   });
 
+  it("lets an explicit authorization header override apiKey whatever its casing", async () => {
+    // Header names are case-insensitive: a plain object merge sent both
+    // entries, which fetch combines into "Bearer k, Basic xyz".
+    const client = new ApiClient(endpoint, "test", { apiKey: "k", headers: { authorization: "Basic xyz" } });
+    await client.sendFeedback(payload);
+    expect(new Headers(lastHeaders()).get("Authorization")).toBe("Basic xyz");
+  });
+
+  it("lets a lowercase content-type replace the JSON default instead of combining with it", async () => {
+    const client = new ApiClient(endpoint, "test", { headers: { "content-type": "application/vnd.api+json" } });
+    await client.sendFeedback(payload);
+    expect(new Headers(lastHeaders()).get("Content-Type")).toBe("application/vnd.api+json");
+  });
+
   it("fails the request like a network error when the headers factory throws", async () => {
     const client = new ApiClient(endpoint, "test", {
       headers: () => {
@@ -795,6 +820,35 @@ describe("flushRetryQueue", () => {
     );
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("dropped 1 queued feedback"));
     warnSpy.mockRestore();
+  });
+
+  it("drops a malformed queued entry individually and still replays the valid ones", async () => {
+    const valid = {
+      projectName: "test",
+      type: "bug" as const,
+      message: "still replayed",
+      url: "https://example.com",
+      viewport: "1x1",
+      userAgent: "t",
+      authorName: "Alice",
+      authorEmail: "alice@example.com",
+      annotations: [],
+      clientId: "valid-1",
+    };
+    // Tampered / legacy entry: `payload.authorName.trim()` used to throw,
+    // the outer catch swallowed it and nothing was ever replayed again.
+    vi.mocked(localStorage.getItem).mockReturnValue(
+      JSON.stringify([
+        { endpoint, payload: {} },
+        { endpoint, payload: valid },
+      ]),
+    );
+
+    await flushRetryQueue(endpoint, { name: "Alice", email: "alice@example.com" });
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(vi.mocked(fetch).mock.calls[0]?.[1]?.body as string)).toEqual(valid);
+    expect(localStorage.removeItem).toHaveBeenCalledWith("siteping_retry_queue");
   });
 
   it("retries queued items and removes on success", async () => {
@@ -1253,6 +1307,34 @@ describe("queueForRetry (via sendFeedback)", () => {
     expect(parsed).toHaveLength(2);
     expect(parsed[0].payload.message).toBe("existing");
     expect(parsed[1].payload.message).toBe("new");
+  });
+
+  it("a failed resend of the same clientId replaces its queued entry (latest edit is replayed)", async () => {
+    const payload = {
+      projectName: "test",
+      type: "bug" as const,
+      message: "first attempt",
+      url: "https://example.com",
+      viewport: "1x1",
+      userAgent: "t",
+      authorName: "A",
+      authorEmail: "a@b.com",
+      annotations: [],
+      clientId: "same-session",
+    };
+    vi.mocked(localStorage.getItem).mockReturnValue(JSON.stringify([{ endpoint, payload }]));
+    vi.mocked(fetch).mockRejectedValue(new TypeError("Failed to fetch"));
+
+    const client = new ApiClient(endpoint, "test");
+    await expectTransientFailure(client, { ...payload, message: "edited resend" });
+
+    const savedValue = vi.mocked(localStorage.setItem).mock.calls[0]?.[1];
+    if (savedValue === undefined) throw new Error("expected the retry queue to be written to localStorage");
+    const parsed = JSON.parse(savedValue);
+    // Two entries would replay the stale first attempt, and the server's
+    // clientId dedupe would then discard the edit.
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0].payload.message).toBe("edited resend");
   });
 
   it("drops the oldest entry when the queue exceeds MAX_QUEUE_SIZE (20)", async () => {

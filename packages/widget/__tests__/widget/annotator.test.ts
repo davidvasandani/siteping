@@ -90,9 +90,11 @@ vi.mock(new URL("../../src/popup.js", import.meta.url).pathname, () => ({
         popupMocks.destroyCount += 1;
         popupMocks.isOpenState = false;
       }),
+      cancel: vi.fn(),
       get isOpen() {
         return popupMocks.isOpenState;
       },
+      isSubmitting: false,
     };
   }),
 }));

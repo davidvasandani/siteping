@@ -115,6 +115,23 @@ describe("buildWebhookPayload — untrusted input", () => {
     expect(mrkdwn).toContain("*URL:* /orders?a=1&amp;b=2");
   });
 
+  it("keeps escaped Slack mrkdwn fields within Block Kit's 3000-char text limit", () => {
+    // A valid 2000-char URL full of `&` grows past 3000 chars once `&` → `&amp;`.
+    const url = `https://example.com/?${"a=1&".repeat(494)}`;
+    expect(url.length).toBeLessThanOrEqual(2000);
+    const payload = buildWebhookPayload("slack", { ...FEEDBACK, url, authorName: "&".repeat(3000) });
+    const context = payload.blocks.find((b) => b.type === "context") as {
+      elements: ReadonlyArray<{ text: string }>;
+    };
+
+    for (const { text } of context.elements) {
+      expect(text.length).toBeLessThanOrEqual(3000);
+      // Truncation never splits an entity (`&am…`).
+      expect(text.replace(/&(amp|lt|gt);/g, "")).not.toContain("&");
+    }
+    expect(context.elements.find((e) => e.text.startsWith("*URL:*"))?.text.endsWith("…")).toBe(true);
+  });
+
   it("keeps the plain_text header raw (Slack renders it verbatim) but within the 150-char Block Kit limit", () => {
     const payload = buildWebhookPayload("slack", { ...FEEDBACK, authorName: "Tom & Jerry <3" });
     const header = payload.blocks[0] as { type: "header"; text: { text: string } };
@@ -130,6 +147,51 @@ describe("buildWebhookPayload — untrusted input", () => {
     expect(payload.allowed_mentions).toEqual({ parse: [] });
     expect(payload.content).toContain("@everyone");
   });
+
+  it("escapes Discord markdown so a visitor can't send a disguised masked link", () => {
+    const phish = "[Reset your password](https://evil.example/phish)";
+    const escaped = "\\[Reset your password\\]\\(https://evil.example/phish\\)";
+    const payload = buildWebhookPayload("discord", {
+      ...FEEDBACK,
+      message: `**urgent** ${phish}`,
+      authorName: phish,
+      projectName: "__proj__",
+      url: phish,
+      viewport: "[x](https://e.co)",
+    });
+    const embed = payload.embeds[0];
+    const all = JSON.stringify(payload);
+
+    expect(all).not.toMatch(/(?<!\\)\[Reset your password\]/);
+    expect(payload.content).toBe(`New **bug** feedback from **${escaped}**`);
+    expect(embed?.description).toBe(`\\*\\*urgent\\*\\* ${escaped}`);
+    expect(embed?.title).toBe("bug — \\_\\_proj\\_\\_");
+    expect(embed?.fields.find((f) => f.name === "URL")?.value).toBe(escaped);
+    expect(embed?.fields.find((f) => f.name === "Author")?.value).toBe(`${escaped} (alice@example.com)`);
+    expect(embed?.fields.find((f) => f.name === "Viewport")?.value).toBe("\\[x\\]\\(https://e.co\\)");
+  });
+
+  it("keeps every Discord value within the API limits, even after escaping", () => {
+    // A 2000-char page URL is valid input; Discord rejects the whole webhook
+    // when one field value exceeds 1024 characters.
+    const payload = buildWebhookPayload("discord", {
+      ...FEEDBACK,
+      url: `https://example.com/${"a".repeat(1980)}`,
+      projectName: "_".repeat(200),
+      authorName: "*".repeat(3000),
+    });
+    const embed = payload.embeds[0];
+    expect(payload.content.length).toBeLessThanOrEqual(2000);
+    expect(embed?.title.length).toBeLessThanOrEqual(256);
+    for (const field of embed?.fields ?? []) expect(field.value.length).toBeLessThanOrEqual(1024);
+  });
+
+  it("never cuts a Discord escape in half when truncating", () => {
+    const payload = buildWebhookPayload("discord", { ...FEEDBACK, url: "_".repeat(2000) });
+    const value = payload.embeds[0]?.fields.find((f) => f.name === "URL")?.value ?? "";
+    expect(value.length).toBeLessThanOrEqual(1024);
+    expect(value).toMatch(/^(\\_)+…$/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -143,7 +205,7 @@ describe("dispatchWebhook", () => {
     const [calledUrl, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
     expect(calledUrl).toBe("https://hooks.slack.com/T/B/X");
     expect(init.method).toBe("POST");
-    expect((init.headers as Record<string, string>)["Content-Type"]).toBe("application/json");
+    expect(new Headers(init.headers).get("Content-Type")).toBe("application/json");
     const sent = JSON.parse(init.body as string) as { text: string };
     expect(sent.text).toContain("Alice");
   });
@@ -175,11 +237,19 @@ describe("dispatchWebhook", () => {
       FEEDBACK,
     );
     const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
-    expect(init.headers).toEqual({
-      "Content-Type": "application/json",
-      "X-Signature": "abc",
-      Authorization: "Bearer xyz",
+    expect(Object.fromEntries(new Headers(init.headers))).toEqual({
+      "content-type": "application/json",
+      "x-signature": "abc",
+      authorization: "Bearer xyz",
     });
+  });
+
+  it("lets a user header override Content-Type case-insensitively (never sent twice)", async () => {
+    await dispatchWebhook({ url: "https://hooks.example.com", headers: { "content-type": "text/plain" } }, FEEDBACK);
+    const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+    // A plain-object merge keeps both keys and fetch combines them into
+    // "application/json, text/plain".
+    expect(new Headers(init.headers).get("content-type")).toBe("text/plain");
   });
 
   it("invokes onError on a 500 response and does not throw", async () => {
@@ -206,6 +276,35 @@ describe("dispatchWebhook", () => {
     await dispatchWebhook({ url: "https://hooks.example.com" }, FEEDBACK);
     expect(warnSpy).toHaveBeenCalledOnce();
     expect(String(warnSpy.mock.calls[0]?.[0])).toContain("502");
+  });
+
+  it("never rejects when building the payload throws — reports through onError instead", async () => {
+    // Discord's embed timestamp calls toISOString(), which throws a RangeError
+    // on an invalid date. The handler drops this promise (`void`), so a
+    // rejection would be an unhandled rejection (fatal in Node by default).
+    const onError = vi.fn();
+    const broken = { ...FEEDBACK, createdAt: new Date("not a date") };
+    await expect(
+      dispatchWebhook({ url: "https://discord.com/api/webhooks/x", type: "discord", onError }, broken),
+    ).resolves.toBeUndefined();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledOnce();
+    const [err, id] = onError.mock.calls[0] as [Error, string];
+    expect(err).toBeInstanceOf(RangeError);
+    expect(id).toBe(FEEDBACK.id);
+  });
+
+  it("logs only the webhook origin — the Slack/Discord URL path is the credential", async () => {
+    fetchSpy.mockResolvedValueOnce(new Response("", { status: 404 }));
+    await dispatchWebhook(
+      { url: "https://hooks.slack.com/services/T0000/B0000/XXXXSECRETTOKEN", type: "slack" },
+      FEEDBACK,
+    );
+    expect(warnSpy).toHaveBeenCalledOnce();
+    const logged = String(warnSpy.mock.calls[0]?.[0]);
+    expect(logged).toContain("https://hooks.slack.com");
+    expect(logged).not.toContain("XXXXSECRETTOKEN");
+    expect(logged).not.toContain("/services/");
   });
 
   it("aborts the fetch when the per-webhook timeout elapses", async () => {
@@ -399,6 +498,43 @@ describe("createSitepingHandler — webhooks on clientId replays", () => {
 
     await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledOnce());
     // Give a stray second dispatch every chance to surface before asserting.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(fetchSpy).toHaveBeenCalledOnce();
+  });
+
+  it("dispatches once when two POSTs with the same clientId overlap (widget timeout + retry)", async () => {
+    // An async backend (KV, remote storage) lets both requests pass the
+    // replay check before either insert lands; the idempotent store then
+    // resolves the second create like a fresh insert.
+    let feedbacks: FeedbackRecord[] = [];
+    let seq = 0;
+    const tick = () => new Promise((resolve) => setTimeout(resolve, 1));
+    const store = createCollectionStore({
+      load: async () => {
+        await tick();
+        return feedbacks;
+      },
+      persist: async (next) => {
+        await tick();
+        feedbacks = next;
+      },
+      generateId: () => `id-${++seq}`,
+    });
+    const handler = createSitepingHandler({ store, webhooks: { url: "https://hooks.example.com" } });
+    const post = () =>
+      handler.POST(
+        new Request("http://localhost/api/siteping", {
+          method: "POST",
+          body: JSON.stringify({ ...validPayloadNoAnnotations, clientId: "overlapping" }),
+        }),
+      );
+
+    const [first, second] = await Promise.all([post(), post()]);
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    expect(((await first.json()) as { id: string }).id).toBe(((await second.json()) as { id: string }).id);
+
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalled());
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(fetchSpy).toHaveBeenCalledOnce();
   });

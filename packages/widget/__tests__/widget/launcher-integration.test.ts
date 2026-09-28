@@ -759,6 +759,41 @@ describe("launcher — annotation:complete integration", () => {
       instance.destroy();
     });
 
+    it("caps both inputs at the server's 200-char limit", async () => {
+      mockGetIdentity.mockReturnValue(null);
+      const instance = launch(defaultConfig());
+      capturedBus!.emit("annotation:complete", makeAnnotationCompleteData());
+
+      const { nameInput, emailInput } = await getIdentityModal();
+      expect(nameInput.maxLength).toBe(200);
+      expect(emailInput.maxLength).toBe(200);
+
+      instance.destroy();
+    });
+
+    it.each([
+      ["name", "N".repeat(201), "alice@example.com"],
+      ["email", "Alice", `${"a".repeat(64)}@${"b".repeat(60)}.${"c".repeat(60)}.${"d".repeat(60)}.com`],
+    ])("rejects a %s longer than the server accepts instead of persisting it", async (_field, name, email) => {
+      // A persisted 201-char value is replayed on every submission — each one
+      // a 400 from adapter-prisma (authorName / authorEmail max 200).
+      mockGetIdentity.mockReturnValue(null);
+      const instance = launch(defaultConfig());
+      capturedBus!.emit("annotation:complete", makeAnnotationCompleteData());
+
+      const { nameInput, emailInput, submitBtn, modal } = await getIdentityModal();
+      nameInput.value = name;
+      emailInput.value = email;
+      submitBtn.click();
+
+      await new Promise((r) => setTimeout(r, 350));
+      expect(mockSaveIdentity).not.toHaveBeenCalled();
+      expect(mockSendFeedback).not.toHaveBeenCalled();
+      expect(modal.isConnected).toBe(true);
+
+      instance.destroy();
+    });
+
     it("Cancel button click closes modal and aborts feedback submission", async () => {
       mockGetIdentity.mockReturnValue(null);
       const instance = launch(defaultConfig());
@@ -982,6 +1017,42 @@ describe("launcher — annotation:complete integration", () => {
     });
   });
 
+  describe("clientId across retries", () => {
+    it("a resend of the same annotation after a failure reuses its clientId (no duplicate with the queued retry)", async () => {
+      // The failed attempt is queued for replay by api-client; if the resend
+      // got a fresh clientId, the next page load would replay the first one
+      // and the server (deduping by clientId only) would store both.
+      mockSendFeedback.mockRejectedValueOnce(new Error("Network down")).mockResolvedValue(makeFeedbackResponse());
+      const instance = launch(defaultConfig());
+      const errorListener = vi.fn();
+      capturedBus!.on("feedback:error", errorListener);
+
+      // The annotator re-emits the same `annotation` object on every retry.
+      const data = makeAnnotationCompleteData();
+      capturedBus!.emit("annotation:complete", data);
+      await vi.waitFor(() => {
+        expect(errorListener).toHaveBeenCalledOnce();
+      });
+      capturedBus!.emit("annotation:complete", { ...data, message: "Edited before resending" });
+      await vi.waitFor(() => {
+        expect(mockSendFeedback).toHaveBeenCalledTimes(2);
+      });
+
+      const first = mockSendFeedback.mock.calls[0]![0];
+      const resend = mockSendFeedback.mock.calls[1]![0];
+      expect(resend.clientId).toBe(first.clientId);
+
+      // A new annotation is a new feedback — it must get its own clientId.
+      capturedBus!.emit("annotation:complete", makeAnnotationCompleteData());
+      await vi.waitFor(() => {
+        expect(mockSendFeedback).toHaveBeenCalledTimes(3);
+      });
+      expect(mockSendFeedback.mock.calls[2]![0].clientId).not.toBe(first.clientId);
+
+      instance.destroy();
+    });
+  });
+
   // -------------------------------------------------------------------------
   // Initial markers load failure (line 247)
   // -------------------------------------------------------------------------
@@ -1093,6 +1164,33 @@ describe("launcher — annotation:complete integration", () => {
       });
 
       instance.destroy();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Diagnostics snapshot
+  // -------------------------------------------------------------------------
+
+  describe("captureDiagnostics", () => {
+    it("submits a snapshot within the server caps even when larger buffer sizes are configured", async () => {
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      mockSendFeedback.mockResolvedValue(makeFeedbackResponse());
+      try {
+        const instance = launch(defaultConfig({ captureDiagnostics: { maxConsoleEntries: 200, network: false } }));
+        for (let i = 0; i < 300; i++) console.log(`log-${i}`);
+
+        capturedBus!.emit("annotation:complete", makeAnnotationCompleteData());
+        await vi.waitFor(() => {
+          expect(mockSendFeedback).toHaveBeenCalledOnce();
+        });
+
+        // adapter-prisma: `diagnostics.console` max 50 — more is a 400.
+        const payload = mockSendFeedback.mock.calls[0]![0];
+        expect(payload.diagnostics?.console).toHaveLength(50);
+        instance.destroy();
+      } finally {
+        logSpy.mockRestore();
+      }
     });
   });
 

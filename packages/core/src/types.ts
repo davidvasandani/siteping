@@ -31,7 +31,9 @@ export type SitepingSkipReason = "production" | "mobile" | "ssr";
 export interface DiagnosticsCaptureOptions {
   console?: boolean | undefined;
   network?: boolean | undefined;
+  /** Console buffer size — default and maximum 50 (the server's cap; larger values are clamped). */
   maxConsoleEntries?: number | undefined;
+  /** Failed-request buffer size — default and maximum 20 (the server's cap; larger values are clamped). */
   maxNetworkEntries?: number | undefined;
 }
 
@@ -40,6 +42,13 @@ export interface SitepingIdentity {
   name: string;
   email: string;
 }
+
+/**
+ * Max length of an identity's `name` and `email` — the HTTP schema's
+ * `authorName` / `authorEmail` cap. The widget's modal enforces it so a value
+ * it persists is never a 400 on every later submission.
+ */
+export const IDENTITY_FIELD_MAX_LENGTH = 200;
 
 /** Deep-link configuration — controls how a feedback id is read from the URL. */
 export interface SitepingDeepLinkOptions {
@@ -179,12 +188,14 @@ export interface SitepingBaseConfig {
    *
    * - `true` — capture with defaults (50 console / 20 network entries).
    * - `false` (default) — no capture, no monkey-patching.
-   * - object — per-channel toggles + custom buffer sizes.
+   * - object — per-channel toggles + smaller buffer sizes (values above the
+   *   50 / 20 server caps are clamped so submissions never fail validation).
    *
    * **Privacy considerations:** console messages may contain anything the
    * host page logs, including user data. Failed network requests record the
-   * URL (with query string) but never the response body. Inform end users
-   * before enabling in environments where they might log sensitive values.
+   * URL without its query string or hash, and never the response body.
+   * Inform end users before enabling in environments where they might log
+   * sensitive values.
    */
   captureDiagnostics?: boolean | DiagnosticsCaptureOptions | undefined;
   /** Called when the widget is skipped (production mode, mobile viewport, SSR — no DOM) */
@@ -693,18 +704,28 @@ function hasErrorCode<C extends string>(error: unknown, code: C): error is Coded
   return hasOwn(error, "code") && error.code === code;
 }
 
-/** Type guard — works for `StoreNotFoundError` and ORM-specific equivalents (e.g. Prisma P2025). */
-export function isStoreNotFound(error: unknown): error is StoreNotFoundError | CodedError<"P2025"> {
+/**
+ * Type guard — works for `StoreNotFoundError` and ORM-specific equivalents
+ * (e.g. Prisma P2025). Matches on the stable `code` too, for the same
+ * cross-bundle reason as {@link isStorePersistence}.
+ */
+export function isStoreNotFound(error: unknown): error is StoreNotFoundError | CodedError<"STORE_NOT_FOUND" | "P2025"> {
   if (error instanceof StoreNotFoundError) return true;
-  // Backwards compat: Prisma's P2025
-  return hasErrorCode(error, "P2025");
+  // Another bundle's copy of core, or Prisma's P2025 (backwards compat)
+  return hasErrorCode(error, "STORE_NOT_FOUND") || hasErrorCode(error, "P2025");
 }
 
-/** Type guard — works for `StoreDuplicateError` and ORM-specific equivalents (e.g. Prisma P2002). */
-export function isStoreDuplicate(error: unknown): error is StoreDuplicateError | CodedError<"P2002"> {
+/**
+ * Type guard — works for `StoreDuplicateError` and ORM-specific equivalents
+ * (e.g. Prisma P2002). Matches on the stable `code` too, for the same
+ * cross-bundle reason as {@link isStorePersistence}.
+ */
+export function isStoreDuplicate(
+  error: unknown,
+): error is StoreDuplicateError | CodedError<"STORE_DUPLICATE" | "P2002"> {
   if (error instanceof StoreDuplicateError) return true;
-  // Backwards compat: Prisma's P2002
-  return hasErrorCode(error, "P2002");
+  // Another bundle's copy of core, or Prisma's P2002 (backwards compat)
+  return hasErrorCode(error, "STORE_DUPLICATE") || hasErrorCode(error, "P2002");
 }
 
 /**

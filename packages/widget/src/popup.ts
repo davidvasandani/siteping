@@ -68,6 +68,8 @@ export class Popup {
   private submittingState = false;
   /** WAAPI handle for the running spinner — cancelled when submitting ends. */
   private spinnerAnimation: Animation | null = null;
+  /** Pending `display:none` after the hide transition — cleared by `show()`. */
+  private hideTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
    * True from `show()` until its promise settles — through typing, the
@@ -78,6 +80,11 @@ export class Popup {
    */
   get isOpen(): boolean {
     return this.resolve !== null;
+  }
+
+  /** True while `onSubmit` is pending — the popup holds the session until it settles. */
+  get isSubmitting(): boolean {
+    return this.submittingState;
   }
 
   constructor(
@@ -212,9 +219,6 @@ export class Popup {
         e.preventDefault();
         this.submit();
       }
-      if (e.key === "Escape") {
-        this.cancel();
-      }
     });
 
     // Button row
@@ -325,6 +329,9 @@ export class Popup {
    */
   show(rectBounds: DOMRect, onSubmit?: PopupSubmitHandler): Promise<PopupResult | null> {
     return new Promise((resolve) => {
+      // A re-show within the previous hide transition must not be hidden by it.
+      if (this.hideTimer) clearTimeout(this.hideTimer);
+      this.hideTimer = null;
       this.resolve = resolve;
       this.onSubmit = onSubmit ?? null;
       this.selectedType = null;
@@ -357,15 +364,19 @@ export class Popup {
       if (left + popupW > window.innerWidth) {
         left = rectBounds.right - popupW;
       }
-      left = Math.max(8, left);
+      // The flip alone overflows when the rect itself extends past the right
+      // edge (keyboard path: a focused element wider than the viewport).
+      left = Math.max(8, Math.min(left, window.innerWidth - popupW - 8));
       top = Math.max(8, top);
 
       this.root.style.top = `${top}px`;
       this.root.style.left = `${left}px`;
       this.root.style.display = "block";
 
-      // Install focus trap
+      // Install focus trap. Escape cancels from any control, not just the
+      // textarea — it then bubbles on so the annotator can end the session.
       this.onKeydownTrap = (e: KeyboardEvent) => {
+        if (e.key === "Escape") this.cancel();
         if (e.key === "Tab") {
           const focusableEls = Array.from(
             this.root.querySelectorAll<HTMLElement>(
@@ -472,7 +483,8 @@ export class Popup {
       });
   }
 
-  private cancel(): void {
+  /** Close as cancelled (`show()` resolves null). No-op while submitting. */
+  cancel(): void {
     if (this.submittingState) return;
     this.resolve?.(null);
     this.resolve = null;
@@ -595,7 +607,8 @@ export class Popup {
     // Restore focus to the previously focused element
     this.previouslyFocused?.focus();
     this.previouslyFocused = null;
-    setTimeout(() => {
+    this.hideTimer = setTimeout(() => {
+      this.hideTimer = null;
       this.root.style.display = "none";
     }, 250);
   }
@@ -613,6 +626,7 @@ export class Popup {
       this.root.removeEventListener("keydown", this.onKeydownTrap);
       this.onKeydownTrap = null;
     }
+    if (this.hideTimer) clearTimeout(this.hideTimer);
     this.root.remove();
   }
 }

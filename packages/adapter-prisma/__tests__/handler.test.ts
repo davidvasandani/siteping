@@ -1,3 +1,4 @@
+import { buildFeedbackRecord, type SitepingStore } from "@siteping/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createSitepingHandler } from "../src/index.js";
 import { validAnnotation, validPayloadNoAnnotations } from "./fixtures.js";
@@ -104,6 +105,30 @@ describe("createSitepingHandler", () => {
       });
       const res = await handler.POST(req);
       expect(res.status).toBe(201);
+    });
+
+    it("answers a CORS-enabled JSON 500 when the duplicate-race lookup itself fails", async () => {
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const origin = "https://app.example.com";
+      const corsHandler = createSitepingHandler({ prisma, allowedOrigins: [origin] });
+      // Replay check sees nothing, the insert collides, then the re-lookup fails.
+      prisma.sitepingFeedback.findUnique
+        .mockResolvedValueOnce(null)
+        .mockRejectedValueOnce(new Error("connection reset"));
+      prisma.sitepingFeedback.create.mockRejectedValue({ code: "P2002" });
+
+      const res = await corsHandler.POST(
+        new Request("http://localhost/api/siteping", {
+          method: "POST",
+          headers: { Origin: origin },
+          body: JSON.stringify(validPayloadNoAnnotations),
+        }),
+      );
+
+      expect(res.status).toBe(500);
+      expect(await res.json()).toEqual({ error: "Internal server error" });
+      expect(res.headers.get("Access-Control-Allow-Origin")).toBe(origin);
+      consoleSpy.mockRestore();
     });
 
     it("does not insert again when the clientId was already stored (replay)", async () => {
@@ -712,5 +737,81 @@ describe("createSitepingHandler", () => {
       expect(body.authorEmail).toBe("");
       expect("clientId" in body).toBe(false);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Store errors from another bundle's copy of core — every published package
+// bundles its own core, so e.g. an adapter-kit-built store throws error
+// classes this handler's `instanceof` checks don't know.
+// ---------------------------------------------------------------------------
+
+describe("createSitepingHandler — store errors thrown by another copy of core", () => {
+  /** Same `code` as core's store errors, different class identity. */
+  class ForeignStoreError extends Error {
+    constructor(readonly code: "STORE_NOT_FOUND" | "STORE_DUPLICATE") {
+      super(code);
+    }
+  }
+
+  /** A third-party store without the optional `verifyProjectOwnership`. */
+  function foreignStore(overrides: Partial<SitepingStore>): SitepingStore {
+    return {
+      createFeedback: vi.fn(),
+      getFeedbacks: vi.fn(),
+      findByClientId: vi.fn().mockResolvedValue(null),
+      updateFeedback: vi.fn(),
+      deleteFeedback: vi.fn(),
+      deleteAllFeedbacks: vi.fn(),
+      ...overrides,
+    };
+  }
+
+  it("PATCH of an unknown id returns 404", async () => {
+    const store = foreignStore({ updateFeedback: vi.fn().mockRejectedValue(new ForeignStoreError("STORE_NOT_FOUND")) });
+    const handler = createSitepingHandler({ store, requireAuthForDestructive: false });
+
+    const res = await handler.PATCH(
+      new Request("http://localhost/api/siteping", {
+        method: "PATCH",
+        body: JSON.stringify({ id: "missing", projectName: "test-project", status: "resolved" }),
+      }),
+    );
+
+    expect(res.status).toBe(404);
+  });
+
+  it("DELETE of an unknown id returns 404", async () => {
+    const store = foreignStore({ deleteFeedback: vi.fn().mockRejectedValue(new ForeignStoreError("STORE_NOT_FOUND")) });
+    const handler = createSitepingHandler({ store, requireAuthForDestructive: false });
+
+    const res = await handler.DELETE(
+      new Request("http://localhost/api/siteping", {
+        method: "DELETE",
+        body: JSON.stringify({ id: "missing", projectName: "test-project" }),
+      }),
+    );
+
+    expect(res.status).toBe(404);
+  });
+
+  it("POST that loses the clientId race returns the existing record", async () => {
+    const existing = buildFeedbackRecord(
+      { ...validPayloadNoAnnotations, status: "open", annotations: [] },
+      { id: "fb-existing", annotationId: () => "ann" },
+    );
+    const store = foreignStore({
+      // Not there at the replay check, inserted by the racing request right after.
+      findByClientId: vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce(existing),
+      createFeedback: vi.fn().mockRejectedValue(new ForeignStoreError("STORE_DUPLICATE")),
+    });
+    const handler = createSitepingHandler({ store });
+
+    const res = await handler.POST(
+      new Request("http://localhost/api/siteping", { method: "POST", body: JSON.stringify(validPayloadNoAnnotations) }),
+    );
+
+    expect(res.status).toBe(201);
+    expect((await res.json()).id).toBe("fb-existing");
   });
 });

@@ -11,6 +11,7 @@ import {
   SitepingError,
   type SitepingHeadersOption,
   SitepingNetworkError,
+  withSearchParams,
 } from "@siteping/core";
 import type { Identity } from "./identity.js";
 
@@ -47,8 +48,8 @@ export interface ApiClientAuth {
 /**
  * Build the headers for one request — mirrors the dashboard's
  * `createEndpointSource` semantics: `Content-Type` when the request carries a
- * JSON body, then `Bearer` from `apiKey`, then `headers` merged on top so an
- * explicit `Authorization` wins.
+ * JSON body, then `Bearer` from `apiKey`, then `headers` merged on top
+ * (case-insensitively) so an explicit `Authorization` wins.
  *
  * A function `headers` resolves once per call — retries inside
  * `resilientFetch` reuse the values for the whole retry sequence — up to
@@ -61,7 +62,16 @@ export async function buildRequestHeaders(auth: ApiClientAuth, json: boolean): P
   if (json) merged["Content-Type"] = "application/json";
   if (auth.apiKey) merged.Authorization = `Bearer ${auth.apiKey}`;
   const extra = typeof auth.headers === "function" ? await auth.headers() : auth.headers;
-  if (extra) Object.assign(merged, extra);
+  for (const [name, value] of Object.entries(extra ?? {})) {
+    // Header names are case-insensitive: drop a default spelled differently
+    // so the explicit value replaces it — a plain merge sent both, and fetch
+    // combined them ("Bearer k, Basic xyz").
+    const lower = name.toLowerCase();
+    for (const key of Object.keys(merged)) {
+      if (key.toLowerCase() === lower) delete merged[key];
+    }
+    merged[name] = value;
+  }
   return merged;
 }
 
@@ -148,15 +158,18 @@ async function withRetryLock<T>(callback: () => T | Promise<T>): Promise<T> {
 /**
  * Shape-check one queue element — localStorage can hold tampered or legacy
  * entries, and a malformed one used to abort the whole flush via the outer
- * catch. Bad entries are dropped individually instead.
+ * catch. Bad entries are dropped individually instead. The author fields are
+ * checked because the flush itself reads them (identity match); anything
+ * else wrong with a payload is the server's verdict (4xx → dropped).
  */
 function isRetryEntry(value: unknown): value is RetryEntry {
+  if (!hasOwn(value, "endpoint") || typeof value.endpoint !== "string" || !hasOwn(value, "payload")) return false;
+  const { payload } = value;
   return (
-    hasOwn(value, "endpoint") &&
-    typeof value.endpoint === "string" &&
-    hasOwn(value, "payload") &&
-    typeof value.payload === "object" &&
-    value.payload !== null
+    hasOwn(payload, "authorName") &&
+    typeof payload.authorName === "string" &&
+    hasOwn(payload, "authorEmail") &&
+    typeof payload.authorEmail === "string"
   );
 }
 
@@ -171,7 +184,10 @@ function queueForRetry(endpoint: string, payload: FeedbackPayload): void {
   // Fire-and-forget — we don't want to block the caller on the lock
   void withRetryLock(() => {
     try {
-      const queue = readQueue();
+      // A resend from the same popup session reuses its clientId: replace
+      // the earlier attempt so the replay carries the latest edit (the
+      // server's clientId dedupe would otherwise keep the stale first one).
+      const queue = readQueue().filter((entry) => entry.payload.clientId !== payload.clientId);
 
       // Cap queue size to prevent unbounded localStorage growth
       if (queue.length >= MAX_QUEUE_SIZE) {
@@ -337,7 +353,7 @@ export class ApiClient implements WidgetClient {
       // GET carries no body — only attach headers when auth produced some, so
       // the no-auth wire shape stays byte-identical to the legacy client.
       const headers = await buildRequestHeaders(this.auth, false);
-      response = await resilientFetch(`${this.endpoint}?${params.toString()}`, {
+      response = await resilientFetch(withSearchParams(this.endpoint, params), {
         method: "GET",
         cache: "no-store",
         ...(Object.keys(headers).length > 0 ? { headers } : {}),

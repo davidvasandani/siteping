@@ -264,6 +264,10 @@ export class Annotator {
 
   private deactivate(): void {
     if (!this.isActive) return;
+    // Never tear the session down around an open popup: it could still submit
+    // (annotation:complete after annotation:end) and a later right-click would
+    // re-enter show(), orphaning this one's promise.
+    this.popup.cancel();
     this.isActive = false;
     this.isDrawing = false;
     this.instantMode = false;
@@ -300,7 +304,8 @@ export class Annotator {
   }
 
   private onKeyDown = (e: KeyboardEvent): void => {
-    if (e.key === "Escape") this.deactivate();
+    // Mid-submission the popup holds the user until the server answers.
+    if (e.key === "Escape" && !this.popup.isSubmitting) this.deactivate();
   };
 
   /**

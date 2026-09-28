@@ -74,6 +74,7 @@ export {
   FEEDBACK_STATUSES,
   FEEDBACK_TYPES,
   flattenAnnotation,
+  IDENTITY_FIELD_MAX_LENGTH,
   isClosedStatus,
   isStoreDuplicate,
   isStoreNotFound,
@@ -84,4 +85,4 @@ export {
   StorePersistenceError,
   toFeedbackUpdate,
 } from "./types.js";
-export { errorFromResponse, feedbackQueryToSearchParams, networkErrorFromException } from "./wire.js";
+export { errorFromResponse, feedbackQueryToSearchParams, networkErrorFromException, withSearchParams } from "./wire.js";

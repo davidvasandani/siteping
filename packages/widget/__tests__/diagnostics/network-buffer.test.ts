@@ -68,6 +68,53 @@ describe("NetworkBuffer — fetch", () => {
     buffer.dispose();
   });
 
+  it("never holds more than the server's 20-entry cap, whatever size is configured", async () => {
+    fetchSpy.mockResolvedValue(new Response("", { status: 500 }));
+    const buffer = new NetworkBuffer(100);
+    for (let i = 0; i < 30; i++) {
+      await fetch(`/api/err-${i}`);
+    }
+    const entries = buffer.getEntries();
+    expect(entries).toHaveLength(20);
+    expect(entries[19]?.url).toBe("/api/err-29");
+    buffer.dispose();
+  });
+
+  it("falls back to the default size for a NaN size", async () => {
+    fetchSpy.mockResolvedValue(new Response("", { status: 500 }));
+    const buffer = new NetworkBuffer(Number.NaN);
+    for (let i = 0; i < 30; i++) {
+      await fetch(`/api/err-${i}`);
+    }
+    expect(buffer.getEntries()).toHaveLength(20);
+    buffer.dispose();
+  });
+
+  it("clamps each entry to the server schema (durationMs, method, status)", async () => {
+    // A request open > 10 min, an exotic long method, and a non-standard
+    // status (LinkedIn's 999) would each fail adapter-prisma's validation.
+    const nowSpy = vi.spyOn(performance, "now").mockReturnValueOnce(0).mockReturnValueOnce(700_000);
+    fetchSpy.mockResolvedValue({ ok: false, status: 999 } as Response);
+    const buffer = new NetworkBuffer();
+    await fetch("/api/slow", { method: "X".repeat(30) });
+    nowSpy.mockRestore();
+    const entry = buffer.getEntries()[0];
+    expect(entry?.durationMs).toBe(600_000);
+    expect(entry?.method.length).toBeLessThanOrEqual(20);
+    expect(entry?.status).toBeLessThanOrEqual(599);
+    buffer.dispose();
+  });
+
+  it("records fetch URLs without their query string or hash (tokens never leave the browser)", async () => {
+    fetchSpy.mockResolvedValue(new Response("", { status: 401 }));
+    const buffer = new NetworkBuffer();
+    await fetch("/api/items?api_key=SECRET&token=abc#access_token=xyz");
+    await fetch(new Request("https://example.com/api/me?session=s3cr3t"));
+    const urls = buffer.getEntries().map((e) => e.url);
+    expect(urls).toEqual(["/api/items", "https://example.com/api/me"]);
+    buffer.dispose();
+  });
+
   it("dispose restores the original fetch", () => {
     const buffer = new NetworkBuffer();
     expect(globalThis.fetch).not.toBe(fetchSpy);
@@ -110,6 +157,17 @@ describe("NetworkBuffer — XHR", () => {
     const entries = buffer.getEntries();
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({ method: "GET", url: "/xhr-bad", status: 502 });
+    buffer.dispose();
+  });
+
+  it("records XHR URLs without their query string or hash", () => {
+    const buffer = new NetworkBuffer();
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", "/xhr-bad?api_key=SECRET#frag");
+    xhr.send();
+    Object.defineProperty(xhr, "status", { value: 500, configurable: true });
+    xhr.dispatchEvent(new Event("loadend"));
+    expect(buffer.getEntries()[0]?.url).toBe("/xhr-bad");
     buffer.dispose();
   });
 

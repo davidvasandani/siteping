@@ -386,6 +386,22 @@ describe("Panel", () => {
       });
     });
 
+    it("page markers (and the FAB badge they drive) ignore the panel's status tab", async () => {
+      const open = makeFeedback({ id: "fb-open", status: "open", url: "/" });
+      const done = makeFeedback({ id: "fb-done", status: "resolved", url: "/" });
+      apiClient.getFeedbacks.mockImplementation(async (_project: string, opts?: { statuses?: unknown }) =>
+        opts?.statuses ? { feedbacks: [done], total: 1 } : { feedbacks: [open, done], total: 2 },
+      );
+      await panel.open();
+
+      shadow.querySelector<HTMLButtonElement>('[data-status-filter="resolved"]')!.click();
+      await vi.waitFor(() => expect(shadow.querySelector('[data-feedback-id="fb-open"]')).toBeNull());
+
+      // The open marker must survive — otherwise the badge drops to 0 and
+      // stays there after the panel closes.
+      await vi.waitFor(() => expect(markers.render.mock.calls.at(-1)?.[0]).toEqual([open, done]));
+    });
+
     it("keeps a wont_fix feedback visible under the Resolved tab", async () => {
       apiClient.getFeedbacks.mockResolvedValue({
         feedbacks: [makeFeedback({ id: "fb-wf", status: "wont_fix" })],
@@ -773,6 +789,24 @@ describe("Panel", () => {
       expect(detail!.getAttribute("aria-hidden")).toBe("false");
     });
 
+    it("detail title uses the card's displayed number (sort order), for click and Enter", async () => {
+      // Server order: older first; the default "newest" sort displays it second.
+      const older = makeFeedback({ id: "fb-old", createdAt: "2026-01-01T00:00:00.000Z" });
+      const newer = makeFeedback({ id: "fb-new", createdAt: "2026-02-01T00:00:00.000Z" });
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [older, newer], total: 2 });
+
+      await panel.open();
+
+      const card = shadow.querySelector<HTMLElement>('[data-feedback-id="fb-old"]')!;
+      expect(card.querySelector(".sp-card-number")!.textContent).toBe("#2");
+
+      card.click();
+      expect(shadow.querySelector(".sp-detail-title")!.textContent).toBe(t("detail.title").replace("{number}", "2"));
+
+      card.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      expect(shadow.querySelector(".sp-detail-title")!.textContent).toBe(t("detail.title").replace("{number}", "2"));
+    });
+
     it("clicking a card shows the correct feedback in detail view", async () => {
       const fb = makeFeedback({ id: "fb-1", message: "Test bug report", annotations: [annotation] });
       apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [fb], total: 1 });
@@ -1112,6 +1146,55 @@ describe("Panel", () => {
 
       expect(preventSpy).toHaveBeenCalled();
     });
+
+    describe("Escape closes only the innermost layer", () => {
+      const escapeOn = (target: EventTarget) =>
+        target.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, composed: true }));
+      const panelIsOpen = () => shadow.querySelector<HTMLElement>(".sp-panel")!.classList.contains("sp-panel--open");
+
+      beforeEach(async () => {
+        apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [makeFeedback({ id: "fb-1" })], total: 1 });
+        await panel.open();
+      });
+
+      it("shortcuts help overlay", () => {
+        shadow.dispatchEvent(new KeyboardEvent("keydown", { key: "?", bubbles: true }));
+        const overlay = shadow.querySelector<HTMLElement>(".sp-shortcuts-overlay")!;
+        expect(overlay.classList.contains("sp-shortcuts-overlay--visible")).toBe(true);
+
+        escapeOn(overlay.querySelector(".sp-shortcuts-close")!);
+
+        expect(overlay.classList.contains("sp-shortcuts-overlay--visible")).toBe(false);
+        expect(panelIsOpen()).toBe(true);
+      });
+
+      it("type dropdown", () => {
+        shadow.querySelector<HTMLButtonElement>(".sp-filter-dropdown-btn")!.click();
+        escapeOn(shadow.querySelector(".sp-filter-dropdown-option")!);
+
+        expect(shadow.querySelector(".sp-filter-dropdown-menu")).toBeNull();
+        expect(panelIsOpen()).toBe(true);
+      });
+
+      it("sort menu", () => {
+        shadow.querySelector<HTMLButtonElement>(".sp-sort-btn")!.click();
+        escapeOn(shadow.querySelector(".sp-sort-option")!);
+
+        expect(shadow.querySelector(".sp-sort-menu")).toBeNull();
+        expect(panelIsOpen()).toBe(true);
+      });
+
+      it("delete-all confirm dialog", async () => {
+        shadow.querySelector<HTMLButtonElement>(".sp-btn-delete-all")!.click();
+        await vi.waitFor(() => expect(shadow.querySelector(".sp-confirm-backdrop")).not.toBeNull());
+
+        escapeOn(shadow.querySelector(".sp-confirm-dialog .sp-btn-ghost")!);
+
+        expect(panelIsOpen()).toBe(true);
+        await new Promise((r) => setTimeout(r, 250));
+        expect(apiClient.deleteAllFeedbacks).not.toHaveBeenCalled();
+      });
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -1386,8 +1469,24 @@ describe("Panel", () => {
       });
     });
 
+    it("hides 'Go to annotation' for a feedback from another page (scope: all pages)", async () => {
+      const elsewhere = makeFeedback({ id: "elsewhere", url: "/pricing", annotations: [annotation] });
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [elsewhere], total: 1 });
+      const scrollSpy = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+
+      await panel.open();
+      shadow.querySelector<HTMLButtonElement>('[data-scope-filter="all"]')!.click();
+      await vi.waitFor(() => expect(shadow.querySelector('[data-feedback-id="elsewhere"]')).not.toBeNull());
+      shadow.querySelector<HTMLElement>('[data-feedback-id="elsewhere"]')!.click();
+
+      // Its stored scroll offset and anchor belong to /pricing, not this page.
+      expect(shadow.querySelector(".sp-detail-btn-goto")).toBeNull();
+      scrollSpy.mockRestore();
+    });
+
     it("detail onGoToAnnotation scrolls and pins the highlight", async () => {
-      const fb = makeFeedback({ id: "fb-1", annotations: [annotation] });
+      // url = the current page scope (pathname) — as the launcher stores it
+      const fb = makeFeedback({ id: "fb-1", url: "/", annotations: [annotation] });
       apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [fb], total: 1 });
 
       const scrollSpy = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
@@ -1539,6 +1638,59 @@ describe("Panel", () => {
       });
     });
 
+    it("D deletes the card that has DOM focus, not the last J/K target", async () => {
+      const fbs = ["fb-a", "fb-b", "fb-c"].map((id) => makeFeedback({ id }));
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: fbs, total: 3 });
+      apiClient.deleteFeedback.mockResolvedValue(undefined);
+
+      await panel.open();
+      stubScrollOnCards(shadow);
+
+      shadow.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true })); // highlights fb-a
+      const cardC = shadow.querySelector<HTMLElement>('[data-feedback-id="fb-c"]')!;
+      cardC.focus(); // Tab / click moves real focus elsewhere
+      cardC.dispatchEvent(new KeyboardEvent("keydown", { key: "d", bubbles: true, composed: true }));
+
+      await vi.waitFor(() => expect(apiClient.deleteFeedback).toHaveBeenCalled());
+      expect(apiClient.deleteFeedback).toHaveBeenCalledWith("fb-c");
+      expect(apiClient.deleteFeedback).not.toHaveBeenCalledWith("fb-a");
+    });
+
+    it("single-key shortcuts are ignored inside the delete-all confirm dialog", async () => {
+      const fb = makeFeedback({ id: "fb-a" });
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [fb], total: 1 });
+      apiClient.deleteFeedback.mockResolvedValue(undefined);
+
+      await panel.open();
+      stubScrollOnCards(shadow);
+      shadow.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true }));
+
+      shadow.querySelector<HTMLButtonElement>(".sp-btn-delete-all")!.click();
+      await vi.waitFor(() => expect(shadow.querySelector(".sp-confirm-backdrop")).not.toBeNull());
+      const cancelBtn = shadow.querySelector<HTMLButtonElement>(".sp-confirm-dialog .sp-btn-ghost")!;
+      cancelBtn.dispatchEvent(new KeyboardEvent("keydown", { key: "d", bubbles: true, composed: true }));
+
+      await new Promise((r) => setTimeout(r, 20));
+      expect(apiClient.deleteFeedback).not.toHaveBeenCalled();
+    });
+
+    it("single-key shortcuts are ignored while the detail view covers the list", async () => {
+      const fbs = ["fb-a", "fb-b"].map((id) => makeFeedback({ id }));
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: fbs, total: 2 });
+      apiClient.deleteFeedback.mockResolvedValue(undefined);
+
+      await panel.open();
+      stubScrollOnCards(shadow);
+      shadow.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true })); // highlights fb-a
+      shadow.querySelector<HTMLElement>('[data-feedback-id="fb-b"]')!.click(); // detail for fb-b
+
+      const backBtn = shadow.querySelector<HTMLButtonElement>(".sp-detail-back")!;
+      backBtn.dispatchEvent(new KeyboardEvent("keydown", { key: "d", bubbles: true, composed: true }));
+
+      await new Promise((r) => setTimeout(r, 20));
+      expect(apiClient.deleteFeedback).not.toHaveBeenCalled();
+    });
+
     it("F key focuses search input", async () => {
       await panel.open();
 
@@ -1596,6 +1748,41 @@ describe("Panel", () => {
       });
     });
 
+    it("selection stays visible on cards after a re-render (group toggle / sort / load more)", async () => {
+      const fb1 = makeFeedback({ id: "fb-1" });
+      const fb2 = makeFeedback({ id: "fb-2" });
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [fb1, fb2], total: 2 });
+
+      await panel.open();
+      shadow.querySelector<HTMLElement>('[data-feedback-id="fb-1"] .sp-bulk-checkbox')!.click();
+
+      // Re-render the list without reloading (selection set is kept)
+      shadow.querySelector<HTMLButtonElement>(".sp-group-toggle")!.click();
+
+      const card = shadow.querySelector<HTMLElement>('[data-feedback-id="fb-1"]')!;
+      const checkbox = card.querySelector<HTMLElement>(".sp-bulk-checkbox")!;
+      expect(checkbox.getAttribute("aria-checked")).toBe("true");
+      expect(checkbox.classList.contains("sp-bulk-checkbox--checked")).toBe(true);
+      expect(card.classList.contains("sp-card--selected")).toBe(true);
+      const other = shadow.querySelector<HTMLElement>('[data-feedback-id="fb-2"]')!;
+      expect(other.classList.contains("sp-card--selected")).toBe(false);
+    });
+
+    it("bulkResolve skips already-closed feedbacks (keeps wont_fix and resolvedAt)", async () => {
+      const open = makeFeedback({ id: "fb-open", status: "open" });
+      const wontFix = makeFeedback({ id: "fb-wontfix", status: "wont_fix", resolvedAt: new Date().toISOString() });
+      const resolved = makeFeedback({ id: "fb-resolved", status: "resolved", resolvedAt: new Date().toISOString() });
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [open, wontFix, resolved], total: 3 });
+      apiClient.resolveFeedback.mockResolvedValue(undefined);
+
+      await panel.open();
+      shadow.querySelector<HTMLElement>(".sp-bulk-select-all .sp-bulk-checkbox")!.click();
+      shadow.querySelector<HTMLButtonElement>(".sp-bulk-btn-resolve")!.click();
+
+      await vi.waitFor(() => expect(apiClient.resolveFeedback).toHaveBeenCalledWith("fb-open", true));
+      expect(apiClient.resolveFeedback).toHaveBeenCalledTimes(1);
+    });
+
     it("bulkResolve emits feedback:error on failure", async () => {
       const fb = makeFeedback({ id: "fb-1" });
       apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [fb], total: 1 });
@@ -1643,6 +1830,51 @@ describe("Panel", () => {
         expect(deletedListener).toHaveBeenCalledWith("fb-1");
         expect(deletedListener).toHaveBeenCalledWith("fb-2");
       });
+    });
+
+    it("bulkDelete partial failure still reports the deleted items and reloads", async () => {
+      const fb1 = makeFeedback({ id: "fb-1" });
+      const fb2 = makeFeedback({ id: "fb-2" });
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [fb1, fb2], total: 2 });
+      apiClient.deleteFeedback.mockImplementation((id: string) =>
+        id === "fb-2" ? Promise.reject(new Error("fb-2 failed")) : Promise.resolve(undefined),
+      );
+      const deletedListener = vi.fn();
+      const errorListener = vi.fn();
+      bus.on("feedback:deleted", deletedListener);
+      bus.on("feedback:error", errorListener);
+
+      await panel.open();
+      shadow.querySelector<HTMLElement>(".sp-bulk-select-all .sp-bulk-checkbox")!.click();
+      apiClient.getFeedbacks.mockClear();
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [fb2], total: 1 });
+
+      shadow.querySelector<HTMLButtonElement>(".sp-bulk-btn-delete")!.click();
+
+      await vi.waitFor(() => expect(errorListener).toHaveBeenCalledWith(expect.any(Error)));
+      expect(deletedListener).toHaveBeenCalledWith("fb-1");
+      expect(deletedListener).not.toHaveBeenCalledWith("fb-2");
+      expect(apiClient.getFeedbacks).toHaveBeenCalled();
+    });
+
+    it("bulkResolve partial failure still reloads the list", async () => {
+      const fb1 = makeFeedback({ id: "fb-1" });
+      const fb2 = makeFeedback({ id: "fb-2" });
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [fb1, fb2], total: 2 });
+      apiClient.resolveFeedback.mockImplementation((id: string) =>
+        id === "fb-2" ? Promise.reject(new Error("fb-2 failed")) : Promise.resolve(undefined),
+      );
+      const errorListener = vi.fn();
+      bus.on("feedback:error", errorListener);
+
+      await panel.open();
+      shadow.querySelector<HTMLElement>(".sp-bulk-select-all .sp-bulk-checkbox")!.click();
+      apiClient.getFeedbacks.mockClear();
+
+      shadow.querySelector<HTMLButtonElement>(".sp-bulk-btn-resolve")!.click();
+
+      await vi.waitFor(() => expect(errorListener).toHaveBeenCalledWith(expect.any(Error)));
+      expect(apiClient.getFeedbacks).toHaveBeenCalled();
     });
 
     it("bulkDelete emits feedback:error on failure", async () => {
@@ -2033,6 +2265,47 @@ describe("Panel", () => {
       vi.restoreAllMocks();
     });
 
+    it("clicking the trigger again closes the menu once the outside-click handler is armed", async () => {
+      vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb: FrameRequestCallback) => {
+        cb(0);
+        return 0;
+      });
+      await panel.open();
+
+      const typeBtn = shadow.querySelector<HTMLButtonElement>(".sp-filter-dropdown-btn")!;
+      typeBtn.click();
+      expect(shadow.querySelector(".sp-filter-dropdown-menu")).not.toBeNull();
+
+      // At document level the click target is retargeted to the shadow host.
+      typeBtn.click();
+      expect(shadow.querySelector(".sp-filter-dropdown-menu")).toBeNull();
+      expect(typeBtn.getAttribute("aria-expanded")).toBe("false");
+
+      vi.restoreAllMocks();
+    });
+
+    it("destroying the panel before the next frame leaves no document click listener behind", async () => {
+      await panel.open();
+      // Manual frame queue honouring cancelAnimationFrame
+      const frames = new Map<number, FrameRequestCallback>();
+      let nextFrame = 0;
+      vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb: FrameRequestCallback) => {
+        frames.set(++nextFrame, cb);
+        return nextFrame;
+      });
+      vi.spyOn(window, "cancelAnimationFrame").mockImplementation((id: number) => void frames.delete(id));
+      const addSpy = vi.spyOn(document, "addEventListener");
+      try {
+        shadow.querySelector<HTMLButtonElement>(".sp-filter-dropdown-btn")!.click();
+        panel.destroy();
+        for (const cb of frames.values()) cb(0);
+
+        expect(addSpy.mock.calls.filter(([type]) => type === "click")).toEqual([]);
+      } finally {
+        vi.restoreAllMocks();
+      }
+    });
+
     it("clicking the trigger again while menu is open closes it", async () => {
       await panel.open();
 
@@ -2064,6 +2337,26 @@ describe("Panel", () => {
 
       expect(card.scrollIntoView).toHaveBeenCalled();
       expect(card.classList.contains("sp-anim-flash")).toBe(true);
+    });
+
+    it("a marker click that opens the panel flashes its card once the list has rendered", async () => {
+      const fb = makeFeedback({ id: "fb-marker" });
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [fb], total: 1 });
+      const scrollSpy = vi.fn();
+      const original = Element.prototype.scrollIntoView;
+      Element.prototype.scrollIntoView = scrollSpy; // jsdom lacks it
+      try {
+        // markers.ts: emit panel:toggle, then synchronously dispatch the click
+        bus.emit("panel:toggle", true);
+        document.dispatchEvent(new CustomEvent("sp-marker-click", { detail: { feedbackId: "fb-marker" } }));
+
+        await vi.waitFor(() => expect(shadow.querySelector('[data-feedback-id="fb-marker"]')).not.toBeNull());
+        const card = shadow.querySelector<HTMLElement>('[data-feedback-id="fb-marker"]')!;
+        expect(card.classList.contains("sp-anim-flash")).toBe(true);
+        expect(scrollSpy.mock.contexts).toContain(card);
+      } finally {
+        Element.prototype.scrollIntoView = original;
+      }
     });
   });
 
@@ -3489,9 +3782,10 @@ describe("Panel", () => {
       await vi.waitFor(() => {
         expect(apiClient.getFeedbacks).toHaveBeenCalled();
       });
-      const lastCall = apiClient.getFeedbacks.mock.calls[apiClient.getFeedbacks.mock.calls.length - 1];
-      expect(lastCall?.[1]).not.toHaveProperty("url");
-      expect(lastCall?.[1]).not.toHaveProperty("urlPattern");
+      // First call = the list query (the page-marker query may follow it)
+      const listCall = apiClient.getFeedbacks.mock.calls[0];
+      expect(listCall?.[1]).not.toHaveProperty("url");
+      expect(listCall?.[1]).not.toHaveProperty("urlPattern");
     });
 
     it("respects custom getScope option for url and urlPattern", async () => {
@@ -3527,8 +3821,9 @@ describe("Panel", () => {
       await vi.waitFor(() => {
         expect(apiClient.getFeedbacks).toHaveBeenCalled();
       });
-      const lastCall = apiClient.getFeedbacks.mock.calls[apiClient.getFeedbacks.mock.calls.length - 1];
-      expect(lastCall?.[1]).toMatchObject({ urlPattern: "/orders/:id" });
+      // First call = the list query (the page-marker query may follow it)
+      const listCall = apiClient.getFeedbacks.mock.calls[0];
+      expect(listCall?.[1]).toMatchObject({ urlPattern: "/orders/:id" });
     });
 
     it("filters markers to current url even when panel shows wider scope", async () => {

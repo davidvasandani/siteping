@@ -78,6 +78,38 @@ describe("generateXPath", () => {
     expect(segments.length).toBeLessThanOrEqual(6);
   });
 
+  it("emits a relative path when truncated, so it still matches the deep element", () => {
+    // body > div > div > div > div > div > div > div > div > span: 9 levels,
+    // no ids — "/html/body" + the 6 innermost segments would match nothing.
+    let current: Element = document.body;
+    for (let i = 0; i < 8; i++) {
+      const div = document.createElement("div");
+      current.appendChild(div);
+      current = div;
+    }
+    const leaf = document.createElement("span");
+    current.appendChild(leaf);
+
+    const xpath = generateXPath(leaf);
+    expect(xpath.startsWith("//")).toBe(true);
+    const result = document.evaluate(xpath, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+    const matches = Array.from({ length: result.snapshotLength }, (_, i) => result.snapshotItem(i));
+    expect(matches).toContain(leaf);
+  });
+
+  it("keeps the absolute path when the 6-segment walk ends exactly at <body>", () => {
+    let current: Element = document.body;
+    for (let i = 0; i < 5; i++) {
+      const div = document.createElement("div");
+      current.appendChild(div);
+      current = div;
+    }
+    const leaf = document.createElement("span");
+    current.appendChild(leaf);
+
+    expect(generateXPath(leaf)).toBe("/html/body/div[1]/div[1]/div[1]/div[1]/div[1]/span[1]");
+  });
+
   it("returns short path for element directly inside body", () => {
     const p = document.createElement("p");
     document.body.appendChild(p);

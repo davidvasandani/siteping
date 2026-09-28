@@ -58,6 +58,8 @@ export class Panel {
   private typeDropdownContainer!: HTMLElement;
   private typeDropdownMenu: HTMLElement | null = null;
   private typeDropdownOutsideHandler: ((e: MouseEvent) => void) | null = null;
+  /** Pending frame that arms the outside-click handler — cancelled on close/destroy. */
+  private typeDropdownRaf: number | null = null;
   private statusSegmented!: SegmentedControl<"all" | FeedbackStatus>;
   private typeOptions!: ReadonlyArray<{ value: string; label: string; icon: string; color: string; bg: string }>;
   private feedbacks: FeedbackResponse[] = [];
@@ -69,6 +71,8 @@ export class Panel {
   private loadController: AbortController | null = null;
   /** Tracks feedback IDs with in-flight mutations to prevent spam-click race conditions */
   private pendingMutations = new Set<string>();
+  /** Marker-clicked feedback whose card wasn't rendered yet — flashed after the next render. */
+  private pendingScrollId: string | null = null;
 
   // New feature modules
   private readonly stats: PanelStats;
@@ -226,6 +230,9 @@ export class Panel {
             throw error;
           }
         },
+        // Same rule as the page markers: another page's scroll offset and
+        // anchor mean nothing here (reachable via the "all pages" scope).
+        canGoToAnnotation: (fb) => !this.scopeAnnotationsByUrl || fb.url === this.getScope().url,
         onGoToAnnotation: (fb) => {
           if (fb.annotations.length > 0) {
             const ann = fb.annotations[0];
@@ -268,6 +275,8 @@ export class Panel {
           const fb = this.getFocusedFeedback();
           if (fb) this.bulk.toggle(fb.id);
         },
+        // The detail view covers the whole list (and would hide the help overlay).
+        isSuspended: () => this.detail.isVisible,
       },
       this.t,
     );
@@ -325,10 +334,7 @@ export class Panel {
       if (card) {
         const feedbackId = card.dataset.feedbackId;
         const feedback = this.feedbacks.find((f) => f.id === feedbackId);
-        if (feedback) {
-          const number = this.feedbacks.indexOf(feedback) + 1;
-          this.detail.show(feedback, number);
-        }
+        if (feedback) this.detail.show(feedback, Number(card.dataset.number));
       }
     };
     this.listContainer.addEventListener("click", this.onListClick);
@@ -343,10 +349,7 @@ export class Panel {
       ke.preventDefault();
       const feedbackId = card.dataset.feedbackId;
       const feedback = this.feedbacks.find((f) => f.id === feedbackId);
-      if (feedback) {
-        const number = this.feedbacks.indexOf(feedback) + 1;
-        this.detail.show(feedback, number);
-      }
+      if (feedback) this.detail.show(feedback, Number(card.dataset.number));
     };
     this.listContainer.addEventListener("keydown", this.onListKeydown);
 
@@ -373,10 +376,13 @@ export class Panel {
       open ? this.open() : this.close();
     });
 
-    // Keyboard handling: Escape to close + focus trap
+    // Keyboard handling: Escape to close + focus trap. Nested layers (menus,
+    // confirm dialog) stop Escape before it bubbles here; the help overlay's
+    // handler sits on this same shadow root but runs later, so defer to it.
     shadowRoot.addEventListener("keydown", (e) => {
       const ke = e as KeyboardEvent;
       if (ke.key === "Escape" && this.isOpen) {
+        if (this.shortcuts.isHelpVisible) return;
         // If detail view is open, close it instead
         if (this.detail.isVisible) {
           this.detail.hide();
@@ -546,11 +552,10 @@ export class Panel {
       this.stats.update(feedbacks, total);
       this.bulk.reset();
       this.renderList();
-      // Markers always render only the current-URL slice — even when the panel
-      // shows a wider scope ("template" or "all"), markers stay strictly local
-      // so the user never sees out-of-context dots on the page.
-      const markerFeedbacks = this.scopeAnnotationsByUrl ? feedbacks.filter((f) => f.url === scope.url) : feedbacks;
-      this.markers.render(markerFeedbacks);
+      const pendingScrollId = this.pendingScrollId;
+      this.pendingScrollId = null;
+      if (pendingScrollId) this.flashCard(pendingScrollId);
+      await this.renderMarkers(scope, options, feedbacks, signal);
     } catch (error) {
       if (signal.aborted) return; // Expected abort, not a real error
       if (!hasContent) this.showError();
@@ -599,16 +604,50 @@ export class Panel {
       this.feedbacks = [...this.feedbacks, ...feedbacks];
       this.stats.update(this.feedbacks, total);
       this.renderList();
-      const markerFeedbacks = this.scopeAnnotationsByUrl
-        ? this.feedbacks.filter((f) => f.url === scope.url)
-        : this.feedbacks;
-      this.markers.render(markerFeedbacks);
+      // Extra pages only add markers when the panel shows the marker query.
+      if (this.isMarkerQuery(scope, options)) await this.renderMarkers(scope, options, this.feedbacks);
     } catch (error) {
       if (restoreBtn) restoreBtn();
       this.bus.emit("feedback:error", error instanceof Error ? error : new Error(String(error)));
     } finally {
       this.isLoadingMore = false;
     }
+  }
+
+  /**
+   * Page markers — and the FAB badge, derived from their open count — show the
+   * page's feedbacks, never the panel's status/type/search filters or a wider
+   * scope: a "Resolved" tab must not wipe the open markers and zero the badge
+   * (which then persists after the panel closes). Markers also stay strictly
+   * local to the current URL so out-of-context dots never appear. The panel's
+   * result is reused when its query is the marker query (the one the launcher
+   * loads); otherwise that query is fetched.
+   */
+  private async renderMarkers(
+    scope: PageScope,
+    options: GetFeedbacksOptions,
+    loaded: FeedbackResponse[],
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const url = this.scopeAnnotationsByUrl ? scope.url : undefined;
+    let feedbacks = loaded;
+    if (!this.isMarkerQuery(scope, options)) {
+      const query = url ? { limit: PAGE_SIZE, url } : { limit: PAGE_SIZE };
+      try {
+        ({ feedbacks } = await this.client.getFeedbacks(this.projectName, query));
+      } catch {
+        return; // Non-critical — keep the current markers
+      }
+      if (signal?.aborted) return; // A newer load owns the markers
+    }
+    // Defensive client-side URL filter — the backend may ignore `url`.
+    this.markers.render(url ? feedbacks.filter((f) => f.url === url) : feedbacks);
+  }
+
+  /** Whether a panel query is exactly the page-marker query (no filter, marker URL scope). */
+  private isMarkerQuery(scope: PageScope, options: GetFeedbacksOptions): boolean {
+    const url = this.scopeAnnotationsByUrl ? scope.url : undefined;
+    return !options.type && !options.statuses && !options.search && !options.urlPattern && options.url === url;
   }
 
   private renderList(): void {
@@ -680,6 +719,7 @@ export class Panel {
     const card = el("div", {
       class: `sp-card ${isResolved ? "sp-card--resolved" : ""}`,
     });
+    card.classList.toggle("sp-card--selected", this.bulk.isSelected(feedback.id));
     card.setAttribute("role", "listitem");
     card.setAttribute("tabindex", "0");
     card.setAttribute(
@@ -687,6 +727,8 @@ export class Panel {
       `Feedback #${number}: ${getTypeLabel(feedback.type, this.t)} — ${feedback.message.slice(0, 80)}`,
     );
     card.dataset.feedbackId = feedback.id;
+    // Display (sort-order) number — the detail title must match the card's #.
+    card.dataset.number = String(number);
 
     // Color bar
     const bar = el("div", { class: "sp-card-bar" });
@@ -791,24 +833,35 @@ export class Panel {
   // ---------------------------------------------------------------------------
 
   private async bulkResolve(ids: string[]): Promise<void> {
-    try {
-      await Promise.all(ids.map((id) => this.client.resolveFeedback(id, true)));
-      await this.loadFeedbacks();
-    } catch (error) {
-      this.bus.emit("feedback:error", error instanceof Error ? error : new Error(String(error)));
-      throw error;
-    }
+    // Skip closed items: resolving would turn a wont_fix into resolved and
+    // overwrite a resolved item's closure timestamp.
+    const closed = new Set(this.feedbacks.filter((f) => isClosedStatus(f.status)).map((f) => f.id));
+    const targets = ids.filter((id) => !closed.has(id));
+    const results = await Promise.allSettled(targets.map((id) => this.client.resolveFeedback(id, true)));
+    await this.settleBulk(results);
   }
 
   private async bulkDelete(ids: string[]): Promise<void> {
-    try {
-      await Promise.all(ids.map((id) => this.client.deleteFeedback(id)));
-      for (const id of ids) this.bus.emit("feedback:deleted", id);
-      await this.loadFeedbacks();
-    } catch (error) {
-      this.bus.emit("feedback:error", error instanceof Error ? error : new Error(String(error)));
-      throw error;
-    }
+    const results = await Promise.allSettled(ids.map((id) => this.client.deleteFeedback(id)));
+    results.forEach((result, i) => {
+      const id = ids[i];
+      if (result.status === "fulfilled" && id) this.bus.emit("feedback:deleted", id);
+    });
+    await this.settleBulk(results);
+  }
+
+  /**
+   * Finish a bulk action. Always reload — items that succeeded must leave the
+   * list (and their markers the page) even when another item failed — then
+   * surface the first failure, rethrown so BulkActions restores its buttons.
+   */
+  private async settleBulk(results: PromiseSettledResult<unknown>[]): Promise<void> {
+    await this.loadFeedbacks();
+    const failure = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
+    if (!failure) return;
+    const error = failure.reason instanceof Error ? failure.reason : new Error(String(failure.reason));
+    this.bus.emit("feedback:error", error);
+    throw error;
   }
 
   // ---------------------------------------------------------------------------
@@ -884,6 +937,7 @@ export class Panel {
       const onKeydown = (e: Event) => {
         const ke = e as KeyboardEvent;
         if (ke.key === "Escape") {
+          ke.stopPropagation(); // Cancel the dialog only, not the panel
           close(false);
           return;
         }
@@ -1083,9 +1137,12 @@ export class Panel {
 
     this.typeDropdownContainer.appendChild(this.typeDropdownMenu);
 
-    requestAnimationFrame(() => {
+    this.typeDropdownRaf = requestAnimationFrame(() => {
+      this.typeDropdownRaf = null;
       this.typeDropdownOutsideHandler = (e: MouseEvent) => {
-        if (this.typeDropdownMenu && !this.typeDropdownContainer.contains(e.target as Node)) {
+        // composedPath, not e.target: at document level the target is
+        // retargeted to the shadow host, so every click looked "outside".
+        if (this.typeDropdownMenu && !e.composedPath().includes(this.typeDropdownContainer)) {
           this.closeTypeDropdown();
         }
       };
@@ -1094,6 +1151,7 @@ export class Panel {
 
     this.typeDropdownMenu.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
+        e.stopPropagation(); // Close the menu only, not the panel
         this.closeTypeDropdown();
         this.typeDropdownBtn.focus();
       }
@@ -1106,6 +1164,8 @@ export class Panel {
       this.typeDropdownMenu = null;
     }
     this.typeDropdownBtn.setAttribute("aria-expanded", "false");
+    if (this.typeDropdownRaf !== null) cancelAnimationFrame(this.typeDropdownRaf);
+    this.typeDropdownRaf = null;
     if (this.typeDropdownOutsideHandler) {
       document.removeEventListener("click", this.typeDropdownOutsideHandler, true);
       this.typeDropdownOutsideHandler = null;
@@ -1210,19 +1270,26 @@ export class Panel {
   }
 
   scrollToFeedback(feedbackId: string): void {
+    // A marker click on a closed panel opens it and lands here before the
+    // list has loaded — retry once the next load renders the cards.
+    this.pendingScrollId = this.flashCard(feedbackId) ? null : feedbackId;
+  }
+
+  /** Scroll a card into view and flash it. Returns false when it isn't rendered. */
+  private flashCard(feedbackId: string): boolean {
     const escapedId = CSS.escape(feedbackId);
     const card = this.listContainer.querySelector<HTMLElement>(`[data-feedback-id="${escapedId}"]`);
-    if (card) {
-      card.scrollIntoView({ behavior: "smooth", block: "center" });
-      card.classList.add("sp-anim-flash");
-      card.addEventListener(
-        "animationend",
-        () => {
-          card.classList.remove("sp-anim-flash");
-        },
-        { once: true },
-      );
-    }
+    if (!card) return false;
+    card.scrollIntoView({ behavior: "smooth", block: "center" });
+    card.classList.add("sp-anim-flash");
+    card.addEventListener(
+      "animationend",
+      () => {
+        card.classList.remove("sp-anim-flash");
+      },
+      { once: true },
+    );
+    return true;
   }
 
   /** Refresh the panel after a new feedback is submitted */

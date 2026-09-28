@@ -446,6 +446,27 @@ describe("Popup", () => {
     });
   });
 
+  describe("stale hide timer", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("a hide timer from the previous session does not hide a freshly re-opened popup", async () => {
+      vi.useFakeTimers();
+      const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+      const first = popup.show(makeBounds());
+      dialog.querySelector("textarea")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await first;
+
+      vi.advanceTimersByTime(100);
+      popup.show(makeBounds());
+      vi.advanceTimersByTime(200);
+
+      expect(popup.isOpen).toBe(true);
+      expect(dialog.style.display).toBe("block");
+    });
+  });
+
   // -------------------------------------------------------------------------
   // Destroy
   // -------------------------------------------------------------------------
@@ -596,6 +617,14 @@ describe("Popup", () => {
       const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
       // Should flip: left = right - 300 = 950 - 300 = 650
       expect(Number.parseInt(dialog.style.left, 10)).toBeLessThan(900);
+    });
+
+    it("stays inside the viewport when the rect extends past the right edge", () => {
+      // Keyboard path: a focused element wider than the viewport (innerWidth 1024)
+      popup.show(makeBounds({ left: 900, right: 1400, bottom: 100, top: 50 }));
+
+      const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+      expect(Number.parseInt(dialog.style.left, 10) + 300).toBeLessThanOrEqual(1024 - 8);
     });
   });
 

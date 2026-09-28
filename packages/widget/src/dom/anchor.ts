@@ -7,6 +7,10 @@ import { generateXPath } from "./xpath.js";
 /** HTML attribute hosts use to mark stable semantic anchors. */
 export const ANCHOR_KEY_ATTR = "data-feedback-anchor";
 
+/** Server-side length caps for `elementTag` / `elementId`. */
+const MAX_ELEMENT_TAG = 200;
+const MAX_ELEMENT_ID = 500;
+
 /**
  * Generate a multi-selector anchor for a DOM element.
  *
@@ -51,8 +55,10 @@ export function generateAnchor(element: Element): AnchorData {
     textSuffix,
     fingerprint,
     neighborText: neighbor,
-    elementTag: element.tagName,
-    elementId: element.id || undefined,
+    elementTag: element.tagName.slice(0, MAX_ELEMENT_TAG),
+    // Over-long ids are dropped, not truncated: a truncated id matches nothing
+    // (or the wrong element) — the resolver falls back to other strategies.
+    elementId: element.id && element.id.length <= MAX_ELEMENT_ID ? element.id : undefined,
     anchorKey,
   };
 }
@@ -72,14 +78,16 @@ function containsRect(el: Element, rect: DOMRect): boolean {
  *    them keeps the percentage-based rect stable across viewport changes
  *    instead of stretching to the width of `<main>` or `<body>`.
  * 2. Smallest ancestor that contains the rect (legacy behavior).
- * 3. `document.body` fallback — keeps percentages in [0, 1].
+ * 3. `document.body` when it contains the rect, else `<html>` — a short body
+ *    (or its default margin) leaves blank page area outside it.
  */
 export function findAnchorElement(rect: DOMRect, root: Element = document.documentElement): Element {
   const centerX = rect.x + rect.width / 2;
   const centerY = rect.y + rect.height / 2;
+  const fallback = () => (containsRect(document.body, rect) ? document.body : document.documentElement);
 
   const elementAtCenter = document.elementFromPoint(centerX, centerY);
-  if (!elementAtCenter || elementAtCenter === root) return document.body;
+  if (!elementAtCenter || elementAtCenter === root) return fallback();
 
   // Pass 1 — semantic anchor (host-controlled, most stable)
   let current: Element | null = elementAtCenter;
@@ -97,22 +105,28 @@ export function findAnchorElement(rect: DOMRect, root: Element = document.docume
     current = current.parentElement;
   }
 
-  return document.body;
+  return fallback();
 }
+
+const clamp01 = (v: number): number => Math.min(1, Math.max(0, v));
 
 /**
  * Convert absolute rectangle coordinates to percentages
  * relative to an anchor element's bounding box.
+ *
+ * The rect is intersected with the anchor bounds first: the server schema
+ * rejects any field outside [0, 1], and even `<html>` may not contain a rect
+ * drawn in blank viewport space. A rect fully outside collapses onto the
+ * nearest edge (zero width/height) rather than losing the feedback.
  */
 export function rectToPercentages(rect: DOMRect, anchorBounds: DOMRect): RectData {
   // Guard against zero-dimension anchors (collapsed/hidden elements)
   if (anchorBounds.width <= 0 || anchorBounds.height <= 0) {
     return { xPct: 0, yPct: 0, wPct: 1, hPct: 1 };
   }
-  return {
-    xPct: (rect.x - anchorBounds.x) / anchorBounds.width,
-    yPct: (rect.y - anchorBounds.y) / anchorBounds.height,
-    wPct: rect.width / anchorBounds.width,
-    hPct: rect.height / anchorBounds.height,
-  };
+  const x0 = clamp01((rect.x - anchorBounds.x) / anchorBounds.width);
+  const y0 = clamp01((rect.y - anchorBounds.y) / anchorBounds.height);
+  const x1 = clamp01((rect.x + rect.width - anchorBounds.x) / anchorBounds.width);
+  const y1 = clamp01((rect.y + rect.height - anchorBounds.y) / anchorBounds.height);
+  return { xPct: x0, yPct: y0, wPct: x1 - x0, hPct: y1 - y0 };
 }

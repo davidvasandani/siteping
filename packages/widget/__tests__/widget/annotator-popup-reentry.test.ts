@@ -138,3 +138,90 @@ describe("draw flow — popup re-entry guards (#196, real Popup)", () => {
     expect(completeListener).toHaveBeenCalledOnce();
   });
 });
+
+describe("Escape / cancel never tear the session down around an open popup (real Popup)", () => {
+  let cleanup: (() => void) | null = null;
+
+  afterEach(() => {
+    cleanup?.();
+    cleanup = null;
+    document.body.innerHTML = "";
+  });
+
+  function setup() {
+    const bus = new EventBus<WidgetEvents>();
+    const annotator = new Annotator(buildThemeColors(), bus, createT("en"));
+    cleanup = () => annotator.destroy();
+    const events: string[] = [];
+    bus.on("annotation:end", () => events.push("end"));
+    bus.on("annotation:complete", () => events.push("complete"));
+    return { bus, events };
+  }
+
+  async function openPopup(bus: EventBus<WidgetEvents>): Promise<HTMLElement> {
+    bus.emit("annotation:start");
+    drag(findOverlay(), 100, 100, 200, 200);
+    await flush();
+    return document.body.querySelector<HTMLElement>('[role="dialog"]')!;
+  }
+
+  function trySubmit(dialog: HTMLElement) {
+    dialog.querySelector<HTMLButtonElement>('button[data-type="bug"]')!.click();
+    const textarea = dialog.querySelector("textarea")!;
+    textarea.value = "late message";
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    Array.from(dialog.querySelectorAll("button"))
+      .find((b) => b.textContent?.includes("Send"))!
+      .click();
+  }
+
+  it("Escape on a popup button cancels the popup, then ends the session", async () => {
+    const { bus, events } = setup();
+    const dialog = await openPopup(bus);
+    const typeBtn = dialog.querySelector<HTMLButtonElement>('button[data-type="question"]')!;
+    typeBtn.focus();
+
+    typeBtn.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await flush();
+
+    expect(dialog.style.opacity).toBe("0");
+    expect(events).toEqual(["end"]);
+    // The hidden popup must not be able to submit after annotation:end.
+    trySubmit(dialog);
+    await flush();
+    expect(events).toEqual(["end"]);
+  });
+
+  it("Escape while the submission is in flight keeps the session (popup holds the user)", async () => {
+    const { bus, events } = setup();
+    const dialog = await openPopup(bus);
+    trySubmit(dialog);
+    await flush();
+    expect(events).toEqual(["complete"]);
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await flush();
+    expect(events).toEqual(["complete"]);
+    expect(findOverlay()).not.toBeNull();
+
+    bus.emit("feedback:sent", { id: "f1" } as FeedbackResponse);
+    await flush();
+    expect(events).toEqual(["complete", "end"]);
+  });
+
+  it("the toolbar Cancel button also closes an open popup", async () => {
+    const { bus, events } = setup();
+    const dialog = await openPopup(bus);
+
+    const toolbarCancel = Array.from(document.body.querySelectorAll("button")).find(
+      (b) => b.textContent === "Cancel" && !dialog.contains(b),
+    )!;
+    toolbarCancel.click();
+    await flush();
+
+    expect(dialog.style.opacity).toBe("0");
+    trySubmit(dialog);
+    await flush();
+    expect(events).toEqual(["end"]);
+  });
+});

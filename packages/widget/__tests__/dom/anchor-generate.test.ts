@@ -146,6 +146,26 @@ describe("generateAnchor", () => {
       const anchor = generateAnchor(element);
       expect(anchor.elementId).toBeUndefined();
     });
+
+    it("is omitted when longer than the server's 500-char cap (a truncated id is wrong data)", () => {
+      const element = document.createElement("div");
+      element.id = "a".repeat(501);
+      document.body.appendChild(element);
+
+      expect(generateAnchor(element).elementId).toBeUndefined();
+
+      element.id = "a".repeat(500);
+      expect(generateAnchor(element).elementId).toBe("a".repeat(500));
+    });
+  });
+
+  describe("elementTag length", () => {
+    it("is capped at the server's 200-char limit", () => {
+      const element = document.createElement(`x-${"a".repeat(248)}`);
+      document.body.appendChild(element);
+
+      expect(generateAnchor(element).elementTag).toHaveLength(200);
+    });
   });
 
   // -------------------------------------------------------------------------

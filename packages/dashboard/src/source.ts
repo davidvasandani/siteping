@@ -10,6 +10,7 @@ import {
   networkErrorFromException,
   type SitepingStore,
   toFeedbackUpdate,
+  withSearchParams,
 } from "@siteping/core";
 import type { EndpointSourceOptions, InboxSource } from "./types.js";
 
@@ -60,7 +61,14 @@ export function createEndpointSource(options: EndpointSourceOptions): InboxSourc
     if (json) merged["Content-Type"] = "application/json";
     if (apiKey) merged.Authorization = `Bearer ${apiKey}`;
     const extra = typeof headers === "function" ? await headers() : headers;
-    if (extra) Object.assign(merged, extra);
+    // Header names are case-insensitive: drop a built-in the caller overrides
+    // under another casing, or fetch sends both joined ("Bearer a, Bearer b").
+    for (const [name, value] of Object.entries(extra ?? {})) {
+      for (const key of Object.keys(merged)) {
+        if (key.toLowerCase() === name.toLowerCase()) delete merged[key];
+      }
+      merged[name] = value;
+    }
     return merged;
   }
 
@@ -81,7 +89,7 @@ export function createEndpointSource(options: EndpointSourceOptions): InboxSourc
       // dropped the `statuses` bucket filter.
       const params = feedbackQueryToSearchParams(query);
 
-      const response = await request("Failed to fetch feedbacks", `${endpoint}?${params.toString()}`, {
+      const response = await request("Failed to fetch feedbacks", withSearchParams(endpoint, params), {
         method: "GET",
         cache: "no-store",
         headers: await buildHeaders(false),

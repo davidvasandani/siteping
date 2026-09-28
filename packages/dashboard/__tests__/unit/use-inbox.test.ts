@@ -5,7 +5,7 @@ import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InboxSource } from "../../src/types.js";
 import { useSitepingInbox } from "../../src/use-inbox.js";
-import { makeRecord, makeSource } from "../helpers.js";
+import { deferred, makeRecord, makeSource, type TestSource } from "../helpers.js";
 
 // Six-record demo project: three open (mixed types), one of each other status.
 function demoRecords(): FeedbackRecord[] {
@@ -231,6 +231,28 @@ describe("useSitepingInbox — focus", () => {
     expect(result.current.focusedId).toBe("r1");
     act(() => result.current.focusPrev()); // clamp at first
     expect(result.current.focusedId).toBe("r1");
+  });
+});
+
+describe("useSitepingInbox — focus survives only in the list it points into", () => {
+  it("clears focusedId when a new list doesn't contain it, keeps it when it does", async () => {
+    const { result } = await mountDemo();
+    act(() => result.current.focus("r2"));
+    await act(async () => {
+      await result.current.refresh(); // r2 is still there
+    });
+    expect(result.current.focusedId).toBe("r2");
+
+    act(() => result.current.setStatus("resolved"));
+    await waitFor(() => expect(ids(result.current.items)).toEqual(["r5"]));
+    expect(result.current.focusedId).toBeNull();
+  });
+
+  it("openFeedback ignores an id that is neither listed nor cached", async () => {
+    const { result } = await mountDemo();
+    act(() => result.current.openFeedback("ghost"));
+    expect(result.current.openedId).toBeNull();
+    expect(result.current.focusedId).toBeNull();
   });
 });
 
@@ -514,6 +536,30 @@ describe("useSitepingInbox — resilience & drawer survival", () => {
     expect(result.current.opened?.status).toBe("resolved");
   });
 
+  it("the opened record tracks an in-flight change (and its rollback) after its row left the list", async () => {
+    const source = makeSource(demoRecords());
+    const { result } = renderHook(() => useSitepingInbox({ projects: "demo", source }));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    act(() => result.current.openFeedback("r1"));
+    await act(async () => {
+      await result.current.changeStatus("r1", "resolved"); // leaves the open list
+    });
+    const held = deferred<FeedbackRecord>();
+    source.setStatus.mockImplementationOnce(() => held.promise);
+    let change!: Promise<unknown>;
+    act(() => {
+      change = result.current.changeStatus("r1", "in_progress").catch((e: unknown) => e);
+    });
+    expect(result.current.opened?.status).toBe("in_progress");
+
+    await act(async () => {
+      held.reject(new Error("patch failed"));
+      await change;
+    });
+    expect(result.current.opened?.status).toBe("resolved");
+  });
+
   it("clears a pending undo when the same feedback is deleted", async () => {
     const source = makeSource(demoRecords());
     const { result } = renderHook(() => useSitepingInbox({ projects: "demo", source }));
@@ -709,5 +755,455 @@ describe("useSitepingInbox — edge branches", () => {
     expect(result.current.openedId).toBeNull();
     expect(result.current.opened).toBeNull();
     expect(onDelete).toHaveBeenCalledWith(expect.objectContaining({ id: "r2" }));
+  });
+});
+
+/** Let every pending microtask/macrotask settle (e.g. a load's background count queries). */
+async function settle(): Promise<void> {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+/** Mount the demo project and wait until both page 1 and the tab counts have landed. */
+async function mountDemo(source = makeSource(demoRecords())) {
+  const hook = renderHook(() => useSitepingInbox({ projects: "demo", source }));
+  await waitFor(() => expect(hook.result.current.loading).toBe(false));
+  await settle();
+  return { source, ...hook };
+}
+
+/** Hold the next setStatus: the source applies it (server state changes) only once the returned gate resolves. */
+function holdNextSetStatus(source: TestSource) {
+  const real = source.setStatus.getMockImplementation();
+  const gate = deferred<void>();
+  source.setStatus.mockImplementationOnce(async (id, projectName, status) => {
+    await gate.promise;
+    if (!real) throw new Error("no setStatus implementation");
+    return real(id, projectName, status);
+  });
+  return gate;
+}
+
+describe("useSitepingInbox — concurrent mutations roll back per record", () => {
+  it("a failed change restores only its own row — a concurrent success survives", async () => {
+    const { source, result } = await mountDemo();
+    const held = deferred<FeedbackRecord>();
+    source.setStatus.mockImplementationOnce(() => held.promise);
+
+    let first!: Promise<unknown>;
+    act(() => {
+      first = result.current.changeStatus("r1", "resolved").catch((e: unknown) => e);
+    });
+    await act(async () => {
+      await result.current.changeStatus("r2", "resolved");
+    });
+    expect(ids(result.current.items)).toEqual(["r3"]);
+
+    await act(async () => {
+      held.reject(new Error("patch failed"));
+      await first;
+    });
+
+    // r2's confirmed change stands; only r1 comes back.
+    expect(ids(result.current.items)).toEqual(["r1", "r3"]);
+    expect(result.current.items.find((r) => r.id === "r1")?.status).toBe("open");
+    expect(result.current.total).toBe(2);
+    expect(result.current.counts).toMatchObject({ all: 6, open: 2, resolved: 2 });
+  });
+
+  it("two failed changes each put their own row back", async () => {
+    const { source, result } = await mountDemo();
+    const heldA = deferred<FeedbackRecord>();
+    const heldB = deferred<FeedbackRecord>();
+    source.setStatus.mockImplementationOnce(() => heldA.promise).mockImplementationOnce(() => heldB.promise);
+
+    let a!: Promise<unknown>;
+    let b!: Promise<unknown>;
+    act(() => {
+      a = result.current.changeStatus("r1", "resolved").catch((e: unknown) => e);
+    });
+    act(() => {
+      b = result.current.changeStatus("r2", "resolved").catch((e: unknown) => e);
+    });
+    expect(ids(result.current.items)).toEqual(["r3"]);
+
+    await act(async () => {
+      heldA.reject(new Error("a failed"));
+      await a;
+    });
+    await act(async () => {
+      heldB.reject(new Error("b failed"));
+      await b;
+    });
+
+    expect(ids(result.current.items)).toEqual(["r1", "r2", "r3"]);
+    expect(result.current.total).toBe(3);
+    expect(result.current.counts).toMatchObject({ all: 6, open: 3, resolved: 1 });
+  });
+
+  it("a failed change does not resurrect a record deleted meanwhile", async () => {
+    const { source, result } = await mountDemo();
+    act(() => result.current.setStatus("all"));
+    await waitFor(() => expect(result.current.items).toHaveLength(6));
+    await settle();
+
+    const held = deferred<FeedbackRecord>();
+    source.setStatus.mockImplementationOnce(() => held.promise);
+    let change!: Promise<unknown>;
+    act(() => {
+      change = result.current.changeStatus("r1", "resolved").catch((e: unknown) => e);
+    });
+    await act(async () => {
+      await result.current.deleteFeedback("r1");
+    });
+    await act(async () => {
+      held.reject(new Error("patch failed"));
+      await change;
+    });
+
+    expect(ids(result.current.items)).not.toContain("r1");
+    expect(result.current.total).toBe(5);
+    // r1 was open on the server and is now deleted: open and all each lose one.
+    expect(result.current.counts).toMatchObject({ all: 5, open: 2, resolved: 1 });
+  });
+
+  it("a change and its undo both failing leave the record as the server has it", async () => {
+    const { source, result } = await mountDemo();
+    const heldChange = deferred<FeedbackRecord>();
+    const heldUndo = deferred<FeedbackRecord>();
+    source.setStatus.mockImplementationOnce(() => heldChange.promise).mockImplementationOnce(() => heldUndo.promise);
+
+    let change!: Promise<unknown>;
+    let undo!: Promise<unknown>;
+    act(() => {
+      change = result.current.changeStatus("r1", "resolved").catch((e: unknown) => e);
+    });
+    act(() => {
+      undo = result.current.undo().catch((e: unknown) => e);
+    });
+    expect(ids(result.current.items)).toEqual(["r1", "r2", "r3"]);
+
+    await act(async () => {
+      heldChange.reject(new Error("change failed"));
+      await change;
+    });
+    await act(async () => {
+      heldUndo.reject(new Error("undo failed"));
+      await undo;
+    });
+
+    expect(ids(result.current.items)).toEqual(["r1", "r2", "r3"]);
+    expect(result.current.items.find((r) => r.id === "r1")?.status).toBe("open");
+    expect(result.current.total).toBe(3);
+    expect(result.current.counts).toMatchObject({ all: 6, open: 3, resolved: 1 });
+  });
+
+  it("a failed change keeps a refresh that was already in flight when it started", async () => {
+    const { source, result } = await mountDemo();
+    const r0 = makeRecord({ id: "r0", status: "open", createdAt: new Date("2026-07-20T10:07:00Z") });
+    const page = deferred<FeedbackPage>();
+    source.list.mockImplementationOnce(() => page.promise);
+
+    let refreshing!: Promise<void>;
+    act(() => {
+      refreshing = result.current.refresh();
+    });
+    const held = deferred<FeedbackRecord>();
+    source.setStatus.mockImplementationOnce(() => held.promise);
+    let change!: Promise<unknown>;
+    act(() => {
+      change = result.current.changeStatus("r2", "resolved").catch((e: unknown) => e);
+    });
+
+    // The refresh lands with the server's view: r0 is new, r2 is still open.
+    const open = source.records.filter((r) => r.status === "open");
+    await act(async () => {
+      page.resolve({ feedbacks: [r0, ...open], total: 4 });
+      await refreshing;
+    });
+    await act(async () => {
+      held.reject(new Error("patch failed"));
+      await change;
+    });
+
+    expect(ids(result.current.items)).toEqual(["r0", "r1", "r2", "r3"]);
+    expect(result.current.items.find((r) => r.id === "r2")?.status).toBe("open");
+    expect(result.current.total).toBe(4);
+  });
+});
+
+describe("useSitepingInbox — loadMore while a mutation is in flight", () => {
+  // Six open records, m0 newest.
+  function sixOpen(): FeedbackRecord[] {
+    return Array.from({ length: 6 }, (_, i) =>
+      makeRecord({ id: `m${i}`, status: "open", createdAt: new Date(Date.UTC(2026, 6, 20, 10, 10 - i)) }),
+    );
+  }
+
+  /** Two pages (4 rows) loaded at pageSize 2, counts settled. */
+  async function mountPaged() {
+    const source = makeSource(sixOpen());
+    const hook = renderHook(() => useSitepingInbox({ projects: "demo", source, pageSize: 2 }));
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+    await settle();
+    await act(async () => {
+      await hook.result.current.loadMore();
+    });
+    expect(ids(hook.result.current.items)).toEqual(["m0", "m1", "m2", "m3"]);
+    return { source, ...hook };
+  }
+
+  it("a mutation failing after a loadMore still rolls back its row and the total", async () => {
+    const { source, result } = await mountPaged();
+    const held = deferred<FeedbackRecord>();
+    source.setStatus.mockImplementationOnce(() => held.promise);
+    let change!: Promise<unknown>;
+    act(() => {
+      change = result.current.changeStatus("m0", "resolved").catch((e: unknown) => e);
+    });
+    await act(async () => {
+      await result.current.loadMore(); // the server still has m0 open: page 2 is all duplicates
+    });
+    await act(async () => {
+      held.reject(new Error("patch failed"));
+      await change;
+    });
+
+    expect(ids(result.current.items)).toEqual(["m0", "m1", "m2", "m3"]);
+    expect(result.current.total).toBe(6);
+    expect(result.current.hasMore).toBe(true);
+  });
+
+  it("a duplicate-only page caused by an in-flight removal does not end pagination", async () => {
+    const { source, result } = await mountPaged();
+    const gate = holdNextSetStatus(source);
+    let change!: Promise<void>;
+    act(() => {
+      change = result.current.changeStatus("m0", "resolved");
+    });
+    await act(async () => {
+      await result.current.loadMore();
+    });
+    await act(async () => {
+      gate.resolve();
+      await change;
+    });
+
+    expect(ids(result.current.items)).toEqual(["m1", "m2", "m3"]);
+    expect(result.current.total).toBe(5);
+    expect(result.current.hasMore).toBe(true);
+    await act(async () => {
+      await result.current.loadMore();
+    });
+    await act(async () => {
+      await result.current.loadMore();
+    });
+    expect(ids(result.current.items)).toEqual(["m1", "m2", "m3", "m4", "m5"]);
+    expect(result.current.hasMore).toBe(false);
+  });
+
+  it("does not re-add a row whose removal is still in flight", async () => {
+    const { source, result } = await mountPaged();
+    const gate = holdNextSetStatus(source);
+    let change!: Promise<void>;
+    act(() => {
+      change = result.current.changeStatus("m3", "resolved");
+    });
+    await act(async () => {
+      await result.current.loadMore(); // server page 2 is still [m2, m3(open)]
+    });
+    expect(ids(result.current.items)).toEqual(["m0", "m1", "m2"]);
+
+    await act(async () => {
+      gate.resolve();
+      await change;
+    });
+    expect(ids(result.current.items)).toEqual(["m0", "m1", "m2"]);
+    expect(result.current.total).toBe(5);
+    await act(async () => {
+      await result.current.loadMore();
+    });
+    await act(async () => {
+      await result.current.loadMore();
+    });
+    expect(ids(result.current.items)).toEqual(["m0", "m1", "m2", "m4", "m5"]);
+    expect(result.current.hasMore).toBe(false);
+  });
+});
+
+describe("useSitepingInbox — counts racing a mutation", () => {
+  it("count responses that predate a mutation don't leave the tabs stale", async () => {
+    const { source, result } = await mountDemo();
+    // Hold the refresh's count queries on a snapshot of the server taken when they were sent.
+    const real = source.list.getMockImplementation();
+    if (!real) throw new Error("no list implementation");
+    const heldCounts: Array<() => void> = [];
+    source.list.mockImplementation((query) => {
+      if (query.limit !== 1) return real(query);
+      const snapshot = real(query);
+      return new Promise((resolve) => heldCounts.push(() => resolve(snapshot)));
+    });
+
+    let refreshing!: Promise<void>;
+    act(() => {
+      refreshing = result.current.refresh();
+    });
+    await waitFor(() => expect(heldCounts).toHaveLength(5));
+    await act(async () => {
+      await result.current.changeStatus("r1", "resolved");
+    });
+    expect(result.current.counts).toMatchObject({ open: 2, resolved: 2 });
+
+    source.list.mockImplementation(real);
+    await act(async () => {
+      for (const release of heldCounts) release();
+      await refreshing;
+    });
+    await settle();
+
+    expect(ids(result.current.items)).toEqual(["r2", "r3"]);
+    expect(result.current.counts).toMatchObject({ all: 6, open: 2, resolved: 2 });
+  });
+});
+
+describe("useSitepingInbox — a success landing in a list refetched meanwhile", () => {
+  it("removes the saved record when it no longer matches the refetched list", async () => {
+    const { source, result } = await mountDemo();
+    act(() => result.current.focus("r1"));
+    const gate = holdNextSetStatus(source);
+    let change!: Promise<void>;
+    act(() => {
+      change = result.current.changeStatus("r1", "resolved");
+    });
+    await act(async () => {
+      await result.current.refresh(); // the server still has r1 open
+    });
+    expect(ids(result.current.items)).toEqual(["r1", "r2", "r3"]);
+
+    await act(async () => {
+      gate.resolve();
+      await change;
+    });
+
+    // The Open tab must not show r1 as resolved.
+    expect(ids(result.current.items)).toEqual(["r2", "r3"]);
+    expect(result.current.total).toBe(2);
+    expect(result.current.focusedId).toBe("r2");
+  });
+});
+
+describe("useSitepingInbox — re-entering rows respect the whole query", () => {
+  it("undo does not insert a row the type filter excludes, nor count it", async () => {
+    const { result } = await mountDemo();
+    await act(async () => {
+      await result.current.changeStatus("r1", "resolved"); // r1 is a bug
+    });
+    act(() => result.current.setType("question"));
+    await waitFor(() => expect(ids(result.current.items)).toEqual(["r2"]));
+    await settle();
+    expect(result.current.counts).toMatchObject({ all: 1, open: 1, resolved: 0 });
+
+    await act(async () => {
+      await result.current.undo();
+    });
+
+    expect(ids(result.current.items)).toEqual(["r2"]);
+    expect(result.current.total).toBe(1);
+    expect(result.current.counts).toMatchObject({ all: 1, open: 1, resolved: 0 });
+  });
+
+  it("a drawer status change does not insert a row the search excludes (case-insensitive)", async () => {
+    const { result } = await mountDemo();
+    act(() => result.current.openFeedback("r1"));
+    await act(async () => {
+      await result.current.changeStatus("r1", "resolved"); // leaves the list, stays in the drawer
+    });
+    act(() => result.current.setSearch("BETA"));
+    await waitFor(() => expect(ids(result.current.items)).toEqual(["r2"]), { timeout: 1500 });
+    await settle();
+
+    await act(async () => {
+      await result.current.changeStatus("r1", "open"); // "alpha overlap" doesn't match "beta"
+    });
+
+    expect(ids(result.current.items)).toEqual(["r2"]);
+    expect(result.current.total).toBe(1);
+    expect(result.current.counts).toMatchObject({ all: 1, open: 1, resolved: 0 });
+    expect(result.current.opened?.status).toBe("open");
+  });
+
+  it("undo still re-inserts a row matching type and search", async () => {
+    const { result } = await mountDemo();
+    act(() => result.current.setSearch("Gamma"));
+    await waitFor(() => expect(ids(result.current.items)).toEqual(["r3"]), { timeout: 1500 });
+    await settle();
+    await act(async () => {
+      await result.current.changeStatus("r3", "resolved");
+    });
+    expect(result.current.items).toHaveLength(0);
+    await act(async () => {
+      await result.current.undo();
+    });
+    expect(ids(result.current.items)).toEqual(["r3"]);
+    expect(result.current.counts).toMatchObject({ all: 1, open: 1, resolved: 0 });
+  });
+});
+
+describe("useSitepingInbox — undo state after a failed mutation", () => {
+  it("does not restore another project's undo when a mutation fails after a project switch", async () => {
+    const source = makeSource([
+      makeRecord({ id: "a1", projectName: "A", status: "open", createdAt: new Date("2026-07-20T10:02:00Z") }),
+      makeRecord({ id: "a2", projectName: "A", status: "open", createdAt: new Date("2026-07-20T10:01:00Z") }),
+      makeRecord({ id: "b1", projectName: "B", status: "open", createdAt: new Date("2026-07-20T10:00:00Z") }),
+    ]);
+    const { result } = renderHook(() => useSitepingInbox({ projects: ["A", "B"], source }));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await settle();
+
+    await act(async () => {
+      await result.current.changeStatus("a1", "resolved");
+    });
+    const held = deferred<FeedbackRecord>();
+    source.setStatus.mockImplementationOnce(() => held.promise);
+    let change!: Promise<unknown>;
+    act(() => {
+      change = result.current.changeStatus("a2", "resolved").catch((e: unknown) => e);
+    });
+
+    act(() => result.current.setProject("B"));
+    await waitFor(() => expect(ids(result.current.items)).toEqual(["b1"]));
+    await act(async () => {
+      held.reject(new Error("patch failed"));
+      await change;
+    });
+
+    expect(result.current.pendingUndo).toBeNull();
+    source.setStatus.mockClear();
+    await act(async () => {
+      await result.current.undo();
+    });
+    expect(source.setStatus).not.toHaveBeenCalled();
+    expect(ids(result.current.items)).toEqual(["b1"]);
+  });
+
+  it("keeps a concurrent success's undo when an earlier change fails", async () => {
+    const { source, result } = await mountDemo();
+    const held = deferred<FeedbackRecord>();
+    source.setStatus.mockImplementationOnce(() => held.promise);
+
+    let first!: Promise<unknown>;
+    act(() => {
+      first = result.current.changeStatus("r1", "resolved").catch((e: unknown) => e);
+    });
+    await act(async () => {
+      await result.current.changeStatus("r2", "resolved");
+    });
+    await act(async () => {
+      held.reject(new Error("patch failed"));
+      await first;
+    });
+
+    expect(result.current.pendingUndo).toEqual({ id: "r2", previousStatus: "open" });
   });
 });

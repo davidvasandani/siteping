@@ -1,6 +1,8 @@
 import {
+  type AnnotationPayload,
   type DiagnosticsSnapshot,
   type FeedbackPayload,
+  IDENTITY_FIELD_MAX_LENGTH,
   isValidEmail,
   type PageScope,
   type SitepingConfig,
@@ -41,8 +43,9 @@ interface NormalisedDiagnostics {
  * - `undefined` / `false` → everything off (no monkey-patching).
  * - `true` → console + network on with the defaults (50 / 20).
  * - object → per-channel toggles + optional custom sizes; missing booleans
- *   default to `true` so users can pass `{ maxConsoleEntries: 200 }` and
- *   still get both channels.
+ *   default to `true` so users can pass `{ maxConsoleEntries: 10 }` and
+ *   still get both channels. The buffers sanitise sizes themselves: capped
+ *   at the server limits (50 / 20), NaN / negative → default.
  */
 function normaliseDiagnosticsOptions(value: SitepingConfig["captureDiagnostics"]): NormalisedDiagnostics {
   if (value === undefined || value === false) {
@@ -319,6 +322,9 @@ export function launch(config: SitepingConfig): SitepingInstance {
   liveRegion.setAttribute("role", "status");
   liveRegion.setAttribute("aria-live", "polite");
   liveRegion.setAttribute("aria-atomic", "true");
+  // Widget chrome (see `isWidgetChrome`): anchor text context must never
+  // read "1 feedback markers displayed" off a body-level element's sibling.
+  liveRegion.setAttribute("data-siteping-ignore", "true");
   liveRegion.style.cssText =
     "position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;";
   document.body.appendChild(liveRegion);
@@ -469,6 +475,12 @@ export function launch(config: SitepingConfig): SitepingInstance {
   // listener hung forever. We emit `submission:cancelled` so the waiter
   // unblocks as a benign abort (the popup restores, `onError` is not called).
   let submitting = false;
+  // One clientId per annotation session. The annotator re-emits the SAME
+  // `annotation` object on every resend from its popup (the session its
+  // screenshot cache is scoped to), so a resend after a transient failure
+  // reuses the clientId of the attempt api-client queued for replay — the
+  // server dedupes them instead of storing the feedback twice.
+  const clientIds = new WeakMap<AnnotationPayload, string>();
   const unsubAnnotation = bus.on("annotation:complete", async (data) => {
     if (submitting) {
       bus.emit("submission:cancelled");
@@ -496,13 +508,15 @@ export function launch(config: SitepingConfig): SitepingInstance {
       }
 
       // crypto.randomUUID() throws in non-secure contexts (plain HTTP)
-      const clientId = (() => {
+      let clientId = clientIds.get(annotation);
+      if (!clientId) {
         try {
-          return crypto.randomUUID();
+          clientId = crypto.randomUUID();
         } catch {
-          return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+          clientId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
         }
-      })();
+        clientIds.set(annotation, clientId);
+      }
 
       // Use scope.url as the single source of truth — same identifier the
       // panel filter and marker filter use. If we stored full URLs here while
@@ -705,8 +719,12 @@ export function launch(config: SitepingConfig): SitepingInstance {
     };
   }
 
-  instance = {
+  const self: SitepingInstance = {
     destroy: () => {
+      // Idempotent: hosts can hold stale handles (two `useSiteping` consumers
+      // share the singleton), and a repeat call must not tear anything down
+      // again — least of all a newer widget's singleton slot below.
+      if (destroyed) return;
       log("Destroying widget");
       if (onContextMenu) {
         document.removeEventListener("contextmenu", onContextMenu);
@@ -730,7 +748,7 @@ export function launch(config: SitepingConfig): SitepingInstance {
       publicBus.removeAll();
       liveRegion.remove();
       host.remove();
-      instance = null;
+      if (instance === self) instance = null;
     },
     open: () => {
       // Emit synchronously so consumers wired through `onOpen` / `panel:open`
@@ -765,7 +783,8 @@ export function launch(config: SitepingConfig): SitepingInstance {
     },
   };
 
-  return instance;
+  instance = self;
+  return self;
 }
 
 /**
@@ -837,6 +856,7 @@ function promptIdentity(shadowRoot: ShadowRoot, t: TFunction): Promise<Identity 
     nameInput.className = "sp-input";
     nameInput.id = nameInputId;
     nameInput.type = "text";
+    nameInput.maxLength = IDENTITY_FIELD_MAX_LENGTH;
     nameInput.placeholder = t("identity.namePlaceholder");
     nameInput.style.marginBottom = "14px";
 
@@ -848,6 +868,7 @@ function promptIdentity(shadowRoot: ShadowRoot, t: TFunction): Promise<Identity 
     emailInput.className = "sp-input";
     emailInput.id = emailInputId;
     emailInput.type = "email";
+    emailInput.maxLength = IDENTITY_FIELD_MAX_LENGTH;
     emailInput.placeholder = t("identity.emailPlaceholder");
 
     const btnRow = document.createElement("div");
@@ -876,10 +897,15 @@ function promptIdentity(shadowRoot: ShadowRoot, t: TFunction): Promise<Identity 
       const name = nameInput.value.trim();
       const email = emailInput.value.trim();
       if (!name || !email) return;
-      // Same pattern the server schema enforces — what the modal accepts here
-      // is persisted and replayed on every submission, so it must never be
-      // something the server rejects.
-      if (!isValidEmail(email)) {
+      // Same pattern and length cap the server schema enforces — what the
+      // modal accepts here is persisted and replayed on every submission, so
+      // it must never be something the server rejects. `maxlength` covers
+      // typing; this covers values set around it.
+      if (name.length > IDENTITY_FIELD_MAX_LENGTH) {
+        nameInput.style.borderColor = "var(--sp-type-bug, #ef4444)";
+        return;
+      }
+      if (email.length > IDENTITY_FIELD_MAX_LENGTH || !isValidEmail(email)) {
         emailInput.style.borderColor = "var(--sp-type-bug, #ef4444)";
         return;
       }

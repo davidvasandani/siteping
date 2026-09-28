@@ -61,6 +61,17 @@ describe("createEndpointSource — list()", () => {
     expect([...params.keys()]).toEqual(["projectName"]);
   });
 
+  it("keeps a query string already on the endpoint (appends with &)", async () => {
+    // `${endpoint}?${params}` produced "?tenant=acme?projectName=…" — a 400.
+    const fetchFn = jsonFetch({ feedbacks: [], total: 0 });
+    const source = createEndpointSource({ endpoint: `${ENDPOINT}?tenant=acme`, fetchFn });
+    await source.list({ projectName: "demo" });
+
+    const params = new URL(lastCall(fetchFn).url).searchParams;
+    expect(params.get("tenant")).toBe("acme");
+    expect(params.get("projectName")).toBe("demo");
+  });
+
   it("sends no Content-Type on GET", async () => {
     const fetchFn = jsonFetch({ feedbacks: [], total: 0 });
     const source = createEndpointSource({ endpoint: ENDPOINT, fetchFn });
@@ -141,6 +152,21 @@ describe("createEndpointSource — auth & headers", () => {
     });
     await source.list({ projectName: "demo" });
     expect((lastCall(fetchFn).init.headers as Record<string, string>).Authorization).toBe("Bearer from-headers");
+  });
+
+  it("lets an explicit header override the built-ins whatever its casing", async () => {
+    const fetchFn = jsonFetch(makeResponse());
+    const source = createEndpointSource({
+      endpoint: ENDPOINT,
+      apiKey: "KEY",
+      headers: { authorization: "Bearer SESSION", "content-type": "application/merge-patch+json" },
+      fetchFn,
+    });
+    await source.setStatus("fb-resp-1", "demo", "resolved");
+    // What fetch actually sends — duplicate-cased keys would be joined ("Bearer KEY, Bearer SESSION").
+    const sent = new Headers(lastCall(fetchFn).init.headers);
+    expect(sent.get("Authorization")).toBe("Bearer SESSION");
+    expect(sent.get("Content-Type")).toBe("application/merge-patch+json");
   });
 });
 
