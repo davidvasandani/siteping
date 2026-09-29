@@ -29,7 +29,9 @@ bun run lint               # lint with Biome (includes the type-aware rules doma
 bun run lint:fix           # auto-fix lint issues
 bun run verify             # build + check + lint + test:run — the full pre-PR gate
 bun run pkg-checks         # publint + attw on every published package (same script CI runs)
-bun run check:consistency  # locale counts, package registration, fix-dts chains, esbuild override, fileURLToPath in tooling
+bun run check:consistency  # locale counts/lists + demo pickers, package registration, fix-dts chains, esbuild override,
+                           # fileURLToPath in tooling, no @prisma/client import in adapter-prisma, workspace dependencies
+                           # pinned before publish
 bun run knip               # dead files / exports / dependencies
 bun run new:locale <code>  # scaffold a new built-in locale (see Adding a Locale)
 bun run new:adapter <name> # scaffold a new first-party adapter (see Creating a New Adapter)
@@ -51,8 +53,10 @@ Monorepo with bun workspaces + Turborepo. Libraries live in `packages/`, the web
 | `@siteping/core` | private | — | Shared types, schema, store errors, helpers, conformance tests |
 | `@siteping/widget` | published | Browser | Feedback widget (Shadow DOM, closed). Accepts `store` for client-side mode |
 | `@siteping/dashboard` | published | Browser (React) | Linear-style triage inbox (`<SitepingInbox />` + headless `useSitepingInbox()`) |
-| `@siteping/adapter-prisma` | published | Node | Prisma database adapter |
+| `@siteping/server` | published | Any | Store-agnostic HTTP handler on the Fetch API (auth, CORS, hooks, webhooks) |
+| `@siteping/adapter-prisma` | published | Node | Prisma database adapter — `@siteping/server`'s handler with a Prisma store built in |
 | `@siteping/adapter-drizzle` | published | Node | Drizzle ORM store (PostgreSQL, Turso/libSQL) |
+| `@siteping/screenshot-storage` | published | Any (`/filesystem`: Node) | Screenshot storage for the stores: S3-compatible buckets, Cloudflare Images, a Drizzle table, filesystem, memory, or a custom `ScreenshotObjectStore` |
 | `@siteping/adapter-memory` | published | Any | In-memory adapter (testing, demos, serverless) |
 | `@siteping/adapter-localstorage` | published | Browser | localStorage adapter (demos, prototyping) |
 | `@siteping/adapter-kit` | published | Any | Everything third-party adapter authors need: store contract, helpers, `createCollectionStore`, and the conformance suite (`/testing`) |
@@ -98,7 +102,7 @@ English is the source language and lives at bare URLs (`/docs/widget`). Other la
 - A page without a translation still resolves in that language, served in English (`fallbackLanguage: "en"`), so partial translations never 404.
 - Adding a language means one entry in `apps/demo/src/lib/docs/i18n.ts` plus its UI dictionary in `apps/demo/src/lib/docs/ui.ts`, and a `localeMap` entry in `apps/demo/src/app/api/search/route.ts` so search uses the right stemmer.
 
-> **French is currently 100% translated** (20/20 pages). Adding a new English page without its `.fr.mdx` twin silently drops that page back to English for French readers — please add both, or flag it in the PR so a translator can pick it up.
+> **French is currently 100% translated** (23/23 pages). Adding a new English page without its `.fr.mdx` twin silently drops that page back to English for French readers — please add both, or flag it in the PR so a translator can pick it up.
 
 ### Before you open the PR
 
@@ -140,10 +144,15 @@ is the smallest). The pieces that matter:
 4. **Register in release-please** — add the package to
    `release-please-config.json` (release-type `node`, `bump-minor-pre-major`)
    and to `.release-please-manifest.json` with the pre-first-release
-   placeholder version `"0.0.0"` (the post-release npm check knows to skip it).
+   placeholder version `"0.0.0"` (the post-release npm check knows to skip it;
+   the root `initial-version` makes the first release `0.1.0`).
 5. **Wire `.github/workflows/release.yml`** (4 spots — copy an existing
    publish job): the `release_created` output, the build-artifact path, the
-   publish job itself, and the `verify-publish` needs list.
+   publish job itself, and the `verify-publish` needs list. A package that
+   depends on another published workspace package (`workspace:^`) also needs
+   a step pinning that range before `npm publish` (`npm pkg set`, as in
+   `publish-adapter-prisma`), and its publish job must list the dependency's
+   publish job in `needs` (`check:consistency` fails if either is missing).
 6. **Verify** — `bun install`, then `bun run verify && bun run pkg-checks && bun run check:consistency`.
 
 The publint/attw gates and pkg-pr-new previews derive their package list from
@@ -204,13 +213,13 @@ Re-export the error types for consumer convenience, and use
 - **TypeScript strict mode** with `exactOptionalPropertyTypes` enabled.
 - **Conventional Commits** for all commit messages: `type(scope): description`.
   - Examples: `feat(widget): add color picker`, `fix(cli): handle missing config`.
-- **i18n** — Built-in locales: English (default), French, German, Spanish, Italian, Brazilian Portuguese, Russian. See [Adding a Locale](#adding-a-locale) below.
+- **i18n** — Built-in locales: English (default), French, German, Spanish, Italian, Brazilian Portuguese, Russian, Japanese. See [Adding a Locale](#adding-a-locale) below.
 - Keep functions small and focused. Prefer composition over inheritance.
 
 ## Adding a Locale
 
 The widget and the dashboard share the same set of built-in locales (`en`,
-`fr`, `de`, `es`, `it`, `pt`, `ru` — the single source of truth is
+`fr`, `de`, `es`, `it`, `pt`, `ru`, `ja` — the single source of truth is
 `BUILTIN_LOCALES` in `packages/core/src/types.ts`). Unknown locales fall
 back to English. This is the friendliest first contribution, and the
 compiler + tests do most of the review:
@@ -245,9 +254,13 @@ automatically (lazy-load, key parity, non-empty values, placeholder parity).
 ### 4. Update the user-facing lists
 
 Update the locale count/list in the docs site (`apps/demo/content/docs/widget/i18n.mdx`
-and `dashboard/index.mdx`, + their `.fr.mdx` twins), the two package READMEs
-and the root README. `bun run check:consistency` (run by CI) points at any
-count you missed.
+and `dashboard/index.mdx`, + their `.fr.mdx` twins), the two package READMEs,
+the root README, `CLAUDE.md`, this file, the `locale` JSDoc in
+`packages/core/src/types.ts`, the landing page (`apps/demo/src/components/landing/`)
+and the two demo locale pickers (`LOCALES` in `apps/demo/src/app/(site)/demo/`).
+`bun run check:consistency` (run by CI) flags, in those files, a stale
+"N locales" count, a list of locale codes or English language names that
+misses the new locale, and a picker that does not offer it.
 
 > **Custom locales without a PR:** both packages export `registerLocale`,
 > which accepts **partial** dictionaries — end users can override a single
@@ -262,6 +275,12 @@ count you missed.
   an invalid config that must NOT compile, an inferred return type that must
   not widen. See `packages/core/__tests__/contracts.test-d.ts`.
 - **E2E tests** — Playwright. Place in the `e2e/` directory at the root.
+  They load the built packages, so run `bun run build` first. Two servers
+  back them: `e2e/server.mjs`, a hand-written fake API for widget UI flows
+  (`widget.spec.ts`, `host-modal.spec.ts`), and `e2e/stack-server.mjs`, the
+  real `createSitepingHandler` over a `MemoryStore` with a webhook receiver,
+  serving the widget and `<SitepingInbox />` (`stack.spec.ts`). Anything the
+  server validates, persists or dispatches belongs on the real stack.
 - **Property tests** — [fast-check](https://fast-check.dev/), in `*.property.test.ts` next to the example-based suite.
 - Cover new features with unit tests. Cover user-facing flows with E2E tests when relevant.
 

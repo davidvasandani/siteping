@@ -10,10 +10,10 @@ description: A production store on PostgreSQL or Turso / libSQL through Drizzle 
 | `@siteping/adapter-drizzle/pg` | PostgreSQL | Any Drizzle PostgreSQL driver — node-postgres, postgres.js, Neon (serverless and HTTP), Vercel Postgres, Supabase, PGlite… |
 | `@siteping/adapter-drizzle/libsql` | Turso / libSQL | `drizzle-orm/libsql` only — Turso remote, embedded replicas, local files |
 
-It requires Node 20+ and `drizzle-orm` 0.45 or later (below 1.0), a peer dependency:
+It requires Node 20+ and `drizzle-orm` 0.45 or later (below 1.0), a peer dependency. `@siteping/server` serves the store over HTTP (step 3):
 
 ```bash
-npm i @siteping/adapter-drizzle drizzle-orm
+npm i @siteping/adapter-drizzle @siteping/server drizzle-orm
 ```
 
 Add your database driver (`pg`, `postgres`, `@neondatabase/serverless`, `@electric-sql/pglite`, `@libsql/client`…) and `drizzle-kit` for migrations.
@@ -101,11 +101,11 @@ export const store = createLibSQLSitepingStore(
 
 ## 3. Serve it
 
-The store is storage only. Mount it behind `createSitepingHandler({ store })` from `@siteping/adapter-prisma` — the handler takes any store ([using a custom store](/docs/adapters/prisma#using-a-custom-store)) — to get the same validation, auth, CORS, redaction and webhooks:
+The store is storage only. Mount it behind `createSitepingHandler({ store })` from [`@siteping/server`](/docs/server) to get validation, auth, CORS, redaction and webhooks:
 
 ```ts
 // app/api/siteping/route.ts
-import { createSitepingHandler } from "@siteping/adapter-prisma";
+import { createSitepingHandler } from "@siteping/server";
 import { store } from "@/lib/siteping-store";
 
 export const { GET, POST, PATCH, DELETE, OPTIONS } = createSitepingHandler({
@@ -113,8 +113,6 @@ export const { GET, POST, PATCH, DELETE, OPTIONS } = createSitepingHandler({
   apiKey: process.env.SITEPING_API_KEY,
 });
 ```
-
-Given a `store`, the handler never touches Prisma. `@siteping/adapter-prisma` still declares `@prisma/client` as a required peer dependency, though, so npm, pnpm and Bun install it anyway ([#306](https://github.com/NeosiaNexus/SitePing/issues/306)); a store-only handler package is planned ([#314](https://github.com/NeosiaNexus/SitePing/issues/314)).
 
 ## Options
 
@@ -137,7 +135,9 @@ Both factories take the same options:
 - `mimeType` is the media type the data URL declares — `image/jpeg`, `image/png` or `image/webp`, lowercased. Anything else (an SVG, which is script-capable when served inline, or no type at all) is reported as `image/jpeg`, the widget's capture format. Use it as the object's `Content-Type`.
 - If `upload` throws, the feedback is still saved with `screenshotUrl: null`, and the failure goes to the `logger`.
 
-**The returned URL must be unique to `feedbackId`.** Key objects by it — never by a content hash or a fixed name. The store treats each URL as owned by the one feedback that stores it and may pass it to `delete` without coordinating with concurrent creates; a URL shared by several feedbacks can lose an object another feedback still points at.
+**The returned URL must be unique to the upload.** Key objects by a fresh random value — never by a content hash, a fixed name or `feedbackId` alone. `feedbackId` happens to be unique per attempt with this store, but a `ScreenshotStorage` does not know which store calls it: passed to [Prisma](/docs/adapters/prisma), where `feedbackId` is the client's `clientId`, an object keyed by it is rewritten by every retry. The store treats each URL as owned by the one feedback that stores it and may pass it to `delete` without coordinating with concurrent creates; a URL shared by several feedbacks can lose an object another feedback still points at.
+
+**Ready-made storage.** [`@siteping/screenshot-storage`](/docs/adapters/screenshot-storage) provides a `screenshotStorage` for S3-compatible buckets, Cloudflare Images or your disk, with random keys and deletes scoped to its own objects. Its `/drizzle-pg` and `/drizzle-libsql` entries can also keep screenshots in a table of this same database, for small or self-contained deployments; in production, object storage is the better choice.
 
 **Cleanup.** Add an optional `delete(url)` and the store removes screenshots it no longer needs: on `deleteFeedback`, on `deleteAllFeedbacks`, when a submission loses a race against a duplicate of itself (it uploaded its own object, now an orphan — discarded even when reading the winning submission back then fails), and when an insert fails. Before any delete it checks that no stored feedback still references the URL — an insert reported as failed may have committed after all — and if that check itself fails, every object is kept. Deletes run at most 8 at a time, so a project delete freeing thousands of objects does not flood your storage. Cleanup is best-effort: a failing `delete` is logged and never fails the operation. Inline `data:` URLs are never passed to `delete`.
 

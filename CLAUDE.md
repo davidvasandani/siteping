@@ -11,16 +11,18 @@
 - `bun run lint:fix` — biome auto-fix
 - `bun run verify` — build + check + lint + test:run (the full pre-PR gate)
 - `bun run pkg-checks` — publint + attw over published packages (list derived from release-please manifest)
-- `bun run check:consistency` — locale counts, package registration, fix-dts chains, esbuild override = widget spec, `fileURLToPath` (never a file URL's `.pathname`) in Node tooling (runs in CI)
+- `bun run check:consistency` — locale counts and lists, demo locale pickers, package registration, fix-dts chains, esbuild override = widget spec, `fileURLToPath` (never a file URL's `.pathname`) in Node tooling, no `@prisma/client` import in adapter-prisma's src (optional peer), every published `workspace:` dependency pinned in release.yml with its publish job waiting for the dependency's (runs in CI)
 - `bun run new:locale <code>` / `bun run new:adapter <name>` — scaffolds (see CONTRIBUTING)
 
 ## Architecture
-- **Monorepo** with bun workspaces — 9 packages in `packages/`:
+- **Monorepo** with bun workspaces — 11 packages in `packages/`:
   - `@siteping/core` — shared types, schema, store errors + helpers (internal, not published, no release-please entry, no npm publish job)
   - `@siteping/widget` — browser feedback widget (Shadow DOM, closed mode). Accepts `store` option for client-side mode (no server needed)
   - `@siteping/dashboard` — Linear-style triage inbox React component (`<SitepingInbox />` + headless `useSitepingInbox()`); no Shadow DOM — scoped `spd-` classes + `--spd-*` CSS vars injected once
-  - `@siteping/adapter-prisma` — server-side Prisma request handlers
-  - `@siteping/adapter-drizzle` — Drizzle ORM store: `/pg` (any PostgreSQL driver, Neon HTTP included) and `/libsql` (Turso); `drizzle-orm` peer, mounted through adapter-prisma's `createSitepingHandler({ store })`
+  - `@siteping/server` — store-agnostic HTTP handler (`createSitepingHandler({ store })`, Fetch API, platform neutral): `apiKey` policy XOR custom `access` (CSRF guards), hooks, `waitUntil`; owns the request schemas and webhooks
+  - `@siteping/adapter-prisma` — PrismaStore + `createSitepingHandler` delegating to `@siteping/server` (`workspace:^` dependency, pinned by release.yml at publish; its publish job waits for the idempotent `publish-server`); `@prisma/client` optional peer
+  - `@siteping/adapter-drizzle` — Drizzle ORM store: `/pg` (any PostgreSQL driver, Neon HTTP included) and `/libsql` (Turso); `drizzle-orm` peer, mounted through `@siteping/server`
+  - `@siteping/screenshot-storage` — ready-made `ScreenshotStorage` for the stores: `createScreenshotStorage(objectStore)` over `/s3` (SigV4 on Web Crypto, no AWS SDK), `/cloudflare-images`, `/drizzle-pg`, `/drizzle-libsql`, `/filesystem` (the only Node entry) and `/memory`, plus `createScreenshotServeHandler` (own keys only, inert images inline); random key per upload, `drizzle-orm` optional peer
   - `@siteping/adapter-memory` — in-memory adapter (testing, demos, serverless)
   - `@siteping/adapter-localstorage` — client-side localStorage adapter (demos, prototyping)
   - `@siteping/adapter-kit` — published toolkit for third-party adapters: store contract, `createCollectionStore` engine, record builders, conformance suite (`/testing`, vitest optional peer)
@@ -35,6 +37,6 @@
 ## Code Style
 - TypeScript strict mode with exactOptionalPropertyTypes
 - Conventional Commits: `type(scope): description`
-- i18n: built-in locales = en (default), fr, de, es, it, pt (Brazilian), ru — same set in widget and dashboard (each has its own `src/i18n/`). Primary audience is French freelance clients; other locales are community contributions. See CONTRIBUTING.md "Adding a Locale" before adding more.
+- i18n: built-in locales = en (default), fr, de, es, it, pt (Brazilian), ru, ja — same set in widget and dashboard (each has its own `src/i18n/`). Primary audience is French freelance clients; other locales are community contributions. See CONTRIBUTING.md "Adding a Locale" before adding more.
 - Feedback statuses: `open` / `in_progress` / `resolved` / `wont_fix` (`FEEDBACK_STATUSES` in core). `resolvedAt` = closure timestamp for `resolved` AND `wont_fix` (`isClosedStatus()`), derived at the edge via `toFeedbackUpdate(status)` (HTTP handler / dashboard), never inside store adapters. `FeedbackUpdateInput` is a union enforcing the pairing. Widget actions stay binary (resolve/reopen).
 - Key type contracts (compile locks + `*.test-d.ts`): `SitepingConfig` = HTTP XOR store union; dashboard options = source/store/endpoint XOR union; `FeedbackResponse` derived from `FeedbackRecord` via `Serialized<T>` (never hand-write wire types); `SITEPING_MODELS` locked to record keys; adding a locale to `BUILTIN_LOCALES` breaks compilation until both packages' loader maps + dictionaries exist.

@@ -8,7 +8,7 @@ const faqs: { q: string; a: ReactNode }[] = [
   },
   {
     q: "Does it work with frameworks other than Next.js?",
-    a: "The widget is framework-agnostic — it works with React, Vue, Svelte, Astro, or vanilla JavaScript. The CLI currently scaffolds Next.js API routes, but the adapter works with any server that handles standard Request/Response.",
+    a: "The widget is framework-agnostic — it works with React, Vue, Svelte, Astro, or vanilla JavaScript. The CLI currently scaffolds Next.js API routes, but the server handler (@siteping/server) works with any framework that handles standard Request/Response — Hono, Express, Remix, SvelteKit and more.",
   },
   {
     q: "What happens when the page layout changes?",
@@ -41,7 +41,7 @@ const faqs: { q: string; a: ReactNode }[] = [
   },
   {
     q: "Can I customize the widget appearance?",
-    a: "Yes — accent color, position (bottom-right or bottom-left), theme (light, dark, auto), and 7 built-in locales (English, French, German, Spanish, Italian, Portuguese, Russian) plus registerLocale for your own. Try every option live on the demo.",
+    a: "Yes — accent color, position (bottom-right or bottom-left), theme (light, dark, auto), and 8 built-in locales (English, French, German, Spanish, Italian, Portuguese, Russian, Japanese) plus registerLocale for your own. Try every option live on the demo.",
   },
   {
     q: "Is it accessible?",

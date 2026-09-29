@@ -1,4 +1,5 @@
 import { type APIRequestContext, expect, type Page, type TestInfo, test } from "@playwright/test";
+import type { FeedbackPayload, FeedbackResponse, FeedbackResponseList } from "../packages/core/src/index.js";
 
 /**
  * Real-stack E2E — the widget and the dashboard against the real
@@ -11,29 +12,28 @@ import { type APIRequestContext, expect, type Page, type TestInfo, test } from "
 const ORIGIN = "http://localhost:3998";
 const API = `${ORIGIN}/api/siteping`;
 
-/** One project per test — the store is shared, so this is the isolation. */
+/**
+ * One project per test attempt — the store is shared and never reset, so this
+ * is the isolation. Retries and `--repeat-each` runs start from an empty project.
+ */
 function projectFor(testInfo: TestInfo): string {
-  return `stack-${testInfo.project.name}-${testInfo.testId}`;
+  return `stack-${testInfo.project.name}-${testInfo.testId}-${testInfo.repeatEachIndex}-${testInfo.retry}`;
 }
 
-interface StoredFeedback {
-  id: string;
-  message: string;
-  status: string;
-  resolvedAt: string | null;
-  clientId?: string;
-  annotations: { xPct: number; yPct: number; wPct: number; hPct: number; scrollX: number }[];
-  diagnostics: { console: unknown[]; network: unknown[] } | null;
-}
-
-async function listFeedbacks(request: APIRequestContext, projectName: string): Promise<StoredFeedback[]> {
+async function listFeedbacks(request: APIRequestContext, projectName: string): Promise<FeedbackResponse[]> {
   const res = await request.get(`${API}?projectName=${encodeURIComponent(projectName)}&limit=100`);
   expect(res.ok()).toBe(true);
-  return ((await res.json()) as { feedbacks: StoredFeedback[] }).feedbacks;
+  return ((await res.json()) as FeedbackResponseList).feedbacks;
+}
+
+/** Generic-webhook bodies received for `projectName`, in arrival order. */
+async function receivedWebhooks(request: APIRequestContext, projectName: string): Promise<FeedbackResponse[]> {
+  const res = await request.get(`${ORIGIN}/__e2e/webhooks?projectName=${encodeURIComponent(projectName)}`);
+  return (await res.json()) as FeedbackResponse[];
 }
 
 /** Create a feedback through the real POST route (full schema validation). */
-async function seed(request: APIRequestContext, projectName: string, message: string): Promise<StoredFeedback> {
+async function seed(request: APIRequestContext, projectName: string, message: string): Promise<FeedbackResponse> {
   const res = await request.post(API, {
     data: {
       projectName,
@@ -46,10 +46,10 @@ async function seed(request: APIRequestContext, projectName: string, message: st
       authorEmail: "seed@example.com",
       annotations: [],
       clientId: `seed-${Math.random().toString(36).slice(2)}`,
-    },
+    } satisfies FeedbackPayload,
   });
   expect(res.status()).toBe(201);
-  return (await res.json()) as StoredFeedback;
+  return (await res.json()) as FeedbackResponse;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,7 +110,7 @@ async function annotateAndSend(page: Page, message: string) {
 // ---------------------------------------------------------------------------
 
 test.describe("Widget against the real handler", () => {
-  test("a drawn annotation passes real validation, persists, and notifies the webhook once", async ({
+  test("a drawn annotation passes real validation, persists, and notifies the webhook once, replay included", async ({
     page,
     request,
   }, testInfo) => {
@@ -119,7 +119,8 @@ test.describe("Widget against the real handler", () => {
 
     const response = await annotateAndSend(page, "Real stack bug");
     expect(response.status()).toBe(201);
-    expect(await response.json()).not.toHaveProperty("clientId");
+    const created = (await response.json()) as FeedbackResponse;
+    expect(created).not.toHaveProperty("clientId");
 
     const [stored] = await listFeedbacks(request, project);
     expect(stored?.message).toBe("Real stack bug");
@@ -130,13 +131,24 @@ test.describe("Widget against the real handler", () => {
       expect(v).toBeLessThanOrEqual(1);
     }
 
-    // Fire-and-forget dispatch: poll until it lands, then check it's alone.
-    await expect
-      .poll(async () => (await (await request.get(`${ORIGIN}/__e2e/webhooks?projectName=${project}`)).json()).length)
-      .toBe(1);
-    const [hook] = await (await request.get(`${ORIGIN}/__e2e/webhooks?projectName=${project}`)).json();
-    expect(hook.message).toBe("Real stack bug");
+    // Fire-and-forget dispatch: poll until it lands.
+    await expect.poll(async () => (await receivedWebhooks(request, project)).length).toBe(1);
+    const [hook] = await receivedWebhooks(request, project);
+    expect(hook?.message).toBe("Real stack bug");
     expect(hook).not.toHaveProperty("clientId");
+
+    // The widget's retry path: the same submission (same clientId) again
+    // answers with the stored record, and must neither insert nor notify.
+    const replay = await request.post(API, { data: response.request().postDataJSON() });
+    expect(replay.status()).toBe(201);
+    expect(((await replay.json()) as FeedbackResponse).id).toBe(created.id);
+    // Dispatch starts before the handler answers, so any webhook the replay
+    // sent was on its way before the barrier's: wait for the barrier's.
+    await seed(request, project, "Barrier");
+    const messages = async () => (await receivedWebhooks(request, project)).map((w) => w.message);
+    await expect.poll(messages).toContain("Barrier");
+    expect(await messages()).toEqual(["Real stack bug", "Barrier"]);
+    expect(await listFeedbacks(request, project)).toHaveLength(2);
   });
 
   test("an annotation from a horizontally scrolled RTL page is accepted (negative scrollX)", async ({
@@ -154,18 +166,20 @@ test.describe("Widget against the real handler", () => {
     expect(stored?.annotations[0]?.scrollX).toBeLessThan(0);
   });
 
-  test("a diagnostics buffer configured above the server cap still submits", async ({ page, request }, testInfo) => {
+  test("diagnostics buffers configured above the server caps still submit", async ({ page, request }, testInfo) => {
     const project = projectFor(testInfo);
-    // The launcher's own docs example: maxConsoleEntries 200 (server cap: 50).
+    // Larger limits clamp to the server's caps: 50 console and 20 network entries.
     await openWidgetPage(page, { project, diag: "200" });
-    await page.evaluate(() => {
+    await page.evaluate(async () => {
       for (let i = 0; i < 120; i++) console.error(`noisy log ${i}`);
+      await Promise.all(Array.from({ length: 30 }, (_, i) => fetch(`/missing-${i}`)));
     });
 
     const response = await annotateAndSend(page, "With diagnostics");
     expect(response.status()).toBe(201);
     const [stored] = await listFeedbacks(request, project);
     expect(stored?.diagnostics?.console).toHaveLength(50);
+    expect(stored?.diagnostics?.network).toHaveLength(20);
   });
 
   test("the panel loads from an endpoint that already carries a query string", async ({ page, request }, testInfo) => {
@@ -209,6 +223,7 @@ test.describe("Dashboard inbox against the real handler", () => {
     await expect(rowMessages(page)).toHaveText(["Resolve me"]);
 
     const patched = page.waitForResponse((r) => r.url().startsWith(API) && r.request().method() === "PATCH");
+    const beforeResolve = Date.now();
     await page.locator(".spd-list").focus();
     await page.keyboard.press("j");
     await page.keyboard.press("e");
@@ -218,7 +233,8 @@ test.describe("Dashboard inbox against the real handler", () => {
     const [stored] = await listFeedbacks(request, project);
     expect(stored?.id).toBe(seeded.id);
     expect(stored?.status).toBe("resolved");
-    expect(stored?.resolvedAt).not.toBeNull();
+    // The closure timestamp is derived by the handler, not sent by the dashboard.
+    expect(Date.parse(stored?.resolvedAt ?? "")).toBeGreaterThanOrEqual(beforeResolve);
   });
 
   test("a failed change rolls back only its own row, not a concurrent success", async ({ page, request }, testInfo) => {
@@ -229,7 +245,7 @@ test.describe("Dashboard inbox against the real handler", () => {
     await expect(rowMessages(page)).toHaveText(["Will fail", "Will succeed"]);
 
     // Hold the first PATCH (for "Will fail") until the second one has been
-    // answered by the real server, then fail it — the D1 interleaving.
+    // answered by the real server, then fail it.
     let releaseFailure!: () => void;
     const secondDone = new Promise<void>((resolve) => {
       releaseFailure = resolve;

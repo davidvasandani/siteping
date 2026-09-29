@@ -14,10 +14,12 @@
  *   /__e2e/webhook  → generic-webhook receiver; GET /__e2e/webhooks lists
  *                     what it received, for assertions.
  *
- * Tests isolate by project name (one per test), so no global reset is needed
+ * Tests isolate by project name, one per test attempt (retry and repeat-each
+ * included — see `projectFor` in stack.spec.ts), so no global reset is needed
  * and specs can run in parallel against the shared store.
  *
- * Requires `bun run build` (widget, dashboard, adapter-prisma, adapter-memory).
+ * Requires `bun run build` (widget, dashboard, adapter-prisma and the
+ * @siteping/server it imports, adapter-memory).
  */
 import { existsSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -80,14 +82,17 @@ const inboxBundle = (
 function widgetPage(params) {
   const project = params.get("project") ?? "e2e-stack";
   const rtl = params.get("rtl") === "1";
+  const diag = Number(params.get("diag"));
   const config = {
     endpoint: params.get("endpoint") ?? "/api/siteping",
     projectName: project,
     forceShow: true,
     // Skips the identity modal — the submission path is what's under test.
     identity: { name: "E2E Tester", email: "e2e@example.com" },
-    ...(params.get("diag") ? { captureDiagnostics: { maxConsoleEntries: Number(params.get("diag")) } } : {}),
+    ...(diag ? { captureDiagnostics: { maxConsoleEntries: diag, maxNetworkEntries: diag } } : {}),
   };
+  // Inlined into a <script>: `<` is escaped so a query param can neither
+  // close the element (`</script>`) nor open a `<!--`.
   return `<!DOCTYPE html>
 <html lang="en"${rtl ? ' dir="rtl"' : ""}>
 <head>
@@ -108,7 +113,7 @@ function widgetPage(params) {
   <script>globalThis.process = { env: { NODE_ENV: "test" } };</script>
   <script type="module">
     import { initSiteping } from "/widget.js";
-    window.__siteping = initSiteping(${JSON.stringify(config)});
+    window.__siteping = initSiteping(${JSON.stringify(config).replace(/</g, "\\u003c")});
   </script>
 </body>
 </html>`;
@@ -190,4 +195,5 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => console.log(`[stack-server] listening on ${ORIGIN}`));
+// Loopback only: the API is unauthenticated and destructive methods are open.
+server.listen(PORT, "127.0.0.1", () => console.log(`[stack-server] listening on ${ORIGIN}`));

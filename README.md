@@ -50,7 +50,7 @@ Stop chasing client feedback across Slack threads, email chains, and Notion docs
 - **Instant right-click comments** — opt-in, and it never hijacks keyboard or modifier-key context menus
 - **Screenshots + diagnostics** — opt-in JPEG of the annotated area (with privacy masking) and console/network capture
 - **Panel actions** — your own buttons and links in the feedback detail view: create a ticket, hand a feedback to an agent, open it in your tracker
-- **Triage inbox** — `<SitepingInbox />` (`@siteping/dashboard`): Linear-style, keyboard-first, light/dark, 7 locales
+- **Triage inbox** — `<SitepingInbox />` (`@siteping/dashboard`): Linear-style, keyboard-first, light/dark, 8 locales
 - **Reliability built in** — retry with backoff plus a localStorage queue; a flaky network never loses a comment
 - **Shadow DOM isolation** — widget CSS never leaks into your site, and your site CSS never breaks the widget
 - **Dev-only by default** — auto-hides in production builds unless `forceShow: true`
@@ -92,8 +92,10 @@ The full documentation lives at **[siteping.dev/docs](https://siteping.dev/docs)
 |---|---|---|
 | [`@siteping/widget`](./packages/widget) | The feedback widget (framework-agnostic + React hook) | [Widget](https://siteping.dev/docs/widget) · [Configuration](https://siteping.dev/docs/widget/configuration) · [Screenshots](https://siteping.dev/docs/widget/screenshots) |
 | [`@siteping/dashboard`](./packages/dashboard) | Triage inbox component + headless hook | [Dashboard](https://siteping.dev/docs/dashboard) · [Theming](https://siteping.dev/docs/dashboard/theming) |
-| [`@siteping/adapter-prisma`](./packages/adapter-prisma) | Production server adapter (auth, CORS, webhooks) | [Prisma adapter](https://siteping.dev/docs/adapters/prisma) |
+| [`@siteping/server`](./packages/server) | HTTP endpoint over any store, any framework (auth, CORS, hooks, webhooks) | [Server](https://siteping.dev/docs/server) |
+| [`@siteping/adapter-prisma`](./packages/adapter-prisma) | Production server adapter: the endpoint with a Prisma store built in | [Prisma adapter](https://siteping.dev/docs/adapters/prisma) |
 | [`@siteping/adapter-drizzle`](./packages/adapter-drizzle) | Drizzle ORM store (PostgreSQL, Turso/libSQL) | [Drizzle adapter](https://siteping.dev/docs/adapters/drizzle) |
+| [`@siteping/screenshot-storage`](./packages/screenshot-storage) | Screenshot storage for the stores (S3-compatible, Cloudflare Images, database, filesystem, custom) | [Screenshot storage](https://siteping.dev/docs/adapters/screenshot-storage) |
 | [`@siteping/adapter-memory`](./packages/adapter-memory) | In-memory store (tests, demos) | [Memory adapter](https://siteping.dev/docs/adapters/memory) |
 | [`@siteping/adapter-localstorage`](./packages/adapter-localstorage) | Client-side store (zero server) | [localStorage adapter](https://siteping.dev/docs/adapters/localstorage) |
 | [`@siteping/cli`](./packages/cli) | `init` / `sync` / `status` / `doctor` | [CLI](https://siteping.dev/docs/cli) |

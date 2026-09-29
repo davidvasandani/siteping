@@ -4,8 +4,10 @@
 //   1. a locale exists in core's BUILTIN_LOCALES without its dictionary
 //      file in the widget AND dashboard i18n directories (the TS loader map
 //      already enforces the loader entries at compile time);
-//   2. a doc/README states a "N built-in locales" count that no longer
-//      matches BUILTIN_LOCALES.length;
+//   2. a doc/README/landing page states a "N built-in locales" count that
+//      no longer matches BUILTIN_LOCALES.length or lists the locales without
+//      one of them, or a demo locale picker does not offer exactly
+//      BUILTIN_LOCALES;
 //   3. a non-private packages/* package is missing from the release-please
 //      config/manifest, or a manifest package is missing its release.yml
 //      wiring (output + publish job);
@@ -13,7 +15,12 @@
 //      declarations need (cli is exempt: it ships no .d.ts);
 //   5. the root esbuild override drifted from the widget's esbuild spec;
 //   6. Node tooling (configs, scripts/, e2e/) takes a filesystem path from a
-//      file URL's .pathname instead of fileURLToPath().
+//      file URL's .pathname instead of fileURLToPath();
+//   7. adapter-prisma's source imports @prisma/client, which it declares as
+//      an optional peer dependency;
+//   8. a published package depends on another through `workspace:` without
+//      the release.yml step that pins the range before `npm publish`, or
+//      its publish job does not wait for the dependency's.
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -41,24 +48,86 @@ for (const code of locales) {
   }
 }
 
-/** Every file that may state a locale count. */
-const localeCountFiles = ["README.md", ...readdirSync(join(root, "packages")).map((p) => `packages/${p}/README.md`)];
-const walk = (dir) =>
+/** Every file that may state a locale count or list the locales. */
+const localeDocFiles = [
+  "README.md",
+  "CLAUDE.md",
+  "CONTRIBUTING.md",
+  "packages/core/src/types.ts",
+  ...readdirSync(join(root, "packages")).map((p) => `packages/${p}/README.md`),
+];
+const walk = (dir, ext) =>
   readdirSync(join(root, dir), { withFileTypes: true }).flatMap((e) =>
-    e.isDirectory() ? walk(`${dir}/${e.name}`) : e.name.endsWith(".mdx") ? [`${dir}/${e.name}`] : [],
+    e.isDirectory() ? walk(`${dir}/${e.name}`, ext) : e.name.endsWith(ext) ? [`${dir}/${e.name}`] : [],
   );
-if (existsSync(join(root, "apps/demo/content/docs"))) {
-  localeCountFiles.push(...walk("apps/demo/content/docs"));
+for (const [dir, ext] of [
+  ["apps/demo/content/docs", ".mdx"],
+  ["apps/demo/src", ".tsx"],
+]) {
+  if (existsSync(join(root, dir))) localeDocFiles.push(...walk(dir, ext));
 }
 
-for (const file of localeCountFiles) {
+const englishName = new Intl.DisplayNames(["en"], { type: "language" });
+// A standalone code or name: `fr` or "French", not the fr of fr-CA or fr_FR.
+const mentionRe = (word) =>
+  new RegExp(`(?<![\\p{L}\\p{N}_-])${word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}\\p{N}_-])`, "gu");
+// What separates two entries of a locale list: a closing backtick or
+// parenthesis, an optional note ("(default)", "(`fr`)"), a comma and/or
+// "and"/"et", then the words that may lead the next entry ("French (`fr`)",
+// "Brazilian Portuguese").
+const LIST_SEPARATOR =
+  /^[`)]*(?:\s*\([^()\n]*\))?\s*(?:,\s*(?:(?:and|et)\s+)?|(?:and|et)\s+)(?:[\p{L} ]+\(|\p{Lu}\p{L}*\s)?`?$/u;
+
+for (const file of localeDocFiles) {
   if (!existsSync(join(root, file))) continue;
   const content = read(file);
-  // EN docs say "7 built-in locales", FR docs "7 locales intégrées".
-  for (const m of content.matchAll(/(\d+)\s+(?:built-in locales|locales intégrées)/gi)) {
+  // EN docs say "7 built-in locales", FR docs "7 locales intégrées", the root
+  // README "7 locales", the landing page "7 languages built in".
+  for (const m of content.matchAll(/(\d+)\s+(?:(?:built-in\s+)?locales\b|languages built in)/gi)) {
     if (Number(m[1]) !== locales.length) {
       errors.push(`${file} claims "${m[0]}" but BUILTIN_LOCALES has ${locales.length} entries`);
     }
+  }
+  // Locale codes (`fr`) or English names (French) chained by list separators
+  // form a locale list. A list that names most built-in locales enumerates
+  // them, so it must name every one; a shorter one ("`fr` and `ru`") is an
+  // example.
+  for (const name of [(code) => code, (code) => englishName.of(code)]) {
+    const mentions = locales
+      .flatMap((code) =>
+        [...content.matchAll(mentionRe(name(code)))].map((m) => ({ code, index: m.index, end: m.index + m[0].length })),
+      )
+      .sort((a, b) => a.index - b.index);
+    const lists = [];
+    for (const [i, { code, index }] of mentions.entries()) {
+      if (i > 0 && LIST_SEPARATOR.test(content.slice(mentions[i - 1].end, index))) lists.at(-1).codes.add(code);
+      else lists.push({ index, codes: new Set([code]) });
+    }
+    for (const { index, codes } of lists) {
+      if (codes.size * 2 <= locales.length) continue;
+      const missing = locales.filter((code) => !codes.has(code));
+      if (missing.length > 0) {
+        const line = content.slice(0, index).split("\n").length;
+        errors.push(`${file}:${line} lists the built-in locales without ${missing.map(name).join(", ")}`);
+      }
+    }
+  }
+}
+
+// The demo's locale pickers are hand-written lists (each option carries its
+// native label), so each must offer exactly the built-in set.
+for (const file of [
+  "apps/demo/src/app/(site)/demo/playground.tsx",
+  "apps/demo/src/app/(site)/demo/inbox/demo-inbox.tsx",
+]) {
+  const list = existsSync(join(root, file)) ? read(file).match(/const LOCALES = \[([\s\S]*?)\] as const;/) : null;
+  if (!list) {
+    errors.push(`Could not find the LOCALES picker list in ${file}`);
+    continue;
+  }
+  const codes = [...list[1].matchAll(/(?:code: |\[)"([a-z-]+)"/g)].map((m) => m[1]);
+  if ([...codes].sort().join() !== [...locales].sort().join()) {
+    errors.push(`${file} offers the locales [${codes.join(", ")}] but BUILTIN_LOCALES is [${locales.join(", ")}]`);
   }
 }
 
@@ -163,6 +232,61 @@ for (const dir of toolingDirs) {
       errors.push(
         `${file}:${line} takes a filesystem path from a file URL's .pathname — use fileURLToPath() (node:url)`,
       );
+    }
+  }
+}
+
+// --- 7. @prisma/client stays an optional peer --------------------------------
+
+// Stores other than Prisma mount through adapter-prisma too, so its
+// @prisma/client peer is optional (#306): npm, pnpm and Bun then leave it
+// out. That is only safe while the source never imports it — not even as a
+// type, which would leave an import the consumer may not resolve in the
+// published declarations. The client shape is structural on purpose
+// (SitepingPrismaClient).
+const PRISMA_CLIENT_IMPORT = /(?:\bfrom|\bimport|\brequire)\s*\(?\s*["']@prisma\/client(?:\/[^"']*)?["']/;
+const prismaSourceFiles = (dir) =>
+  readdirSync(join(root, dir), { withFileTypes: true }).flatMap((e) =>
+    e.isDirectory() ? prismaSourceFiles(`${dir}/${e.name}`) : /\.[cm]?tsx?$/.test(e.name) ? [`${dir}/${e.name}`] : [],
+  );
+for (const file of prismaSourceFiles("packages/adapter-prisma/src")) {
+  if (PRISMA_CLIENT_IMPORT.test(read(file))) {
+    errors.push(`${file} imports @prisma/client — adapter-prisma declares it as an optional peer (#306)`);
+  }
+}
+
+// --- 8. Workspace dependencies are pinned before publishing ------------------
+
+// Bun links a `workspace:` range to the local package whatever its version
+// (a semver range stops matching as soon as release-please bumps it), but
+// `npm publish` ships the protocol verbatim, which npm cannot install. The
+// publish job must rewrite each one — `npm pkg set "dependencies.<name>=…"`
+// — and run after the dependency's, so the pinned version is on npm first.
+
+/** release.yml jobs: name → the lines indented under it. */
+const releaseJobs = [...releaseYml.matchAll(/^ {2}([\w-]+):\n((?: {4}.*\n|\s*\n)*)/gm)].map((m) => ({
+  name: m[1],
+  body: m[2],
+}));
+const publishJobOf = (pkgPath) => releaseJobs.find(({ body }) => body.includes(`working-directory: ${pkgPath}\n`));
+/** Jobs a release.yml job waits for (`needs: [a, b]` or `needs: a`). */
+const needsOf = (job) => job?.body.match(/^ {4}needs: \[?([^\]\n]*)/m)?.[1].split(/,\s*/) ?? [];
+const pkgPathByName = new Map(
+  Object.keys(manifest).map((pkgPath) => [JSON.parse(read(`${pkgPath}/package.json`)).name, pkgPath]),
+);
+
+for (const pkgPath of Object.keys(manifest)) {
+  const pkg = JSON.parse(read(`${pkgPath}/package.json`));
+  for (const field of ["dependencies", "optionalDependencies", "peerDependencies"]) {
+    for (const [name, spec] of Object.entries(pkg[field] ?? {})) {
+      if (!spec.startsWith("workspace:")) continue;
+      if (!releaseYml.includes(`npm pkg set "${field}.${name}=`)) {
+        errors.push(`${pkgPath} ${field} "${name}": "${spec}" is not pinned before npm publish in release.yml`);
+      }
+      const dependencyJob = pkgPathByName.has(name) && publishJobOf(pkgPathByName.get(name));
+      if (dependencyJob && !needsOf(publishJobOf(pkgPath)).includes(dependencyJob.name)) {
+        errors.push(`${pkgPath}'s publish job does not wait for ${dependencyJob.name} (${name}) in release.yml`);
+      }
     }
   }
 }
