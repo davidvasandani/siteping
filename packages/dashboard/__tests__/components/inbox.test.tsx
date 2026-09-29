@@ -251,6 +251,18 @@ describe("SitepingInbox — keyboard", () => {
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Keyboard shortcuts" })).toBeNull());
   });
 
+  it("keeps Tab and Shift+Tab on the shortcuts overlay, which holds nothing focusable", async () => {
+    renderInbox();
+    const listbox = await ready();
+    fireEvent.keyDown(listbox, { key: "?" });
+    const overlay = await screen.findByRole("dialog", { name: "Keyboard shortcuts" });
+    expect(document.activeElement).toBe(overlay);
+
+    expect(fireEvent.keyDown(overlay, { key: "Tab" })).toBe(false);
+    expect(fireEvent.keyDown(overlay, { key: "Tab", shiftKey: true })).toBe(false);
+    expect(document.activeElement).toBe(overlay);
+  });
+
   it("number keys switch status tabs (4 → resolved)", async () => {
     renderInbox();
     const listbox = await ready();
@@ -660,5 +672,67 @@ describe("SitepingInbox — chrome & theming", () => {
       expect(rows).toHaveLength(1);
       expect(rows[0]?.querySelector(".spd-row-message")?.textContent).toBe("Why are there two prices?");
     });
+  });
+});
+
+describe("SitepingInbox — permissions and readOnly", () => {
+  const REVIEWER = { canChangeStatus: false, canDelete: false, canComment: true, canDeleteComment: false };
+  const hintKeys = (container: HTMLElement) =>
+    [...container.querySelectorAll(".spd-hints kbd")].map((kbd) => kbd.textContent);
+
+  it("e, p and x do nothing on a row that refuses status changes — no request, no toast", async () => {
+    const records = seed().map((record) => (record.id === "o1" ? { ...record, permissions: REVIEWER } : record));
+    const { source } = renderInbox({}, records);
+    const listbox = await ready();
+    fireEvent.keyDown(listbox, { key: "j" }); // focus o1
+
+    for (const key of ["e", "p", "x"]) fireEvent.keyDown(listbox, { key });
+    await act(async () => {});
+
+    expect(source.setStatus).not.toHaveBeenCalled();
+    expect(screen.queryByText(/^Marked as/)).toBeNull();
+    expect(listRows()).toHaveLength(3);
+  });
+
+  it("leaves the status keys out of the hints and the cheat sheet when no listed row allows a change", async () => {
+    const { container } = renderInbox({ readOnly: true });
+    const listbox = await ready();
+    expect(hintKeys(container)).not.toContain("e");
+
+    fireEvent.keyDown(listbox, { key: "?" });
+    const sheet = await screen.findByRole("dialog", { name: "Keyboard shortcuts" });
+    const keys = [...sheet.querySelectorAll("kbd")].map((kbd) => kbd.textContent);
+    expect(keys).not.toContain("e");
+    expect(keys).not.toContain("u");
+    expect(keys).toEqual(expect.arrayContaining(["j", "/"]));
+
+    cleanup();
+    const { container: triage } = renderInbox();
+    await ready();
+    expect(hintKeys(triage)).toEqual(expect.arrayContaining(["e", "p", "x"]));
+  });
+
+  it("keeps the status keys while any listed row allows a change", async () => {
+    const records = seed().map((record) => (record.id === "o1" ? { ...record, permissions: REVIEWER } : record));
+    const { container } = renderInbox({}, records);
+    const listbox = await ready();
+    expect(hintKeys(container)).toEqual(expect.arrayContaining(["e", "p", "x"]));
+
+    fireEvent.keyDown(listbox, { key: "?" });
+    const sheet = await screen.findByRole("dialog", { name: "Keyboard shortcuts" });
+    const keys = [...sheet.querySelectorAll("kbd")].map((kbd) => kbd.textContent);
+    expect(keys).toEqual(expect.arrayContaining(["e", "u"]));
+  });
+
+  it("in readOnly, the drawer shows the status as text and offers no delete", async () => {
+    const { container } = renderInbox({ readOnly: true });
+    const listbox = await ready();
+    fireEvent.keyDown(listbox, { key: "j" });
+    fireEvent.keyDown(listbox, { key: "Enter" });
+    const dialog = await screen.findByRole("dialog", { name: /Feedback details/ });
+
+    expect(within(dialog).queryByRole("button", { name: "Open" })).toBeNull();
+    expect(dialog.querySelector('.spd-status-menu-trigger[data-status="open"]')?.textContent).toBe("Open");
+    expect(container.querySelector(".spd-danger-zone")).toBeNull();
   });
 });

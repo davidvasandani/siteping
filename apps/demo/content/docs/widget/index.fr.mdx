@@ -18,7 +18,7 @@ const siteping = initSiteping({
 });
 ```
 
-`initSiteping` est l'export runtime principal du package, aux côtés des deux helpers i18n (`registerLocale`, `loadLocale`) et des types TypeScript. Il pèse environ **35 KB gzip** (ESM), charge ses parties lourdes à la demande (panneau, locales, moteur de capture) et s'affiche dans un Shadow DOM fermé — les styles de votre page et ceux du widget ne peuvent jamais se marcher dessus.
+`initSiteping` est l'export runtime principal du package, aux côtés des deux helpers i18n (`registerLocale`, `loadLocale`) et des types TypeScript. Il pèse environ **34 KB gzip** (ESM), charge ses parties lourdes à la demande (panneau, locales, moteur de capture) et s'affiche dans un Shadow DOM fermé — les styles de votre page et ceux du widget ne peuvent jamais se marcher dessus.
 
 ## Quand le widget s'affiche — et quand il ne s'affiche pas
 
@@ -30,6 +30,8 @@ const siteping = initSiteping({
 4. **Largeur minimale (optionnelle)** — en dessous de `minViewportWidth`, il passe son tour avec `onSkip("mobile")`. La valeur par défaut, `0`, l'affiche à toutes les largeurs : les téléphones ont droit à la [mise en page compacte](#sur-téléphone-et-tablette). Également contourné par `forceShow`.
 5. **Validation de la config** — pas d'`endpoint`/`store`, ou pas de `projectName` ? Le widget affiche un `console.error` et ne fait rien. Ce cas-là n'appelle **pas** `onSkip` — regardez la console, pas le callback.
 
+> **Modifié en 0.11 :** `minViewportWidth` valait `768` par défaut, ce qui tenait le widget à l'écart des téléphones. Un site qui passe à la 0.11 sans l'avoir défini affiche désormais le widget sur téléphone aussi, et `onSkip("mobile")` ne se déclenche plus. Mettez `minViewportWidth: 768` pour garder l'ancien comportement. Avec `enableRightClickComment` activé, un appui long sur un téléphone Android ouvre aussi le composeur.
+
 ## Sur téléphone et tablette
 
 Le même widget s'adapte à l'écran sur lequel il arrive — il n'y a rien à configurer.
@@ -40,7 +42,7 @@ Le même widget s'adapte à l'écran sur lequel il arrive — il n'y a rien à c
 - Le menu flottant affiche ses libellés (il n'y a pas de survol pour les révéler), et chaque contrôle est dimensionné pour un doigt.
 - Les champs de formulaire utilisent un texte de 16 px : iOS Safari ne zoome donc pas la page quand l'un d'eux prend le focus.
 
-**Téléphones** (fenêtre jusqu'à 640 px de large) :
+**Téléphones** (fenêtre jusqu'à 640 px de large, ou écran tactile jusqu'à 500 px de haut — un téléphone tenu à l'horizontale) :
 
 - Le formulaire de feedback est une **feuille en bas d'écran** qui reste au-dessus du clavier virtuel. S'il devait recouvrir ce que le client vient de sélectionner, la page défile pour garder la sélection visible.
 - Le panneau des feedbacks est une feuille par-dessus la page assombrie — fermez-le avec le ✕, en touchant la page, ou en faisant glisser son en-tête vers le bas. Les filtres tiennent sur une seule ligne défilante, et les menus de type et de tri s'ouvrent en feuilles d'actions.

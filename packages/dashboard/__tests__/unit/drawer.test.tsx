@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import type { FeedbackPermissions } from "@siteping/core";
 import { act, cleanup, fireEvent } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Drawer } from "../../src/components/drawer.js";
@@ -11,19 +12,24 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function renderDrawer(recordOverrides = {}, canComment = false, canDeleteComment = canComment) {
+function renderDrawer(recordOverrides = {}, permissions: Partial<FeedbackPermissions> = {}, overlay = false) {
   const record = makeRecord(recordOverrides);
   const onAddComment = vi.fn(async () => {});
   const { container } = renderWithUi(
     <Drawer
       record={record}
-      overlay={false}
+      overlay={overlay}
       deepLinkParam="siteping"
       onClose={vi.fn()}
       onChangeStatus={vi.fn()}
       onDelete={vi.fn()}
-      canComment={canComment}
-      canDeleteComment={canDeleteComment}
+      permissions={{
+        canChangeStatus: true,
+        canDelete: true,
+        canComment: false,
+        canDeleteComment: false,
+        ...permissions,
+      }}
       onAddComment={onAddComment}
       onDeleteComment={vi.fn(async () => {})}
     />,
@@ -58,7 +64,7 @@ describe("Drawer — author line", () => {
 
 describe("Drawer — discussion thread", () => {
   it("shows the thread before the danger zone and posts replies for the opened record", async () => {
-    const { record, container, onAddComment } = renderDrawer({}, true);
+    const { record, container, onAddComment } = renderDrawer({}, { canComment: true, canDeleteComment: true });
     const thread = container.querySelector(".spd-thread");
     expect(thread?.compareDocumentPosition(container.querySelector(".spd-danger-zone") as Node)).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING,
@@ -85,13 +91,71 @@ describe("Drawer — discussion thread", () => {
         createdAt: new Date("2026-07-20T10:05:00.000Z"),
       },
     ];
-    const { container } = renderDrawer({ comments }, true, false);
+    const { container } = renderDrawer({ comments }, { canComment: true });
     expect(container.querySelector(".spd-thread textarea")).not.toBeNull();
     expect(container.querySelector("[data-comment-delete]")).toBeNull();
   });
 
   it("leaves the thread out of a read-only drawer with nothing to read", () => {
-    const { container } = renderDrawer({}, false);
+    const { container } = renderDrawer({});
     expect(container.querySelector(".spd-thread")).toBeNull();
+  });
+});
+
+describe("Drawer — permissions", () => {
+  it("shows the status as plain text, without a menu, when it may not change", () => {
+    const { container } = renderDrawer({ status: "in_progress" }, { canChangeStatus: false });
+    const status = container.querySelector(".spd-drawer-head .spd-status-menu-trigger");
+    expect(status?.tagName).toBe("SPAN");
+    expect(status?.getAttribute("data-status")).toBe("in_progress");
+    expect(container.querySelector('[aria-haspopup="listbox"]')).toBeNull();
+  });
+
+  it("offers the status menu when it may change", () => {
+    const { container } = renderDrawer({ status: "in_progress" });
+    expect(container.querySelector('.spd-drawer-head button[aria-haspopup="listbox"]')).not.toBeNull();
+  });
+
+  it("leaves out the danger zone when the record may not be deleted", () => {
+    expect(renderDrawer({}, { canDelete: false }).container.querySelector(".spd-danger-zone")).toBeNull();
+    cleanup();
+    expect(renderDrawer({}).container.querySelector(".spd-danger-zone")).not.toBeNull();
+  });
+});
+
+describe("Drawer — focus trap", () => {
+  // Without the status menu, the close button is the first focusable and the
+  // "Open on page" link the last.
+  function focusables(overlay: boolean) {
+    const { container } = renderDrawer({}, { canChangeStatus: false }, overlay);
+    return {
+      panel: container.querySelector(".spd-drawer") as HTMLElement,
+      first: container.querySelector(".spd-drawer-close") as HTMLElement,
+      last: container.querySelector(".spd-drawer-foot a") as HTMLElement,
+    };
+  }
+
+  it("wraps Tab and Shift+Tab inside the overlay dialog", () => {
+    const { panel, first, last } = focusables(true);
+    expect(document.activeElement).toBe(panel);
+
+    // Shift+Tab from the panel itself (focused on open) goes to the last focusable.
+    expect(fireEvent.keyDown(panel, { key: "Tab", shiftKey: true })).toBe(false);
+    expect(document.activeElement).toBe(last);
+    expect(fireEvent.keyDown(last, { key: "Tab" })).toBe(false);
+    expect(document.activeElement).toBe(first);
+    expect(fireEvent.keyDown(first, { key: "Tab", shiftKey: true })).toBe(false);
+    expect(document.activeElement).toBe(last);
+
+    // Between the ends, Tab is left to the browser.
+    first.focus();
+    expect(fireEvent.keyDown(first, { key: "Tab" })).toBe(true);
+  });
+
+  it("leaves Tab to the browser side by side", () => {
+    const { last } = focusables(false);
+    last.focus();
+    expect(fireEvent.keyDown(last, { key: "Tab" })).toBe(true);
+    expect(document.activeElement).toBe(last);
   });
 });

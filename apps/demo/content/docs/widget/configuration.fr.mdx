@@ -38,7 +38,7 @@ function mountFeedback(config: SitepingHttpConfig) { /* endpoint garanti */ }
 | Option | Type | Défaut | Ce que ça fait |
 |---|---|---|---|
 | `forceShow` | `boolean` | `false` | Contourne les garde-fous production et taille d'écran (jamais celui du SSR) |
-| `minViewportWidth` | `number` | `0` | En dessous de cette largeur, le widget passe son tour avec `onSkip("mobile")`. La valeur par défaut l'affiche à toutes les largeurs — les téléphones ont droit à la [mise en page compacte](/fr/docs/widget#sur-téléphone-et-tablette) |
+| `minViewportWidth` | `number` | `0` | En dessous de cette largeur, le widget passe son tour avec `onSkip("mobile")`. La valeur par défaut l'affiche à toutes les largeurs — les téléphones ont droit à la [mise en page compacte](/fr/docs/widget#sur-téléphone-et-tablette). Avant la 0.11, elle valait `768` : remettez-la pour tenir le widget à l'écart des téléphones |
 | `position` | `"bottom-right"` \| `"bottom-left"` | `"bottom-right"` | Coin du bouton flottant |
 | `showAnnotationsToggle` | `boolean` | `true` | Mettez `false` pour retirer le bouton d'affichage des marqueurs du menu radial |
 
@@ -58,8 +58,16 @@ function mountFeedback(config: SitepingHttpConfig) { /* endpoint garanti */ }
 | `enableRightClickComment` | `boolean` | `false` | Clic droit n'importe où pour commenter instantanément — voir [Commentaires au clic droit](/fr/docs/widget/right-click) |
 | `captureDiagnostics` | `boolean` ou objet | `false` | Joint les entrées console récentes (max 50) et les requêtes réseau en échec (max 20, URL enregistrée sans identifiants, query string ni fragment) à chaque feedback. `true` active les deux ; un objet choisit les canaux et des limites plus basses (`maxConsoleEntries` / `maxNetworkEntries` — au-delà, ramenées à 50 / 20, les plafonds du serveur) |
 | `deepLink` | `boolean` ou `{ param?: string }` | `false` | Au premier chargement, met en avant le feedback référencé par `?siteping=<id>` (ou votre paramètre personnalisé). Chargement initial uniquement — pour les changements de route, appelez `focusFeedback()` |
-| `identity` | `{ name, email }` | — | Pré-remplit l'auteur (applis avec SSO) : évite complètement la modale d'identité, jamais persisté dans le localStorage |
+| `identity` | `{ name, email }` | — | Pré-remplit les champs d'auteur depuis la session de l'application hôte (ex. SSO) : évite la modale d'identité, jamais persisté dans le localStorage. N'authentifie pas les requêtes API — envoyez un bearer avec `headers`. Lu à l'init : remontez le widget après un changement de compte |
 | `panelActions` | tableau | — | Vos propres boutons et liens dans la vue détail d'un feedback — créer un ticket, l'ouvrir dans votre outil de suivi. Voir [Actions du panneau](/fr/docs/widget/panel-actions) |
+
+## Mode relecteur
+
+| Option | Type | Défaut | Ce que ça fait |
+|---|---|---|---|
+| `readOnly` | `boolean` | `false` | Masque ce qui trie les feedbacks — résoudre, rouvrir, supprimer, les actions groupées, « Tout supprimer ». Créer, parcourir et répondre restent possibles |
+
+Pour un client qui relit pendant que votre équipe trie. En plus, le widget masque ce que le serveur interdit à ce visiteur (ses [`permissions`](/fr/docs/server#ce-que-chaque-appelant-peut-faire)) : un widget public devant une `apiKey` ne propose aucun bouton qui répondrait `401`, même sans `readOnly`. Dans les deux cas, il ne fait que masquer : c'est le serveur qui décide de ce qu'il accepte.
 
 ## Cadrage par page
 
