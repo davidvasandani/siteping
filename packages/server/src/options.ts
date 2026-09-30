@@ -1,4 +1,4 @@
-import type { FeedbackCreateInput, FeedbackRecord, SitepingStore } from "@siteping/core";
+import type { CommentPayload, FeedbackCreateInput, FeedbackRecord, SitepingStore } from "@siteping/core";
 import type { WebhookConfig } from "./webhooks.js";
 
 /** HTTP methods served by `createSitepingHandler`. */
@@ -63,13 +63,16 @@ export type SitepingPrincipal = object | string | number;
  *   `authorize` to refuse it the other actions.
  * - `canReadAuthorEmail` decides whether responses include `authorEmail`
  *   (reviewer PII), on feedbacks and their comments — the list, the PATCH
- *   answer and the POST answer alike. Defaults to `true`.
+ *   answer and the POST answer alike. Only `true` includes it: without the
+ *   callback, every response blanks it. A policy that serves anonymous
+ *   visitors resolves a principal for them too, so being authenticated says
+ *   nothing about who may read reviewers' emails.
  * - `canCommentAsTeam` decides whether a comment that asks for the `team`
  *   role keeps it; otherwise it is stamped `client`. Defaults to the
- *   principal's `canReadAuthorEmail` answer when that callback is set
- *   (whoever may read reviewer emails is on the project side), and to
- *   `false` when neither is: a policy that does not tell the team apart
- *   never lets a caller speak as the team.
+ *   principal's `canReadAuthorEmail` answer (whoever may read reviewer
+ *   emails is on the project side), so a policy that sets neither never
+ *   lets a caller speak as the team. Once set, anything but `true`
+ *   (`undefined` from plain JavaScript included) refuses.
  *
  * A throw from any of them answers a logged 500.
  */
@@ -80,7 +83,10 @@ export interface SitepingAccessControl<Principal extends SitepingPrincipal> {
   canCommentAsTeam?(principal: Principal): boolean | Promise<boolean>;
 }
 
-/** What a DELETE removes: one record, or a whole project (`deleteAll`). */
+/**
+ * What a DELETE removes: one record, or a whole project (`deleteAll`) —
+ * never a comment, whose deletion runs no hook.
+ */
 export type SitepingDeletionTarget =
   | { kind: "single"; id: string; projectName: string }
   | { kind: "project"; projectName: string };
@@ -105,9 +111,18 @@ export interface SitepingLifecycleHooks<Principal> {
   onDeleted?(target: SitepingDeletionTarget, context: SitepingRequestContext<Principal>): void | Promise<void>;
 }
 
-/** Where the handler reports unexpected failures. Defaults to `console.error`. */
+/**
+ * Where the handler reports unexpected failures. Defaults to `console.error`.
+ * A logger that throws, or returns a promise that rejects (a log shipper
+ * down), falls back to `console.error`: it never fails the request, nor
+ * leaves a rejection unhandled.
+ *
+ * The arguments come in console's and winston's order. pino's `error` takes
+ * the context first and type-checks here anyway, then drops the context:
+ * adapt it — `{ error: (message, { error, ...context }) => log.error({ err: error, ...context }, message) }`.
+ */
 export interface SitepingLogger {
-  error(message: string, context: Record<string, unknown>): void;
+  error(message: string, context: Record<string, unknown>): void | Promise<void>;
 }
 
 /** Options shared by both access policies. */
@@ -121,6 +136,13 @@ export interface SitepingHandlerBaseOptions<Principal> {
    * send POST/PATCH/DELETE.
    */
   allowedOrigins?: ReadonlyArray<string> | undefined;
+  /**
+   * Largest request body accepted, in bytes — 4 MiB by default, twice the
+   * largest submission the validation accepts. A longer body answers 413:
+   * refused on its `Content-Length`, or once that many bytes have streamed
+   * in, before any of it is parsed.
+   */
+  maxBodyBytes?: number | undefined;
   /**
    * Outgoing webhooks fired after a feedback is successfully persisted.
    *
@@ -150,6 +172,20 @@ export interface SitepingHandlerBaseOptions<Principal> {
     input: FeedbackCreateInput,
     context: SitepingRequestContext<Principal>,
   ): FeedbackCreateInput | Promise<FeedbackCreateInput>;
+  /**
+   * `beforeCreate` for the replies of a thread: rewrite the validated comment
+   * before it is stored — impose the author from the session, redact secrets
+   * from its body, pin the project. Runs before `access.authorize`, which
+   * sees the effective `projectName` and `feedbackId`, so before the feedback
+   * is looked up too: it may run for a feedback that turns out not to exist.
+   * The `authorRole` it returns is still a claim: `team` is kept only for a
+   * caller the policy vouches for. A throw answers a logged 500 and stores
+   * nothing.
+   */
+  beforeComment?(
+    input: CommentPayload,
+    context: SitepingRequestContext<Principal>,
+  ): CommentPayload | Promise<CommentPayload>;
   /**
    * Transform each record right before it is serialized in a response, e.g.
    * read-time redaction. `clientId` is stripped, and `authorEmail` blanked
@@ -194,15 +230,18 @@ export interface SitepingApiKeyHandlerOptions extends SitepingHandlerBaseOptions
   /**
    * Whether destructive endpoints (DELETE, PATCH) require `apiKey`.
    *
-   * Defaults to `true` and intentionally cannot be disabled in production:
-   * - `NODE_ENV === "production"` without `apiKey` throws at startup. The
-   *   factory refuses to return an unauthenticated destructive surface.
+   * Defaults to `true`:
+   * - `NODE_ENV === "production"` without `apiKey` throws at startup: the
+   *   factory refuses to return an unauthenticated destructive surface by
+   *   accident.
    * - `NODE_ENV !== "production"` without `apiKey` keeps the handler running
    *   for local dev/tests, but DELETE/PATCH return 401 until you set
    *   `apiKey` or explicitly opt out with `requireAuthForDestructive: false`.
    *
-   * Set to `false` only when you wrap the handler in your own auth
-   * middleware (session, OAuth, etc.) and want SitePing to stay open.
+   * `false` lifts both, in production too: without `apiKey`, anyone who
+   * reaches the endpoint may then PATCH and DELETE, `deleteAll` included.
+   * Set it only behind your own middleware that authenticates every method
+   * (session, OAuth, etc.).
    */
   requireAuthForDestructive?: boolean;
   /**

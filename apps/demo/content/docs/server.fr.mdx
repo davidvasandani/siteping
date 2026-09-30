@@ -38,14 +38,30 @@ import { store } from "./siteping-store";
 const siteping = createSitepingHandler({ store, apiKey: process.env.SITEPING_API_KEY });
 
 const app = new Hono();
-app.on(["GET", "POST", "PATCH", "DELETE", "OPTIONS"], "/api/siteping", (c) =>
-  siteping[c.req.method as keyof typeof siteping](c.req.raw),
-);
+app.on(["GET", "POST", "PATCH", "DELETE", "OPTIONS"], "/api/siteping", (c) => {
+  // Hono sert aussi HEAD par les routes GET, une méthode que SitePing ne sert pas.
+  const handle = siteping[c.req.method as keyof typeof siteping];
+  return handle ? handle(c.req.raw) : c.body(null, 405, { Allow: "GET, POST, PATCH, DELETE, OPTIONS" });
+});
 
 export default app;
 ```
 
-La même répartition fonctionne partout où arrive une `Request` : `Bun.serve`, `Deno.serve`, le `fetch` d'un Worker Cloudflare, les endpoints Remix ou SvelteKit.
+`Bun.serve`, `Deno.serve` et le `fetch` d'un Worker Cloudflare vous transmettent chaque requête, quelle que soit sa méthode — le `HEAD` d'une sonde de disponibilité, `PUT`, n'importe laquelle : cherchez le handler parmi les cinq, et répondez `405` aux autres :
+
+```ts
+const METHODS = ["GET", "POST", "PATCH", "DELETE", "OPTIONS"] as const;
+
+function handleSiteping(request: Request): Response | Promise<Response> {
+  const method = METHODS.find((name) => name === request.method);
+  if (!method) return new Response(null, { status: 405, headers: { Allow: METHODS.join(", ") } });
+  return siteping[method](request);
+}
+
+Bun.serve({ fetch: handleSiteping });
+```
+
+Les endpoints Remix et SvelteKit exportent une fonction par méthode : faites appeler à chacune la sienne, `siteping.GET` depuis le `GET`.
 
 ### Express
 
@@ -60,11 +76,11 @@ const siteping = createSitepingHandler({ store, apiKey: process.env.SITEPING_API
 const app = express();
 
 // Des octets bruts en entrée : le handler lit et valide le JSON lui-même. Les
-// captures voyagent en ligne, d'où une limite au-delà des 100 ko de body-parser.
-app.all("/api/siteping", express.raw({ type: () => true, limit: "2mb" }), async (req, res) => {
+// captures voyagent en ligne, d'où la limite du handler (maxBodyBytes), pas les 100 ko de body-parser.
+app.all("/api/siteping", express.raw({ type: () => true, limit: "4mb" }), async (req, res) => {
   const handle = siteping[req.method as keyof SitepingHandler];
   if (!handle) {
-    res.sendStatus(405);
+    res.set("Allow", "GET, POST, PATCH, DELETE, OPTIONS").sendStatus(405);
     return;
   }
   const headers = new Headers();
@@ -93,22 +109,37 @@ La limitation de débit n'est pas gérée ici : appliquez-la dans votre framewor
 | `store` | `SitepingStore` | — | Obligatoire. [Prisma](/fr/docs/adapters/prisma), [Drizzle](/fr/docs/adapters/drizzle), [memory](/fr/docs/adapters/memory) ou [le vôtre](/fr/docs/adapters/writing-an-adapter) |
 | `apiKey` | `string` | — | Active l'auth Bearer. Les requêtes envoient `Authorization: Bearer <clé>` |
 | `publicEndpoints` | `SitepingHttpMethod[]` | `["POST", "OPTIONS"]` quand `apiKey` est défini | Méthodes qui contournent l'auth. **Passer une valeur remplace le défaut** — incluez `"POST"` vous-même, sinon le widget ne peut plus envoyer |
-| `requireAuthForDestructive` | `boolean` | `true` | Sans `apiKey`, PATCH et DELETE répondent `401`. En `NODE_ENV=production`, la factory refuse de démarrer sans `apiKey` |
+| `requireAuthForDestructive` | `boolean` | `true` | Sans `apiKey`, PATCH et DELETE répondent `401`. En `NODE_ENV=production`, la factory refuse de démarrer sans `apiKey`. `false` lève les deux, production comprise : PATCH et DELETE, `deleteAll` compris, sont alors ouverts à tous — seulement derrière votre propre authentification |
 | `redactUnauthenticatedEmails` | `boolean` | `true` | Voir [ce que les réponses exposent](#ce-que-les-réponses-exposent) |
 | `access` | `SitepingAccessControl` | — | Votre propre authentification à la place des quatre options ci-dessus — voir [accès personnalisé](#accès-personnalisé) |
 | `allowedOrigins` | `string[]` | — | Liste blanche CORS en correspondance exacte. **Aucun joker** — `["*"]` ne correspond à rien ; non défini signifie aucun en-tête CORS du tout. Les origines listées peuvent envoyer `Content-Type`, `Authorization` et tout en-tête personnalisé demandé par leur préflight (par exemple via l'option `headers` du widget) |
+| `maxBodyBytes` | `number` | 4 Mio | Taille maximale d'un corps de requête, en octets — deux fois le plus gros envoi que la validation accepte. Au-delà, la réponse est un `413`, avant toute lecture du JSON |
 | `webhooks` | `WebhookConfig \| WebhookConfig[]` | — | Déclenchés à chaque nouveau feedback — voir [webhooks](#webhooks) |
 | `waitUntil` | `(promise) => void` | — | Garde les envois de webhooks en vie après la réponse sur les runtimes serverless et edge — voir [webhooks](#webhooks) |
 | `beforeCreate` | `(input, context) => input` | — | Réécrire un envoi avant son enregistrement — voir [points d'extension](#points-dextension) |
+| `beforeComment` | `(input, context) => input` | — | La même chose pour une réponse d'un [fil](/fr/docs/comments) |
 | `presentFeedback` | `(feedback, context) => feedback` | — | Transformer chaque enregistrement avant son envoi |
 | `hooks` | `SitepingLifecycleHooks` | — | `onCreated`, `onUpdated`, `onDeleting`, `onDeleted` |
-| `logger` | `{ error(message, context) }` | `console.error` | Où vont les échecs inattendus, avec la méthode et le chemin de la requête |
+| `logger` | `{ error(message, context) }` | `console.error` | Où vont les échecs inattendus, avec la méthode et le chemin de la requête — et pour un hook en échec, le feedback ou la suppression qu'il concerne. Les échecs de webhook vont plutôt à leur propre [`onError`](#webhooks). Un logger qui lève ou rejette se rabat sur `console.error` |
 | `describeError` | `(error) => string \| undefined` | — | Le message d'une `500` au lieu de `"Internal server error"`, par exemple une indication « lancez vos migrations ». Ne renvoyez jamais les détails de l'erreur elle-même |
+
+`logger.error(message, context)` suit l'ordre de console et de winston. [pino](https://getpino.io) prend le contexte en premier, et ne sérialise une erreur que sous `err` : passé tel quel, il passe la vérification de types, puis journalise le message sans son contexte. Adaptez-le :
+
+```ts
+import pino from "pino";
+
+const log = pino();
+
+createSitepingHandler({
+  store,
+  logger: { error: (message, { error, ...context }) => log.error({ err: error, ...context }, message) },
+});
+```
 
 ## Le modèle de sécurité, franchement
 
 - **Les lectures sont publiques par défaut.** Sans `apiKey`, quiconque connaît l'URL peut lister les feedbacks (avec les e-mails masqués — voir plus bas).
-- **Les appels destructifs, non.** PATCH et DELETE répondent `401` sauf si vous définissez un `apiKey` ou vous en désengagez explicitement avec `requireAuthForDestructive: false`. En production, la factory lève au démarrage plutôt que de tourner sans clé. Cette vérification lit `process.env.NODE_ENV` : elle ne tourne que là où `process` existe ; ailleurs, le `401` s'applique toujours.
+- **Les appels destructifs, non.** PATCH et DELETE répondent `401` sauf si vous définissez un `apiKey` ou vous en désengagez explicitement avec `requireAuthForDestructive: false`. En production, la factory lève au démarrage plutôt que de tourner sans clé, sauf si vous vous en êtes désengagé. Cette vérification lit `process.env.NODE_ENV` : elle ne tourne que là où `process` existe ; ailleurs, le `401` s'applique toujours.
 - `OPTIONS` est toujours public — les préflights doivent fonctionner.
 - **Les vérifications inter-projets passent par le store.** PATCH et DELETE vérifient que l'enregistrement appartient au `projectName` qu'ils indiquent via la méthode optionnelle `verifyProjectOwnership` du store — tous les stores fournis et tout ce qui repose sur `createCollectionStore` l'implémentent. Un store écrit à la main qui l'omet saute la vérification : quiconque connaît l'`id` d'un feedback peut alors le modifier quel que soit le `projectName`, donc implémentez la méthode (voir [écrire un adapter](/fr/docs/adapters/writing-an-adapter#appartenance-au-projet)) ou placez l'endpoint derrière un `apiKey`.
 
@@ -136,7 +167,7 @@ Les serveurs qui les précèdent n'en envoient pas, le mode store non plus : les
 
 ## Accès personnalisé
 
-Une clé partagée convient à un site et à son dashboard. Quand les relecteurs se connectent, passez plutôt `access` : le handler demande à votre code qui appelle et ce qu'il peut faire, à partir de la `Request` standard — un cookie de session, un JWT, un en-tête posé par votre proxy.
+Une clé partagée convient à un site et à son dashboard. Quand les relecteurs se connectent, passez plutôt `access` : le handler demande à votre code qui appelle et ce qu'il peut faire, à partir de la `Request` standard — un cookie de session, un JWT, un en-tête posé par votre proxy. Des recettes suivent pour les fournisseurs [OpenID Connect](#recette--openid-connect) et pour [Better Auth](#recette--better-auth).
 
 ```ts
 export const { GET, POST, PATCH, DELETE, OPTIONS } = createSitepingHandler({
@@ -158,8 +189,8 @@ export const { GET, POST, PATCH, DELETE, OPTIONS } = createSitepingHandler({
 - **`authorize`** reçoit l'`action` (`create`, `list`, `update`, `delete`, `deleteAll`, et `createComment` / `deleteComment` pour les [fils](/fr/docs/comments)), le `projectName` et, pour `update`, `delete` et les actions de commentaire, le `feedbackId` — plus le `commentId` pour `deleteComment`. Par défaut, il laisse passer tout appelant authentifié. PATCH et DELETE désignent les enregistrements par id : la factory refuse donc de démarrer avec un `authorize` devant un store sans `verifyProjectOwnership` — tous les stores fournis l'implémentent.
 - **`authorize` remplit aussi les [`permissions`](#ce-que-chaque-appelant-peut-faire)**, interrogé avec `dryRun: true` : `update`, `delete`, `createComment` et `deleteComment` pour chaque feedback d'une réponse, et `deleteAll` une fois par liste. Rien n'est fait à ce moment-là — sautez votre journal d'audit sur ces essais à blanc. Un `deleteComment` à blanc ne porte pas de `commentId`, sa réponse valant pour tout le fil : une règle par auteur y répond `false` (`if (!commentId) return false`). Gardez-le rapide : une page de 50 feedbacks demande 201 essais à blanc, 8 à la fois — ils partagent la `request` de la réponse, donc une politique qui interroge une base peut mettre ses lectures en cache par requête, dans une `WeakMap` indexée sur elle.
 - **Un essai à blanc porte sur une action, pas sur une méthode.** Sa `request` est celle de la réponse — un `GET` pour une liste, le `POST` ou le `PATCH` auquel répond une écriture — et `authenticate` n'est pas rappelé pour lui. Décidez d'après `action`, jamais d'après `request.method` ; et si `authenticate` n'admet les visiteurs que sur certaines méthodes, faites-leur refuser les autres actions par `authorize`, sinon ils se voient proposer des contrôles qui répondent `401`.
-- **`canReadAuthorEmail`** vaut `true` par défaut.
-- **`canCommentAsTeam`** décide si un commentaire qui demande le rôle `team` le garde ; tout autre est marqué `client`. Par défaut, il reprend la réponse de `canReadAuthorEmail` quand vous définissez ce callback, et vaut `false` quand vous ne définissez aucun des deux — voir [le rôle équipe](/fr/docs/comments#le-rôle-équipe).
+- **`canReadAuthorEmail`** ne révèle les e-mails des relecteurs que sur `true` : sans lui, chaque réponse les masque, et toute autre réponse aussi — `undefined` compris, que renvoie un principal dépourvu du drapeau que vous lisez. Une politique qui sert le widget public résout aussi un principal pour les visiteurs anonymes : être authentifié ne dit donc rien de qui peut les lire.
+- **`canCommentAsTeam`** décide si un commentaire qui demande le rôle `team` le garde ; tout autre est marqué `client`. Par défaut, il reprend la réponse de `canReadAuthorEmail` : une politique qui ne définit aucun des deux ne l'accorde jamais — voir [le rôle équipe](/fr/docs/comments#le-rôle-équipe). Une fois défini, seul `true` accorde le rôle.
 - Un callback qui lève répond une `500` journalisée — sauf `authorize` lors d'un essai à blanc : la permission est refusée, l'échec journalisé, et la réponse part.
 
 `access` remplace `apiKey`, `publicEndpoints`, `requireAuthForDestructive` et `redactUnauthenticatedEmails` : passer les deux est une erreur de type. Depuis une page d'une autre origine, envoyez l'identifiant par l'option `headers` du widget — le widget n'envoie pas de cookies en cross-origin.
@@ -175,7 +206,7 @@ Les listes partent aussi avec `Cache-Control: no-store`, puisqu'elles dépendent
 
 ### Recette : OpenID Connect
 
-Quand les relecteurs se connectent via un fournisseur OpenID Connect — Keycloak, Microsoft Entra ID, Auth0, Zitadel… —, le widget et le dashboard envoient son jeton d'accès en bearer, et `access` le vérifie avec [jose](https://github.com/panva/jose). Les visiteurs sans jeton gardent le widget public : ils envoient, lisent et répondent, tandis que seuls les administrateurs trient et lisent les e-mails des relecteurs.
+Quand les relecteurs se connectent via un fournisseur OpenID Connect — Keycloak, Microsoft Entra ID, Auth0, Zitadel… —, le widget et le dashboard envoient son jeton d'accès en bearer, et `access` le vérifie avec [jose](https://github.com/panva/jose). Les visiteurs sans jeton gardent le widget public : ils envoient, lisent et répondent, tandis que seuls les administrateurs trient et lisent les e-mails des relecteurs. Si votre application les connecte à ce fournisseur via Better Auth, suivez plutôt la [recette Better Auth](#recette--better-auth).
 
 ```ts
 // lib/siteping-access.ts
@@ -205,8 +236,9 @@ const KEY_SET_FAILURES = new Set(["ERR_JOSE_GENERIC", "ERR_JWKS_TIMEOUT", "ERR_J
 
 export const oidcAccess: SitepingAccessControl<Reviewer> = {
   async authenticate(request) {
-    const authorization = request.headers.get("Authorization");
-    if (!authorization) return VISITOR;
+    const authorization = request.headers.get("Authorization") ?? "";
+    // Seul un bearer est un identifiant : le Basic d'un site de recette reste un visiteur.
+    if (!/^Bearer(\s|$)/i.test(authorization)) return VISITOR;
     const token = /^Bearer (\S+)$/i.exec(authorization)?.[1];
     if (!token) return null;
     try {
@@ -242,8 +274,14 @@ export const { GET, POST, PATCH, DELETE, OPTIONS } = createSitepingHandler({
   // Chaque site où tourne le widget, et l'origine du dashboard.
   allowedOrigins: ["https://site-client.com", "https://inbox.example.com"],
   access: oidcAccess,
-  // Le nom d'un auteur connecté, et son e-mail vérifié, viennent du jeton.
+  // Le nom d'un auteur connecté, et son e-mail vérifié, viennent du jeton…
   beforeCreate: (input, { principal }) => ({
+    ...input,
+    authorName: principal.name || input.authorName,
+    authorEmail: principal.email || input.authorEmail,
+  }),
+  // …sur ses réponses aussi.
+  beforeComment: (input, { principal }) => ({
     ...input,
     authorName: principal.name || input.authorName,
     authorEmail: principal.email || input.authorEmail,
@@ -265,12 +303,12 @@ initSiteping({ endpoint: "https://api.example.com/api/siteping", projectName: "a
 ```
 
 - **Un jeton d'accès, jamais un ID token.** `audience` est l'identifiant que votre fournisseur place dans `aud` pour votre API — l'identifiant d'API d'Auth0, ou l'audience qu'ajoute un audience mapper Keycloak. Un ID token est adressé à votre application cliente : il répond donc `401`. Auth0 ne délivre un jeton d'accès JWT que pour une audience d'API, et Zitadel que si le type de jeton de l'application est JWT.
-- **Sans en-tête, un visiteur ; un mauvais, une `401`.** Sans `Authorization`, la requête est anonyme : le widget public continue de fonctionner. Un jeton malformé, expiré, forgé ou étranger répond `401` au lieu d'être rétrogradé en visiteur : un relecteur dont la session a expiré le voit, et le client peut rafraîchir le jeton.
+- **Sans bearer, un visiteur ; un mauvais, une `401`.** Sans jeton `Bearer`, la requête est anonyme : le widget public continue de fonctionner — derrière une authentification HTTP Basic aussi, dont le navigateur ou le proxy d'un site de recette joint les identifiants à chaque requête. Un jeton malformé, expiré, forgé ou étranger répond `401` au lieu d'être rétrogradé en visiteur : un relecteur dont la session a expiré le voit, et le client peut rafraîchir le jeton.
 - **Un fournisseur injoignable, une `500`.** Quand le jeu de clés ne peut pas être récupéré — erreur réseau, délai dépassé, réponse autre que `200`, pas de jeu de clés dedans —, `authenticate` lève : le handler le journalise et répond `500` plutôt que de déclarer tout jeton invalide. Les visiteurs, qui n'en envoient pas, ne sont pas touchés. jose met les clés en cache et les recharge pour un `kid` inconnu : une rotation des clés ne demande rien.
 - **Des algorithmes épinglés, en HTTPS.** `algorithms` liste ceux avec lesquels votre fournisseur signe : un jeton non signé ou `HS256` est refusé avant même la recherche d'une clé. Gardez l'issuer et le jeu de clés en `https://` : qui peut altérer le jeu de clés peut fabriquer des jetons d'administrateur.
-- **L'auteur vient du jeton.** `beforeCreate` reprend son nom, et son e-mail seulement quand `email_verified` vaut true ; sinon, les valeurs du widget restent. Les jetons d'accès ne portent pas toujours ces claims : passez [`identity`](/fr/docs/widget/configuration) pour épargner la modale d'identité du widget aux utilisateurs connectés.
+- **L'auteur vient du jeton.** `beforeCreate` reprend son nom, et son e-mail seulement quand `email_verified` vaut true ; sinon, les valeurs du widget restent. `beforeComment` fait de même pour les réponses : personne de connecté ne répond sous le nom d'un autre relecteur. Les jetons d'accès ne portent pas toujours ces claims : passez [`identity`](/fr/docs/widget/configuration) pour épargner la modale d'identité du widget aux utilisateurs connectés.
 - **Les e-mails restent aux administrateurs.** Comme `canReadAuthorEmail` est défini, il décide aussi [du rôle équipe](/fr/docs/comments#le-rôle-équipe) : les réponses des administrateurs sont marquées `team`, celles de tous les autres `client`.
-- **Un rôle, tous les projets.** Ce `authorize` ne lit jamais `projectName` : `siteping-admin` trie tous les projets que sert l'endpoint, et n'importe qui — visiteur ou membre — liste chacun d'eux, captures d'écran et diagnostics compris. Pour séparer plusieurs clients, donnez à chaque projet son propre rôle, comme `siteping-admin:acme` : gardez les rôles de l'appelant dans le principal, et faites tester à `authorize` `` roles.includes(`siteping-admin:${projectName}`) `` là où il teste `isAdmin`. `canReadAuthorEmail` ne reçoit pas le projet : réservez-le donc à un rôle qui les couvre tous. Pour réserver aussi les lectures aux utilisateurs connectés, renvoyez `null` au lieu de `VISITOR` quand l'en-tête manque — chaque requête exige alors un jeton, envois compris — et n'autorisez `list` que sur les projets de l'appelant.
+- **Un rôle, tous les projets.** Ce `authorize` ne lit jamais `projectName` : `siteping-admin` trie tous les projets que sert l'endpoint, et n'importe qui — visiteur ou membre — liste chacun d'eux, captures d'écran et diagnostics compris. Pour séparer plusieurs clients, donnez à chaque projet son propre rôle, comme `siteping-admin:acme` : gardez les rôles de l'appelant dans le principal, et faites tester à `authorize` `` roles.includes(`siteping-admin:${projectName}`) `` là où il teste `isAdmin`. `canReadAuthorEmail` ne reçoit pas le projet : réservez-le donc à un rôle qui les couvre tous. Pour réserver aussi les lectures aux utilisateurs connectés, renvoyez `null` au lieu de `VISITOR` quand aucun bearer n'arrive — chaque requête exige alors un jeton, envois compris — et n'autorisez `list` que sur les projets de l'appelant.
 
 Les rôles dépendent du fournisseur : `rolesOf` est à vous d'écrire.
 
@@ -280,6 +318,7 @@ Les rôles dépendent du fournisseur : `rolesOf` est à vous d'écrire.
 | Microsoft Entra ID | `roles` (rôles d'application) | `payload.roles` |
 | Auth0 | Aucun par défaut : ajoutez un claim dans une Action post-login, par ex. `https://siteping.example/roles` | `payload["https://siteping.example/roles"]` |
 | Zitadel | `urn:zitadel:iam:org:project:roles`, un objet indexé par rôle | `Object.keys(payload["urn:zitadel:iam:org:project:roles"] ?? {})` |
+| Better Auth ([plugin jwt](#depuis-une-autre-origine)) | `role`, séparés par des virgules | `typeof payload.role === "string" ? payload.role.split(",") : []` |
 
 #### Laisser les auteurs supprimer leurs feedbacks
 
@@ -302,7 +341,7 @@ function submittedBy(request: Request, sub: string): Promise<Set<string>> {
 
 export const { GET, POST, PATCH, DELETE, OPTIONS } = createSitepingHandler({
   store,
-  // …allowedOrigins et beforeCreate comme dans route.ts ci-dessus
+  // …allowedOrigins, beforeCreate et beforeComment comme dans route.ts ci-dessus
   access: {
     ...oidcAccess,
     authorize: async ({ principal, action, feedbackId = "", request }) =>
@@ -322,6 +361,166 @@ export const { GET, POST, PATCH, DELETE, OPTIONS } = createSitepingHandler({
 
 `onCreated` ne fait jamais échouer un envoi : si son écriture échoue, l'auteur ne peut simplement pas supprimer ce feedback. Un `sub` n'est unique que pour un issuer — avec plusieurs fournisseurs, indexez la table sur les deux —, et c'est dans `onDeleted` qu'on supprime les lignes.
 
+### Recette : Better Auth
+
+Quand votre application connecte ses utilisateurs avec [Better Auth](https://www.better-auth.com), `access` lui demande la session : le widget et un `<SitepingInbox />` monté dans l'application envoient son cookie à chaque requête, le client n'a donc besoin d'aucun jeton. Son [plugin admin](https://www.better-auth.com/docs/plugins/admin) distingue les administrateurs — ils trient et lisent les e-mails des relecteurs —, tandis que tous les autres, connectés ou non, envoient, lisent et répondent.
+
+Elle couvre aussi une application qui connecte ses utilisateurs à un fournisseur OpenID Connect — Keycloak, Microsoft Entra ID, Auth0… — via le plugin [Generic OAuth](https://www.better-auth.com/docs/plugins/generic-oauth) ou [SSO](https://www.better-auth.com/docs/plugins/sso) de Better Auth : ces utilisateurs ont eux aussi une session Better Auth. Gardez la [recette OpenID Connect](#recette--openid-connect) pour les jetons d'accès que l'endpoint vérifie lui-même.
+
+```ts
+// lib/auth.ts — votre serveur Better Auth
+import { betterAuth } from "better-auth";
+import { admin } from "better-auth/plugins";
+
+export const auth = betterAuth({
+  // …database, emailAndPassword, socialProviders tels que vous les avez
+  plugins: [admin()],
+});
+```
+
+```ts
+// lib/siteping-access.ts
+import type { SitepingAccessControl } from "@siteping/server";
+import { auth } from "@/lib/auth";
+
+export interface Reviewer {
+  id: string; // "" pour un visiteur sans session
+  name: string;
+  email: string;
+  isAdmin: boolean;
+}
+
+const VISITOR: Reviewer = { id: "", name: "", email: "", isAdmin: false };
+
+export const betterAuthAccess: SitepingAccessControl<Reviewer> = {
+  async authenticate(request) {
+    const session = await auth.api.getSession({
+      headers: request.headers,
+      // Lue en base, jamais renouvelée ici — voir plus bas.
+      query: { disableCookieCache: true, disableRefresh: true },
+    });
+    // Pas de session : un visiteur — sauf si la requête a envoyé un jeton bearer, qui répond alors 401.
+    if (!session) return /^Bearer(\s|$)/i.test(request.headers.get("Authorization") ?? "") ? null : VISITOR;
+    const { user } = session;
+    return {
+      id: user.id,
+      name: user.name,
+      email: user.emailVerified ? user.email : "",
+      // Le plugin admin stocke plusieurs rôles séparés par des virgules.
+      isAdmin: user.role?.split(",").includes("admin") ?? false,
+    };
+  },
+  authorize: ({ principal, action }) =>
+    principal.isAdmin || action === "create" || action === "list" || action === "createComment",
+  canReadAuthorEmail: (principal) => principal.isAdmin,
+};
+```
+
+```ts
+// app/api/siteping/route.ts
+import { createSitepingHandler } from "@siteping/server";
+import { betterAuthAccess } from "@/lib/siteping-access";
+import { store } from "@/lib/siteping-store";
+
+export const { GET, POST, PATCH, DELETE, OPTIONS } = createSitepingHandler({
+  store,
+  access: betterAuthAccess,
+  // Le nom d'un auteur connecté, et son e-mail vérifié, viennent de la session…
+  beforeCreate: (input, { principal }) => ({
+    ...input,
+    authorName: principal.name || input.authorName,
+    authorEmail: principal.email || input.authorEmail,
+  }),
+  // …sur ses réponses aussi.
+  beforeComment: (input, { principal }) => ({
+    ...input,
+    authorName: principal.name || input.authorName,
+    authorEmail: principal.email || input.authorEmail,
+  }),
+});
+```
+
+La session épargne aussi aux utilisateurs connectés la modale d'identité du widget : passez-la en [`identity`](/fr/docs/widget/configuration). Le widget ne lit `identity` qu'une fois, à l'init : indexez donc le composant sur le compte — une connexion ou une déconnexion le remonte :
+
+```tsx
+// app/feedback.tsx — monté dans votre layout racine
+"use client";
+import type { Identity } from "@siteping/widget";
+import { useSiteping } from "@siteping/widget/react";
+import { authClient } from "@/lib/auth-client"; // createAuthClient() de "better-auth/react"
+
+function Widget({ identity }: { identity: Identity | undefined }) {
+  useSiteping({ endpoint: "/api/siteping", projectName: "acme", identity });
+  return null;
+}
+
+export function Feedback() {
+  const { data: session, isPending } = authClient.useSession();
+  if (isPending) return null;
+  const user = session?.user;
+  return <Widget key={user?.id ?? "visitor"} identity={user && { name: user.name, email: user.email }} />;
+}
+```
+
+- **Sans session, un visiteur ; un jeton mort, une `401`.** Sans session, la requête est anonyme : le widget public continue de fonctionner — y compris pour quelqu'un dont le cookie a survécu à une déconnexion, une expiration ou un bannissement, puisque le navigateur continue de l'envoyer. Une requête dont le jeton `Bearer` n'ouvre pas de session répond `401` : son client a envoyé ce jeton exprès, et apprend qu'il ne marche plus. Tout autre `Authorization` reste un visiteur : sur un site de recette derrière une auth HTTP Basic, le navigateur ou le proxy joint ces identifiants à chaque requête.
+- **Une base injoignable, une `500`.** Quand Better Auth ne peut pas lire ses sessions, `getSession` lève : le handler le journalise et répond `500` plutôt que de rétrograder tout le monde en visiteur. Les visiteurs sans cookie de session n'atteignent jamais la base.
+- **Lue, jamais renouvelée.** Une session plus vieille que l'`updateAge` de Better Auth est renouvelée par le `getSession` suivant, qui écrit une expiration plus lointaine et pose un nouveau cookie — sur une réponse que SitePing n'envoie jamais : le cookie du navigateur expirerait donc en premier. `disableRefresh` laisse le renouvellement aux requêtes de votre application.
+- **Une rétrogradation s'applique aussitôt.** Avec le `session.cookieCache` de Better Auth activé, `getSession` se fie au cookie en cache jusqu'à son `maxAge` : un changement de rôle ou une session révoquée l'attendraient. `disableCookieCache` lit plutôt votre `database` ou votre `secondaryStorage`, comme `getSession` le fait de toute façon sans le cache. Sans l'un ni l'autre, Better Auth est sans état et le cookie signé est le seul enregistrement de la session : une autre instance — une invocation serverless, une réplique — ne trouve aucune session derrière cette option, et sert vos administrateurs comme des visiteurs. Retirez alors `disableCookieCache` ; une rétrogradation attend dans ce cas le `maxAge` du cookie.
+- **Des administrateurs par rôle.** `isAdmin` lit le `role` du plugin admin — `setRole` avec `["user", "admin"]` stocke `"user,admin"`. Les `adminUserIds` du plugin ouvrent ses propres endpoints à des utilisateurs quel que soit leur rôle : donnez-leur aussi le rôle `admin`. Pour laisser quelqu'un trier sans la gestion des utilisateurs du plugin, donnez-lui un rôle à vous (déclaré dans les `roles` du plugin, si vous en avez configuré) et testez celui-là.
+- **L'auteur vient de la session.** `beforeCreate` reprend le nom de l'utilisateur, et son e-mail dès que `emailVerified` vaut true ; sinon, la valeur du widget reste. `beforeComment` fait de même pour les réponses.
+- **Les e-mails restent aux administrateurs.** Comme `canReadAuthorEmail` est défini, il décide aussi [du rôle équipe](/fr/docs/comments#le-rôle-équipe) : les réponses des administrateurs depuis l'inbox sont marquées `team`, celles de tous les autres `client`.
+- **Des cookies, donc du CSRF.** Un navigateur joint aussi le cookie de session à une requête intersite forgée ; les [protections CSRF](#protection-csrf) l'arrêtent, sans rien configurer.
+- **Un rôle, tous les projets.** Comme dans la recette OpenID Connect, `admin` trie tous les projets que sert l'endpoint, et n'importe qui liste chacun d'eux. Pour séparer plusieurs clients, chargez les projets de l'appelant dans `authenticate` — par exemple les slugs de ses organisations, avec le plugin organization de Better Auth — et faites vérifier `projectName` à `authorize`. Pour réserver aussi les lectures aux utilisateurs connectés, renvoyez `null` au lieu de `VISITOR` — chaque requête exige alors une session, envois compris.
+- **Des auteurs qui suppriment leurs feedbacks.** La [table des propriétaires](#laisser-les-auteurs-supprimer-leurs-feedbacks) de la recette OpenID Connect fonctionne telle quelle, avec `principal.id` là où elle lit `principal.sub` — un id d'utilisateur Better Auth est unique dans votre application : une colonne suffit.
+
+#### Depuis une autre origine
+
+Sur une autre origine — le widget sur le site d'un client —, une page atteint votre application sans son cookie : le widget n'envoie de cookies qu'à sa propre origine. Ajoutez le [plugin bearer](https://www.better-auth.com/docs/plugins/bearer) de Better Auth et envoyez le jeton de session avec `headers` ; la recette ne change pas, puisque le plugin retransforme le jeton en la session que lit `getSession`.
+
+```ts
+// lib/auth.ts
+import { admin, bearer } from "better-auth/plugins";
+
+export const auth = betterAuth({
+  // …
+  plugins: [admin(), bearer()],
+  trustedOrigins: ["https://site-client.com"], // d'où les utilisateurs se connectent
+});
+
+// app/api/siteping/route.ts
+export const { GET, POST, PATCH, DELETE, OPTIONS } = createSitepingHandler({
+  store,
+  // Chaque site où tourne le widget. L'inbox reste sur l'origine de l'endpoint.
+  allowedOrigins: ["https://site-client.com"],
+  access: betterAuthAccess,
+  // …beforeCreate et beforeComment comme plus haut
+});
+```
+
+Le jeton arrive dans l'en-tête `set-auth-token` de la réponse de connexion ; la documentation du plugin montre comment le garder. Sur la page, `headers` l'envoie à chaque requête, et `onError` l'efface dès qu'il ne marche plus :
+
+```ts
+function headers(): Record<string, string> {
+  const token = localStorage.getItem("bearer_token"); // là où votre client d'auth le garde
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+initSiteping({
+  endpoint: "https://app.example.com/api/siteping",
+  projectName: "acme",
+  headers,
+  onError: (error) => {
+    // Un jeton mort, pas un refus 403 : on l'efface, et la requête suivante part en visiteur.
+    if ((error as { status?: number }).status === 401) localStorage.removeItem("bearer_token");
+  },
+});
+```
+
+- **Le jeton, c'est toute la session.** C'est la valeur du cookie de session, pas un identifiant propre à SitePing : il ouvre tous les endpoints Better Auth de votre application, ceux du plugin admin compris, depuis n'importe quelle origine, et qui le détient le garde en vie, puisque Better Auth renouvelle la session à l'usage. Gardé dans le `localStorage`, il est lisible par tous les scripts de cette page. Faites donc trier les administrateurs depuis l'inbox montée dans votre application, qui envoie le cookie, hors de portée des scripts, et garde leur session sur votre origine ; réservez le bearer aux relecteurs qui se connectent sur le site du client.
+- **Effacez-le dès qu'il ne marche plus.** Un cookie périmé reste un visiteur, mais un jeton mort répond `401` à chaque requête, envois compris, et rien ne l'efface du `localStorage` quand la session expire ou est révoquée. Retirez-le sur une `401`, comme ci-dessus, et quand l'utilisateur se déconnecte — pas sur toute erreur `AUTH` : une `403` signifie qu'`authorize` a refusé cette requête, sur un projet dont le relecteur n'est pas membre par exemple, et le jeton ouvre toujours sa session dans votre application.
+
+Quand l'endpoint SitePing tourne à l'écart de Better Auth — un autre service, un edge worker loin de votre base —, vérifiez plutôt les jetons du [plugin jwt](https://www.better-auth.com/docs/plugins/jwt) de Better Auth avec la [recette OpenID Connect](#recette--openid-connect). La page en obtient un sur `/api/auth/token` avec son cookie de session et l'envoie avec `headers`. `ISSUER` et `audience` valent l'URL de votre Better Auth, sauf si vous définissez les `jwt.issuer` et `jwt.audience` du plugin ; le jeu de clés est à `/api/auth/jwks`, et les jetons sont signés en `EdDSA`. Le payload est la fiche de l'utilisateur : `rolesOf` lit `role` (voir le tableau plus haut), les administrateurs portent `admin`, et la vérification de l'e-mail se lit dans `emailVerified`, pas `email_verified`.
+
 ## Points d'extension
 
 ```ts
@@ -335,6 +534,13 @@ createSitepingHandler({
     authorEmail: principal.email,
     message: input.message.replace(/token=\S+/g, "token=[redacted]"),
   }),
+  // La même chose pour une réponse dans un fil.
+  beforeComment: (input, { principal }) => ({
+    ...input,
+    authorName: principal.name,
+    authorEmail: principal.email,
+    body: input.body.replace(/token=\S+/g, "token=[redacted]"),
+  }),
   hooks: {
     onCreated: (feedback) => searchIndex.add(feedback),
     // Levez pour garder l'enregistrement : le DELETE répond 502 et peut être rejoué.
@@ -343,7 +549,7 @@ createSitepingHandler({
 });
 ```
 
-- **`beforeCreate`** tourne sur l'envoi validé, avant `authorize` — qui voit le projet qu'il renvoie.
+- **`beforeCreate`** tourne sur l'envoi validé, avant `authorize` — qui voit le projet qu'il renvoie. **`beforeComment`** fait de même pour une [réponse](/fr/docs/comments), `projectName` et `feedbackId` compris — il tourne donc aussi avant que le feedback soit cherché, et peut tourner pour un feedback qui s'avère ne pas exister. L'`authorRole` qu'il renvoie reste une prétention, `team` n'étant gardé que pour un appelant [dont votre politique répond](/fr/docs/comments#le-rôle-équipe). Sans lui, une réponse garde le nom et l'e-mail envoyés par son client.
 - **`presentFeedback`** tourne sur chaque enregistrement juste avant son envoi ; le retrait de `clientId` et le masquage de l'e-mail s'appliquent encore après lui.
 - **`onCreated`**, **`onUpdated`** et **`onDeleted`** sont attendus avant la réponse, pour que les runtimes serverless ne les coupent pas. Une exception est journalisée et ne fait jamais échouer la requête : l'écriture a déjà eu lieu. `onCreated` tourne une fois par feedback enregistré, jamais pour un `clientId` rejoué.
 - **`onDeleting`** tourne avant la suppression, avec `{ kind: "single", id, projectName }` ou `{ kind: "project", projectName }`. Une exception garde l'enregistrement et répond `502`.
@@ -370,11 +576,11 @@ Un endpoint, cinq méthodes. Tous les corps sont en JSON.
 
 **Corps du DELETE :** `{ id, projectName }` pour un enregistrement, ou `{ projectName, deleteAll: true }` pour tout le projet.
 
-**Erreurs :** JSON invalide → `400 { error }` ; échec de validation → `400 { errors: [{ field, message }] }` ; identifiants absents ou faux → `401` ; refus d'`authorize` ou d'un contrôle CSRF → `403` ; corps non JSON avec `access` → `415` ; id inconnu → `404` ; `clientId` appartenant à un autre projet, ou fil de commentaires plein → `409 { error }` ; écriture de commentaire sur un store sans commentaires → `501 { error }` ; `onDeleting` a levé → `502` ; tout le reste → `500 { error: "Internal server error" }`, ou le message que renvoie `describeError`.
+**Erreurs :** JSON invalide → `400 { error }` ; échec de validation → `400 { errors: [{ field, message }] }`, les 20 premiers problèmes ; corps au-delà de `maxBodyBytes` → `413` ; identifiants absents ou faux → `401` ; refus d'`authorize` ou d'un contrôle CSRF → `403` ; corps non JSON avec `access` → `415` ; id inconnu → `404` ; `clientId` appartenant à un autre projet, `clientId` de commentaire déjà utilisé sur un autre feedback, ou commentaire `client` sur un fil plein → `409 { error }` ; valeur plus longue que ce que tient le store (une colonne `VARCHAR(191)` sur MySQL) → `422 { error }` ; écriture de commentaire sur un store sans commentaires → `501 { error }` ; `onDeleting` a levé → `502` ; tout le reste → `500 { error: "Internal server error" }`, ou le message que renvoie `describeError`.
 
 ### Les limites de validation à connaître
 
-`message` ≤ 5000 caractères · `annotations` ≤ 50 par feedback · `body` d'un commentaire ≤ 5000 caractères, 100 commentaires par fil · `screenshotDataUrl` ≤ 1,5 Mo, JPEG/PNG/WebP uniquement · `diagnostics` ≤ 50 entrées console + 20 réseau · `clientId` doit correspondre à `[a-zA-Z0-9_-]+` · `authorEmail` suit le même motif Unicode que la fenêtre d'identité du widget (`françois@exemple.fr` passe), donc une adresse acceptée par la fenêtre n'est jamais refusée ici.
+Le corps entier ≤ `maxBodyBytes` (4 Mio) · `message` ≤ 5000 caractères · `annotations` ≤ 50 par feedback · `body` d'un commentaire ≤ 5000 caractères, 100 commentaires `client` par fil (les réponses `team` ne sont pas plafonnées) · `screenshotDataUrl` ≤ 1,5 Mo, JPEG/PNG/WebP uniquement · `diagnostics` ≤ 50 entrées console + 20 réseau · `clientId` doit correspondre à `[a-zA-Z0-9_-]+` · `authorEmail` suit le même motif Unicode que la fenêtre d'identité du widget (`françois@exemple.fr` passe), donc une adresse acceptée par la fenêtre n'est jamais refusée ici.
 
 ## Webhooks
 
@@ -390,7 +596,7 @@ createSitepingHandler({
 });
 ```
 
-`type` vaut `"slack"`, `"discord"` ou `"generic"` (le défaut — il poste l'enregistrement en JSON avec l'e-mail de l'auteur non masqué : traitez donc les cibles de webhook générique comme de confiance ; le `clientId` est retiré comme partout ailleurs). Chaque appel a un timeout de 5 secondes, les échecs ne bloquent jamais l'envoi, et un `onError(err, feedbackId)` optionnel permet de les journaliser. Un `clientId` rejoué ne les redéclenche jamais, et deux envois simultanés du même `clientId` (le widget qui relance une requête expirée) ne notifient qu'une fois lorsqu'ils atteignent le même processus serveur. Entre plusieurs instances, seul le store peut les départager : le `@unique` de Prisma sur `clientId` le fait, tout comme l'index unique du [store Drizzle](/fr/docs/adapters/drizzle). Les stores memory et localStorage, comme tout store construit sur `createCollectionStore`, ne dédoublonnent qu'au sein d'une même instance de store, et un store personnalisé qui renvoie l'enregistrement existant sur un doublon peut notifier deux fois s'il n'implémente pas `createFeedbackIfAbsent` de façon atomique — voir [Écrire un adapter](/fr/docs/adapters/writing-an-adapter#effets-de-création-exactement-une-fois).
+`type` vaut `"slack"`, `"discord"` ou `"generic"` (le défaut — il poste l'enregistrement en JSON avec l'e-mail de l'auteur non masqué : traitez donc les cibles de webhook générique comme de confiance ; le `clientId` est retiré comme partout ailleurs, de ses commentaires aussi, et `GenericWebhookPayload` type le corps tel que le récepteur le lit, dates en chaînes ISO). Chaque appel a un timeout de 5 secondes par défaut — réglez `timeoutMs` par webhook, un entier positif jusqu'à 2 147 483 647, le plus long délai que tient un minuteur ; la factory lève sur toute autre valeur. Les échecs ne bloquent jamais l'envoi, et un `onError(err, feedbackId)` optionnel permet de les journaliser — un `onError` asynchrone est attendu, et son propre échec est signalé à `console.warn`. Un `clientId` rejoué ne les redéclenche jamais, et deux envois simultanés du même `clientId` (le widget qui relance une requête expirée) ne notifient qu'une fois lorsqu'ils atteignent le même processus serveur. Entre plusieurs instances, seul le store peut les départager : le `@unique` de Prisma sur `clientId` le fait, tout comme l'index unique du [store Drizzle](/fr/docs/adapters/drizzle). Les stores memory et localStorage, comme tout store construit sur `createCollectionStore`, ne dédoublonnent qu'au sein d'une même instance de store, et un store personnalisé qui renvoie l'enregistrement existant sur un doublon peut notifier deux fois s'il n'implémente pas `createFeedbackIfAbsent` de façon atomique — voir [Écrire un adapter](/fr/docs/adapters/writing-an-adapter#effets-de-création-exactement-une-fois).
 
 Les envois ne sont pas attendus : le widget reçoit sa réponse d'abord. Un runtime serverless ou edge peut geler ou annuler ce travail une fois la réponse partie : confiez-le-lui avec `waitUntil` :
 

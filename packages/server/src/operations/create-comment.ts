@@ -1,21 +1,35 @@
-import { type CommentAuthorRole, isStoreLimit, isStoreNotFound, type SitepingStore } from "@siteping/core";
+import {
+  type CommentAuthorRole,
+  isStoreLimit,
+  isStoreNotFound,
+  isStoreValueTooLong,
+  type SitepingStore,
+} from "@siteping/core";
 import { ERROR_MESSAGES } from "../constants.js";
+import type { SitepingHandlerBaseOptions } from "../options.js";
 import type { Pipeline, Scope } from "../pipeline.js";
 import { commentCreateSchema } from "../validation.js";
 
 interface CreateCommentDependencies<Principal> {
   store: SitepingStore;
   pipeline: Pipeline<Principal>;
+  beforeComment: SitepingHandlerBaseOptions<Principal>["beforeComment"];
 }
 
 /** `POST` with a `feedbackId` — add a comment to that feedback's thread, idempotent on `clientId`. */
-export function createCommentOperation<Principal>({ store, pipeline }: CreateCommentDependencies<Principal>) {
+export function createCommentOperation<Principal>({
+  store,
+  pipeline,
+  beforeComment,
+}: CreateCommentDependencies<Principal>) {
   return async (scope: Scope<Principal>, body: unknown): Promise<Response> => {
     const payload = pipeline.validate(scope, commentCreateSchema, body);
     if (!payload.ok) return payload.response;
-    const { projectName, feedbackId, authorRole, ...comment } = payload.value;
 
     try {
+      const { projectName, feedbackId, authorRole, ...comment } = beforeComment
+        ? await beforeComment(payload.value, scope.context)
+        : payload.value;
       const refusal = await pipeline.authorize(scope, { action: "createComment", projectName, feedbackId });
       if (refusal) return refusal;
       // 501, not 404: the thread may well exist — this store keeps no comments.
@@ -42,6 +56,7 @@ export function createCommentOperation<Principal>({ store, pipeline }: CreateCom
     } catch (error) {
       if (isStoreNotFound(error)) return pipeline.error(scope, 404, ERROR_MESSAGES.feedbackNotFound);
       if (isStoreLimit(error)) return pipeline.error(scope, 409, ERROR_MESSAGES.tooManyComments);
+      if (isStoreValueTooLong(error)) return pipeline.refuseTooLong(scope, error);
       return pipeline.fail(scope, "[siteping] Failed to add comment", error);
     }
   };
