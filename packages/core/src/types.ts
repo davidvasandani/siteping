@@ -399,9 +399,10 @@ export interface SitepingBaseConfig {
    * `SitepingNetworkError`, `SitepingValidationError`, `SitepingAuthError`)
    * for HTTP-mode failures — host apps can `instanceof` to drive retry
    * logic, or read `error.code` (`"NETWORK" | "VALIDATION" | "AUTH" |
-   * "SERVER"`) and `error.retryable`. The type is widened to `Error` so
-   * direct-store callers can still surface raw errors without breaking the
-   * contract.
+   * "SERVER"`) and `error.retryable` — and an `AUTH` error's `status`
+   * (`401` for missing or dead credentials, `403` for a refusal). The type
+   * is widened to `Error` so direct-store callers can still surface raw
+   * errors without breaking the contract.
    *
    * Also receives whatever a `panelActions` callback throws or rejects with
    * (non-`Error` values are wrapped). Those host failures are not API
@@ -812,11 +813,13 @@ export type CommentAuthorRole = (typeof COMMENT_AUTHOR_ROLES)[number];
 export const COMMENT_BODY_MAX_LENGTH = 5000;
 
 /**
- * Most comments one thread holds. List responses embed whole threads, which
- * are not paginated, so this bounds what one feedback weighs however much a
- * public endpoint is spammed. Stores enforce it with `StoreLimitError`; a
- * store without an atomic primitive may overshoot it by the posts that race
- * the last free slot.
+ * Most `client` comments one thread holds. List responses embed whole
+ * threads, which are not paginated, so this bounds what one feedback weighs
+ * however much a public endpoint is spammed. `team` comments — a role only
+ * the access policy grants — neither count nor meet it: a thread spammed
+ * full still takes the team's answer. Stores enforce it with
+ * `StoreLimitError`; a store without an atomic primitive may overshoot it by
+ * the posts that race the last free slot.
  */
 export const MAX_COMMENTS_PER_FEEDBACK = 100;
 
@@ -910,15 +913,29 @@ export class StorePersistenceError extends Error {
 }
 
 /**
- * Thrown when a write would break a bound of the store contract — a thread
- * already holding `MAX_COMMENTS_PER_FEEDBACK` comments. Handlers translate
- * this to HTTP 409.
+ * Thrown when a write would break a bound of the store contract — a
+ * `client` comment on a thread already holding `MAX_COMMENTS_PER_FEEDBACK`
+ * of them. Handlers translate this to HTTP 409.
  */
 export class StoreLimitError extends Error {
   readonly code = "STORE_LIMIT" as const;
   constructor(message = "Store limit reached", options?: ErrorOptions) {
     super(message, options);
     this.name = "StoreLimitError";
+  }
+}
+
+/**
+ * Thrown when a value is longer than the store can hold, though the HTTP
+ * validation accepts it — on MySQL, Prisma maps a plain `String` to
+ * `VARCHAR(191)`. Handlers translate this to HTTP 422: the submission can
+ * never be stored as it is, so a client must not retry it.
+ */
+export class StoreValueTooLongError extends Error {
+  readonly code = "STORE_VALUE_TOO_LONG" as const;
+  constructor(message = "Value too long for the store", options?: ErrorOptions) {
+    super(message, options);
+    this.name = "StoreValueTooLongError";
   }
 }
 
@@ -968,6 +985,14 @@ export function isStorePersistence(error: unknown): error is StorePersistenceErr
 export function isStoreLimit(error: unknown): error is StoreLimitError | CodedError<"STORE_LIMIT"> {
   if (error instanceof StoreLimitError) return true;
   return hasErrorCode(error, "STORE_LIMIT");
+}
+
+/** Type guard for `StoreValueTooLongError`, matching on `code` for the same cross-bundle reason as {@link isStorePersistence}. */
+export function isStoreValueTooLong(
+  error: unknown,
+): error is StoreValueTooLongError | CodedError<"STORE_VALUE_TOO_LONG"> {
+  if (error instanceof StoreValueTooLongError) return true;
+  return hasErrorCode(error, "STORE_VALUE_TOO_LONG");
 }
 
 // ---------------------------------------------------------------------------
@@ -1092,8 +1117,9 @@ export interface SitepingStore {
    * refuse a replay aimed at another thread).
    *
    * Throws `StoreNotFoundError` when the feedback does not exist,
-   * `StoreLimitError` when its thread already holds
-   * `MAX_COMMENTS_PER_FEEDBACK` comments, `StorePersistenceError` when the
+   * `StoreLimitError` when a `client` comment meets a thread already holding
+   * `MAX_COMMENTS_PER_FEEDBACK` of them (a `team` comment is never refused
+   * for it), `StorePersistenceError` when the
    * write cannot be persisted. A comment is not a change of the feedback
    * itself: its `updatedAt` stays as it was.
    *

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { MemoryStore } from "@siteping/adapter-memory";
-import type { FeedbackPermissions, FeedbackResponse, FeedbackResponseList } from "@siteping/core";
+import type { CommentResponse, FeedbackPermissions, FeedbackResponse, FeedbackResponseList } from "@siteping/core";
 import {
   createRemoteJWKSet,
   customFetch,
@@ -56,8 +56,8 @@ const KEY_SET_FAILURES = new Set(["ERR_JOSE_GENERIC", "ERR_JWKS_TIMEOUT", "ERR_J
 function oidcAccess(jwks: JWTVerifyGetKey): SitepingAccessControl<Reviewer> {
   return {
     async authenticate(request) {
-      const authorization = request.headers.get("Authorization");
-      if (!authorization) return VISITOR;
+      const authorization = request.headers.get("Authorization") ?? "";
+      if (!/^Bearer(\s|$)/i.test(authorization)) return VISITOR;
       const token = /^Bearer (\S+)$/i.exec(authorization)?.[1];
       if (!token) return null;
       try {
@@ -157,6 +157,11 @@ function handlerFor(jwks: JWTVerifyGetKey, logger: SitepingLogger = { error: vi.
       authorName: principal.name || input.authorName,
       authorEmail: principal.email || input.authorEmail,
     }),
+    beforeComment: (input, { principal }) => ({
+      ...input,
+      authorName: principal.name || input.authorName,
+      authorEmail: principal.email || input.authorEmail,
+    }),
   });
 }
 
@@ -177,6 +182,25 @@ async function submit(handler: SitepingHandler, headers: Record<string, string> 
   );
   expect(response.status).toBe(201);
   return (await response.json()) as FeedbackResponse;
+}
+
+async function reply(
+  handler: SitepingHandler,
+  feedbackId: string,
+  headers: Record<string, string> = {},
+): Promise<CommentResponse> {
+  clientIds += 1;
+  const body = {
+    projectName: PROJECT,
+    feedbackId,
+    body: "Fixed in the next deploy",
+    authorName: "Someone",
+    authorEmail: "someone@acme.example",
+    clientId: `oidc-${clientIds}`,
+  };
+  const response = await handler.POST(send("POST", body, headers));
+  expect(response.status).toBe(201);
+  return (await response.json()) as CommentResponse;
 }
 
 function list(handler: SitepingHandler, headers: Record<string, string> = {}): Promise<Response> {
@@ -258,6 +282,51 @@ describe("OpenID Connect recipe", () => {
     expect(authors).toHaveLength(2);
   });
 
+  it("takes a reply's author from the token too", async () => {
+    const handler = handlerFor(remoteKeySet());
+    const admin = bearer(await accessToken(ADMIN));
+    const created = await submit(handler);
+    await reply(handler, created.id, admin);
+    await reply(handler, created.id, bearer(await accessToken(MEMBER)));
+    await reply(handler, created.id);
+
+    const thread = (await page(handler, admin)).feedbacks[0]?.comments ?? [];
+
+    expect(thread.map((c) => [c.authorName, c.authorEmail])).toEqual([
+      [ADMIN.name, ADMIN.email],
+      // MEMBER's email is unverified, and a visitor has no token: what the client sent is kept.
+      [MEMBER.name, "someone@acme.example"],
+      ["Someone", "someone@acme.example"],
+    ]);
+  });
+
+  it("takes a signed-in replier's name from the token too, so no one replies as another reviewer", async () => {
+    const handler = handlerFor(remoteKeySet());
+    const admin = bearer(await accessToken(ADMIN));
+    const created = await submit(handler);
+    const replyAs = async (headers: Record<string, string>, clientId: string) => {
+      const body = {
+        projectName: PROJECT,
+        feedbackId: created.id,
+        body: "Approved, ship it",
+        authorName: "Alice (client PM)",
+        authorEmail: "alice@client.example",
+        clientId,
+      };
+      expect((await handler.POST(send("POST", body, headers))).status).toBe(201);
+    };
+
+    await replyAs(bearer(await accessToken(MEMBER)), "oidc-reply-member");
+    await replyAs(admin, "oidc-reply-admin");
+
+    const thread = (await page(handler, admin)).feedbacks[0]?.comments ?? [];
+    expect(thread.map((c) => [c.authorName, c.authorEmail])).toEqual([
+      // MEMBER's email is unverified: the one the request sent is kept.
+      [MEMBER.name, "alice@client.example"],
+      [ADMIN.name, ADMIN.email],
+    ]);
+  });
+
   it.each<[string, () => Promise<Record<string, string>>]>([
     [
       "an ID token, whose audience is the client id",
@@ -282,14 +351,25 @@ describe("OpenID Connect recipe", () => {
       async () => bearer(new UnsecuredJWT({ ...ADMIN, iss: ISSUER, aud: AUDIENCE, exp: inFiveMinutes() }).encode()),
     ],
     ["garbage", async () => bearer("not-a-jwt")],
-    ["another scheme", async () => ({ Authorization: `Basic ${btoa("ada:secret")}` })],
     ["an empty bearer", async () => ({ Authorization: "Bearer " })],
+    ["a bare Bearer scheme", async () => ({ Authorization: "Bearer" })],
   ])("answers 401 to %s instead of treating it as a visitor", async (_, headers) => {
     const logger = { error: vi.fn() };
     const handler = handlerFor(remoteKeySet(), logger);
 
     expect((await list(handler, await headers())).status).toBe(401);
     expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  it("serves a staging site behind HTTP Basic auth, whose credentials ride on every request", async () => {
+    const handler = handlerFor(remoteKeySet());
+    const basic = { Authorization: `Basic ${btoa("client:staging-password")}` };
+
+    const created = await submit(handler, basic);
+    const visible = await page(handler, basic);
+
+    expect(created.permissions).toEqual(VISITOR_PERMISSIONS);
+    expect(visible.feedbacks.map((f) => f.permissions)).toEqual([VISITOR_PERMISSIONS]);
   });
 
   it.each<[string, FetchImplementation]>([
@@ -430,6 +510,7 @@ describe("OpenID Connect recipe — the docs", () => {
     ["interface Reviewer {", '"ERR_JWKS_INVALID"]);'],
     ["async authenticate(request) {", "canReadAuthorEmail: (principal) => principal.isAdmin,"],
     ["beforeCreate: (input, { principal }) => ({", "}),"],
+    ["beforeComment: (input, { principal }) => ({", "}),"],
     ["const ownerships = new WeakMap", "return ids;"],
     ['authorize: async ({ principal, action, feedbackId = "", request }) =>', ".has(feedbackId)),"],
     ["onCreated: async (feedback, { principal }) => {", "},"],

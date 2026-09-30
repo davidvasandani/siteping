@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { MemoryStore } from "@siteping/adapter-memory";
 import {
   type CommentResponse,
@@ -5,6 +7,7 @@ import {
   type FeedbackResponseList,
   MAX_COMMENTS_PER_FEEDBACK,
   type SitepingStore,
+  StoreValueTooLongError,
 } from "@siteping/core";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -169,6 +172,36 @@ describe("comments — POST", () => {
     expect(created).toMatchObject({ authorEmail: "", authorRole: "client" });
   });
 
+  it("stamps client when no role is sent, even by a caller who could speak as the team", async () => {
+    const keyed = createSitepingHandler({ store: new MemoryStore(), apiKey: API_KEY });
+    const staffed = createSitepingHandler({
+      store: new MemoryStore(),
+      access: { authenticate: () => ({ id: "staff" }), canCommentAsTeam: () => true },
+    });
+
+    for (const [handler, headers] of [
+      [keyed, BEARER],
+      [staffed, {}],
+    ] as const) {
+      const feedback = await createFeedback(handler, headers);
+      const { authorRole: _, ...withoutRole } = commentBody(feedback.id);
+      expect((await postComment(handler, withoutRole, headers)).authorRole).toBe("client");
+    }
+  });
+
+  it("answers 404 when the store itself finds no feedback, without verifyProjectOwnership", async () => {
+    // Optional on the contract, and the apiKey policy starts without it: the store's own miss answers.
+    const store: SitepingStore = Object.assign(Object.create(new MemoryStore()), { verifyProjectOwnership: undefined });
+    const logger = silentLogger();
+    const handler = createSitepingHandler({ store, apiKey: API_KEY, logger });
+
+    const response = await handler.POST(request("POST", commentBody("does-not-exist")));
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "Feedback not found" });
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
   it("answers 404 for an unknown feedback and for another project's, storing nothing", async () => {
     const store = new MemoryStore();
     const handler = createSitepingHandler({ store });
@@ -183,26 +216,39 @@ describe("comments — POST", () => {
     expect((await store.findByClientId("uuid-123"))?.comments).toEqual([]);
   });
 
-  it(`answers 409 once the thread holds ${MAX_COMMENTS_PER_FEEDBACK} comments`, async () => {
+  it(`answers 409 once the thread holds ${MAX_COMMENTS_PER_FEEDBACK} client comments — and still takes the team's`, async () => {
     const store = new MemoryStore();
-    const handler = createSitepingHandler({ store });
+    // The widget's setup: anyone reads and posts, the key holder speaks as the team.
+    const handler = createSitepingHandler({ store, apiKey: API_KEY, publicEndpoints: ["GET", "POST", "OPTIONS"] });
     const feedback = await createFeedback(handler);
-    for (let i = 0; i < MAX_COMMENTS_PER_FEEDBACK; i++) {
-      await store.addComment(feedback.id, {
-        body: "b",
-        authorName: "a",
-        authorEmail: "",
-        authorRole: "client",
-        clientId: `seed-${i}`,
-      });
-    }
+    for (let i = 0; i < MAX_COMMENTS_PER_FEEDBACK; i++) await postComment(handler, commentBody(feedback.id));
+
+    const spam = await handler.POST(request("POST", commentBody(feedback.id)));
+    const answer = await handler.POST(request("POST", commentBody(feedback.id, { authorRole: "team" }), BEARER));
+
+    expect(spam.status).toBe(409);
+    expect(await spam.json()).toEqual({
+      error: `Too many client comments on this feedback (max ${MAX_COMMENTS_PER_FEEDBACK})`,
+    });
+    expect(answer.status).toBe(201);
+    expect(await answer.json()).toMatchObject({ authorRole: "team" });
+  });
+
+  it("answers 422 to a comment the store cannot hold, logged for the operator", async () => {
+    const store = new MemoryStore();
+    store.addComment = () => Promise.reject(new StoreValueTooLongError());
+    const logger = silentLogger();
+    const handler = createSitepingHandler({ store, logger });
+    const feedback = await createFeedback(handler);
 
     const response = await handler.POST(request("POST", commentBody(feedback.id)));
 
-    expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({
-      error: `Too many comments on this feedback (max ${MAX_COMMENTS_PER_FEEDBACK})`,
-    });
+    expect(response.status).toBe(422);
+    expect(await response.json()).toEqual({ error: "A value is too long for this server's database" });
+    expect(logger.error).toHaveBeenCalledWith(
+      "[siteping] A value is too long for the store",
+      expect.objectContaining({ error: expect.any(StoreValueTooLongError) }),
+    );
   });
 
   it("reports a store failure as a logged 500", async () => {
@@ -470,12 +516,18 @@ describe("comments — authorization", () => {
 
     expect(posted.status).toBe(403);
     expect(deleted.status).toBe(403);
-    expect(authorize).toHaveBeenCalledWith(
+    // Dry runs, which fill in the POST answers' permissions, ask about these actions too: leave them out.
+    const decisions = authorize.mock.calls.map(([context]) => context).filter((context) => !context.dryRun);
+    expect(decisions).toEqual([
+      expect.objectContaining({ action: "create", projectName: PROJECT }),
       expect.objectContaining({ action: "createComment", projectName: PROJECT, feedbackId: feedback.id }),
-    );
-    expect(authorize).toHaveBeenCalledWith(
-      expect.objectContaining({ action: "deleteComment", feedbackId: feedback.id, commentId: kept.id }),
-    );
+      expect.objectContaining({
+        action: "deleteComment",
+        projectName: PROJECT,
+        feedbackId: feedback.id,
+        commentId: kept.id,
+      }),
+    ]);
     expect((await store.findByClientId("uuid-123"))?.comments).toEqual([kept]);
   });
 
@@ -492,5 +544,157 @@ describe("comments — authorization", () => {
     );
 
     expect(response.status).toBe(415);
+  });
+});
+
+describe("comments — beforeComment", () => {
+  interface Member {
+    name: string;
+    email: string;
+    project: string;
+  }
+  const MALLORY: Member = { name: "Mallory", email: "mallory@corp.example", project: PROJECT };
+
+  /** The recipes' shape: the author and the project come from the session, secrets leave the body. */
+  function stampingHandler(store: SitepingStore, authorize = vi.fn(() => true)) {
+    return createSitepingHandler<Member>({
+      store,
+      access: { authenticate: () => MALLORY, authorize, canCommentAsTeam: () => false },
+      beforeComment: (input, { principal }) => ({
+        ...input,
+        projectName: principal.project,
+        authorName: principal.name,
+        authorEmail: principal.email,
+        body: input.body.replace(/token=\S+/g, "token=[redacted]"),
+      }),
+    });
+  }
+
+  it("stores the reply it returns — the session's author, the scrubbed body — never the one sent", async () => {
+    const store = new MemoryStore();
+    const handler = stampingHandler(store);
+    const feedback = await createFeedback(handler);
+
+    const created = await postComment(
+      handler,
+      commentBody(feedback.id, {
+        body: "Ship it token=abc123",
+        authorName: "Alice CEO",
+        authorEmail: "ceo@corp.example",
+      }),
+    );
+
+    const expected = { authorName: "Mallory", authorEmail: "mallory@corp.example", body: "Ship it token=[redacted]" };
+    // The answer blanks the email: this policy lets no one read reviewer emails.
+    expect(created).toMatchObject({ ...expected, authorEmail: "" });
+    expect((await store.findByClientId("uuid-123"))?.comments?.[0]).toMatchObject(expected);
+  });
+
+  it("runs before authorize, which sees the project it returns — another tenant's feedback stays out of reach", async () => {
+    const store = new MemoryStore();
+    const authorize = vi.fn(() => true);
+    const handler = stampingHandler(store, authorize);
+    const foreignResponse = await createSitepingHandler({ store }).POST(
+      request("POST", { ...validPayloadNoAnnotations, projectName: "other-tenant", clientId: "foreign" }),
+    );
+    const foreign = (await foreignResponse.json()) as FeedbackResponse;
+
+    const response = await handler.POST(request("POST", commentBody(foreign.id, { projectName: "other-tenant" })));
+
+    expect(response.status).toBe(404);
+    expect(authorize).toHaveBeenCalledWith(expect.objectContaining({ action: "createComment", projectName: PROJECT }));
+    expect((await store.findByClientId("foreign"))?.comments).toEqual([]);
+  });
+
+  it("leaves the team role a claim the policy must vouch for", async () => {
+    const handler = createSitepingHandler({
+      store: new MemoryStore(),
+      apiKey: API_KEY,
+      beforeComment: (input) => ({ ...input, authorRole: "team" }),
+    });
+    const feedback = await createFeedback(handler);
+
+    expect((await postComment(handler, commentBody(feedback.id))).authorRole).toBe("client");
+    expect((await postComment(handler, commentBody(feedback.id), BEARER)).authorRole).toBe("team");
+  });
+
+  it("answers a logged 500 and stores nothing when it throws", async () => {
+    const store = new MemoryStore();
+    const failure = new Error("session store down");
+    const logger = silentLogger();
+    const handler = createSitepingHandler({
+      store,
+      logger,
+      beforeComment: () => {
+        throw failure;
+      },
+    });
+    const feedback = await createFeedback(handler);
+
+    const response = await handler.POST(request("POST", commentBody(feedback.id)));
+
+    expect(response.status).toBe(500);
+    expect(logger.error).toHaveBeenCalledWith(
+      "[siteping] Failed to add comment",
+      expect.objectContaining({ error: failure }),
+    );
+    expect((await store.findByClientId("uuid-123"))?.comments).toEqual([]);
+  });
+});
+
+describe("comments — the docs' team policy", () => {
+  interface Staffer {
+    isStaff: boolean;
+  }
+  const policy = (): SitepingAccessControl<Staffer> => ({
+    authenticate: (request) => ({ isStaff: request.headers.get("x-staff") === "yes" }),
+    // Everyone submits, reads and replies; only staff triage and delete.
+    authorize: ({ principal, action }) =>
+      principal.isStaff || action === "create" || action === "list" || action === "createComment",
+    canReadAuthorEmail: (principal) => principal.isStaff,
+    // Optional here: it would default to canReadAuthorEmail.
+    canCommentAsTeam: (principal) => principal.isStaff,
+  });
+
+  it("lets a signed-in reviewer reply, but not triage, delete or wipe the project", async () => {
+    const store = new MemoryStore();
+    const handler = createSitepingHandler({ store, access: policy() });
+    const feedback = await createFeedback(handler);
+    const reply = await postComment(handler, commentBody(feedback.id));
+    const staff = { "x-staff": "yes" };
+
+    const refused = [
+      await handler.PATCH(request("PATCH", { id: feedback.id, projectName: PROJECT, status: "resolved" })),
+      await handler.DELETE(request("DELETE", { projectName: PROJECT, feedbackId: feedback.id, commentId: reply.id })),
+      await handler.DELETE(request("DELETE", { id: feedback.id, projectName: PROJECT })),
+      await handler.DELETE(request("DELETE", { projectName: PROJECT, deleteAll: true })),
+    ];
+    const listed = await list(handler);
+
+    expect(refused.map(({ status }) => status)).toEqual([403, 403, 403, 403]);
+    expect(listed.permissions).toEqual({ canDeleteAll: false });
+    expect(listed.feedbacks[0]?.comments).toHaveLength(1);
+    expect((await handler.DELETE(request("DELETE", { projectName: PROJECT, deleteAll: true }, staff))).status).toBe(
+      200,
+    );
+  });
+
+  /** What the code does, not how it reads: no comments, no whitespace. */
+  const bare = (code: string) => code.replace(/(^|\s)\/\/.*$/gm, "$1").replace(/\s+/g, "");
+  const span = (text: string) => {
+    const from = text.indexOf("authorize: ({ principal, action }) =>");
+    const to = text.indexOf("canCommentAsTeam: (principal) => principal.isStaff,", from);
+    expect(from).toBeGreaterThan(0);
+    return bare(text.slice(from, to));
+  };
+
+  it.each(["comments.mdx", "comments.fr.mdx"])("%s prints the policy these tests run", (page) => {
+    const docs = readFileSync(
+      fileURLToPath(new URL(`../../../apps/demo/content/docs/${page}`, import.meta.url)),
+      "utf8",
+    );
+    const tests = readFileSync(fileURLToPath(import.meta.url), "utf8");
+
+    expect(span(docs)).toBe(span(tests));
   });
 });

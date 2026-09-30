@@ -422,12 +422,15 @@ describe("ApiClient", () => {
     expect(err).toBeInstanceOf(SitepingAuthError);
     expect(err.code).toBe("AUTH");
     expect(err.retryable).toBe(false);
+    expect((err as SitepingAuthError).status).toBe(401);
   });
 
-  it("maps 403 to SitepingAuthError", async () => {
+  it("maps 403 to SitepingAuthError, telling it from a 401 by its status", async () => {
     vi.mocked(fetch).mockResolvedValue(new Response("Forbidden", { status: 403 }));
     const err = (await client.getFeedbacks("test").catch((e: SitepingError) => e)) as SitepingError;
     expect(err).toBeInstanceOf(SitepingAuthError);
+    // A policy refusal: the credentials still work, so a host must not drop them.
+    expect((err as SitepingAuthError).status).toBe(403);
   });
 
   it("maps other 4xx to SitepingValidationError (not retryable)", async () => {
@@ -1584,6 +1587,16 @@ describe("ApiClient — bounded waits", () => {
 
     expect(error).toBeInstanceOf(SitepingNetworkError);
     // The headers said 201: the POST landed, so it is not re-sent (a queued replay dedupes by clientId).
+    expect(fetchSpy).toHaveBeenCalledOnce();
+  });
+
+  it("bounds a reply's body the same way, so the thread's composer is never held forever", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => stalledBody(init, 201));
+    const reply = { body: "b", authorName: "A", authorEmail: "a@b.com", authorRole: "client" as const, clientId: "r1" };
+
+    const error = await settlesAt(() => new ApiClient(endpoint, "test").addComment("fb-1", reply), 10_000);
+
+    expect(error).toBeInstanceOf(SitepingNetworkError);
     expect(fetchSpy).toHaveBeenCalledOnce();
   });
 

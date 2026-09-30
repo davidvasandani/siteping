@@ -111,6 +111,8 @@ model SitepingComment {
 
 > `@db.Text` cible PostgreSQL et MySQL. SQLite et CockroachDB le refusent, et un `String` simple y est déjà sans limite — `sync` lit le `provider` de votre datasource et y omet `@db.Text`. Vous écrivez le schéma à la main ? Retirez ces attributs vous-même.
 
+> Sur MySQL, un `String` simple est un `VARCHAR(191)`, plus court que ce qu'accepte le serveur pour `projectName`, `url`, `urlPattern`, `userAgent`, les noms, les e-mails et `clientId`, ainsi que pour le `fingerprint` et l'`anchorKey` d'une annotation. Une valeur qui n'y tient pas — le user agent du navigateur intégré d'Instagram ou de Facebook, qui dépasse 200 caractères, une URL de page complète venue de `getPageScope` — fait répondre au `POST` un `422`, que le widget ne rejoue pas, et le handler journalise `[siteping] A value is too long for the store`.
+
 ## Fils de discussion
 
 Le modèle `SitepingComment` contient les [fils de discussion](/fr/docs/comments). Un schéma synchronisé avant lui continue de fonctionner : sans le modèle, le client généré n'a pas de délégué `sitepingComment`, donc `PrismaStore` lit chaque fil vide et le handler répond `501` aux écritures de commentaires. Pour activer les fils :
@@ -118,11 +120,12 @@ Le modèle `SitepingComment` contient les [fils de discussion](/fr/docs/comments
 ```bash
 npx @siteping/cli sync   # ajoute SitepingComment et SitepingFeedback.comments
 npx prisma db push       # ou : npx prisma migrate dev --name siteping-comments
+npx prisma generate      # Prisma 7 : aucune des commandes ci-dessus ne régénère le client
 ```
 
-Les deux commandes régénèrent le client. Appliquez le schéma à la base avant de déployer ce client : il lit la table des commentaires à chaque liste, donc tant qu'elle n'existe pas, les listes répondent `500` avec l'indication de table manquante.
+Sur Prisma 5 et 6, `db push` et `migrate dev` régénèrent aussi le client ; Prisma 7 laisse cela à `prisma generate`, sans effet néfaste sur 5 et 6. Oubliez-le sur 7 et le client n'a pas de délégué `sitepingComment` : les fils restent désactivés, sans rien dans les logs. Appliquez le schéma à la base avant de déployer ce client : il lit la table des commentaires à chaque liste, donc tant qu'elle n'existe pas, les listes répondent `500` avec l'indication de table manquante.
 
-Un fil revient du plus ancien au plus récent. Un envoi se rattache à son feedback, donc un feedback inconnu donne un `404` quel que soit le provider, et le `clientId` unique fait qu'un envoi rejoué renvoie le commentaire enregistré. La limite de 100 commentaires est un comptage avant l'insertion : des envois qui se disputent la dernière place libre peuvent la dépasser.
+Un fil revient du plus ancien au plus récent. Un envoi se rattache à son feedback, donc un feedback inconnu donne un `404` quel que soit le provider, et le `clientId` unique fait qu'un envoi rejoué renvoie le commentaire enregistré. La limite de 100 commentaires `client` est un comptage avant l'insertion : des envois qui se disputent la dernière place libre peuvent la dépasser.
 
 ## Stockage des captures
 
@@ -160,7 +163,7 @@ Si un envoi échoue, le feedback est quand même enregistré (avec `screenshotUr
 
 Renvoyez une URL `https:` : la vue détail du widget n'affiche que les images `https:`, plus le `http:` simple sur la machine locale (`localhost`, `*.localhost`, `127.0.0.1`, `[::1]`), pour qu'un MinIO ou un localstack local fonctionne en développement.
 
-Ajoutez un `delete(url)` optionnel et l'adapter l'appelle à la suppression d'un feedback — `DELETE` unitaire comme `deleteAll` — pour ne rien laisser traîner dans votre bucket. C'est du meilleur effort : un `delete` qui échoue est journalisé et ne fait jamais échouer la suppression (un objet orphelin vaut mieux qu'une ligne qui refuse de partir). Les URL `data:` en ligne ne lui sont jamais passées.
+Ajoutez un `delete(url)` optionnel et l'adapter l'appelle à la suppression d'un feedback — `DELETE` unitaire comme `deleteAll` — pour ne rien laisser traîner dans votre bucket. C'est du meilleur effort : un `delete` qui échoue est journalisé et ne fait jamais échouer la suppression (un objet orphelin vaut mieux qu'une ligne qui refuse de partir). Les URL `data:` en ligne ne lui sont jamais passées. Au plus 32 suppressions tournent en même temps : une suppression de projet libérant des milliers d'objets ne sature pas votre stockage et n'épuise pas les sockets d'une fonction serverless. La suppression les attend : avec des milliers de captures et un bucket lent ou injoignable, elle peut dépasser la durée maximale d'une fonction serverless, et les objets qu'elle n'a pas encore supprimés restent dans le bucket.
 
 Il est aussi appelé quand une création est refusée parce que son `clientId` est déjà enregistré (un nouvel essai en concurrence avec le premier), pour supprimer la capture envoyée par cette tentative — sauf si le feedback enregistré pointe vers cette même URL. C'est le cas avec une clé dérivée de `feedbackId` : le nouvel essai a réécrit l'objet du feedback enregistré, qui est donc conservé — et a remplacé son image, ce qu'une clé aléatoire évite. Une capture dont l'insertion a échoué pour une autre raison reste dans votre bucket, car un nouvel essai sur une autre instance peut être sur le point de la référencer.
 

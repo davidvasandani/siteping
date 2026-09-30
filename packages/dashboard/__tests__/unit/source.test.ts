@@ -290,7 +290,7 @@ describe("createEndpointSource — addComment() & removeComment()", () => {
   it("DELETEs {projectName, feedbackId, commentId} as JSON", async () => {
     const fetchFn = jsonFetch({ deleted: true });
     const source = createEndpointSource({ endpoint: ENDPOINT, fetchFn });
-    await source.removeComment?.("fb-1", "c-1", "demo");
+    await source.removeComment?.("fb-1", "demo", "c-1");
 
     const { init } = lastCall(fetchFn);
     expect(init.method).toBe("DELETE");
@@ -300,7 +300,7 @@ describe("createEndpointSource — addComment() & removeComment()", () => {
   it("maps a refusal to its typed error", async () => {
     const source = createEndpointSource({ endpoint: ENDPOINT, fetchFn: errorFetch(403) });
     await expect(source.addComment?.("fb-1", "demo", input)).rejects.toBeInstanceOf(SitepingAuthError);
-    await expect(source.removeComment?.("fb-1", "c-1", "demo")).rejects.toBeInstanceOf(SitepingAuthError);
+    await expect(source.removeComment?.("fb-1", "demo", "c-1")).rejects.toBeInstanceOf(SitepingAuthError);
   });
 });
 
@@ -314,6 +314,15 @@ describe("createEndpointSource — error mapping", () => {
     const source = createEndpointSource({ endpoint: ENDPOINT, fetchFn: errorFetch(status) });
     await expect(source.list({ projectName: "demo" })).rejects.toBeInstanceOf(ctor);
   });
+
+  it.each([401, 403] as const)(
+    "keeps the %i on the AUTH error, to tell a dead session from a refusal",
+    async (status) => {
+      const source = createEndpointSource({ endpoint: ENDPOINT, fetchFn: errorFetch(status) });
+      await expect(source.list({ projectName: "demo" })).rejects.toMatchObject({ code: "AUTH", status });
+      await expect(source.setStatus("fb-1", "demo", "resolved")).rejects.toMatchObject({ code: "AUTH", status });
+    },
+  );
 
   it("maps 5xx to SitepingError with code SERVER (not retryable)", async () => {
     const source = createEndpointSource({ endpoint: ENDPOINT, fetchFn: errorFetch(500, "kaboom") });
@@ -449,6 +458,7 @@ describe("createStoreSource", () => {
         rows = next;
       },
       generateId: () => crypto.randomUUID(),
+      comments: true,
     });
     const source = createStoreSource(threaded);
     const input = {
@@ -463,7 +473,7 @@ describe("createStoreSource", () => {
     expect(comment).toMatchObject({ feedbackId: "a", body: "On it", authorRole: "team" });
     expect(rows[0]?.comments).toHaveLength(1);
 
-    await source.removeComment?.("a", comment?.id ?? "", "demo");
+    await source.removeComment?.("a", "demo", comment?.id ?? "");
     expect(rows[0]?.comments).toEqual([]);
   });
 

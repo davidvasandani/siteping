@@ -1,3 +1,4 @@
+export { settleWithConcurrencyLimit } from "./concurrency.js";
 export { buildDeepLink, parseHttpUrl } from "./deep-link.js";
 export { EMAIL_PATTERN, isValidEmail } from "./email.js";
 export type { SitepingErrorCode } from "./errors.js";
@@ -27,7 +28,7 @@ export type {
 } from "./schema.js";
 export { isRelationField, isScalarField, SITEPING_MODELS } from "./schema.js";
 export type { ScreenshotStorage } from "./screenshot-storage.js";
-export { screenshotMimeType } from "./screenshot-storage.js";
+export { SCREENSHOT_DELETE_CONCURRENCY, screenshotMimeType } from "./screenshot-storage.js";
 export type { CollectionStore, CollectionStoreBackend } from "./store-helpers.js";
 export {
   buildAnnotationRecord,
@@ -113,17 +114,21 @@ export {
   isStoreLimit,
   isStoreNotFound,
   isStorePersistence,
+  isStoreValueTooLong,
   MAX_COMMENTS_PER_FEEDBACK,
   OPEN_FEEDBACK_STATUSES,
   StoreDuplicateError,
   StoreLimitError,
   StoreNotFoundError,
   StorePersistenceError,
+  StoreValueTooLongError,
   toFeedbackUpdate,
 } from "./types.js";
 export {
   errorFromResponse,
   feedbackQueryToSearchParams,
+  isCommentGone,
+  isThreadFull,
   mergeRequestHeaders,
   networkErrorFromException,
   newClientId,
