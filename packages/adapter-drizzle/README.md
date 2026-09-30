@@ -11,7 +11,7 @@
 ## Install
 
 ```bash
-npm install @siteping/adapter-drizzle drizzle-orm
+npm install @siteping/adapter-drizzle @siteping/server drizzle-orm
 ```
 
 **Peer dependency:** `drizzle-orm` `>=0.45 <1` · Node ≥ 20.
@@ -21,7 +21,7 @@ npm install @siteping/adapter-drizzle drizzle-orm
 ```ts
 // db/schema.ts — then `drizzle-kit generate` as usual
 import { createSitepingPgTables } from "@siteping/adapter-drizzle/pg";
-export const { sitepingFeedbacks, sitepingAnnotations } = createSitepingPgTables();
+export const { sitepingFeedbacks, sitepingAnnotations, sitepingComments } = createSitepingPgTables();
 
 // server
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -29,7 +29,7 @@ import { createPgSitepingStore } from "@siteping/adapter-drizzle/pg";
 const store = createPgSitepingStore(drizzle(process.env.DATABASE_URL!), { logger: console });
 ```
 
-Turso / libSQL: same shape with `createSitepingSqliteTables` and `createLibSQLSitepingStore` from `@siteping/adapter-drizzle/libsql`. Serve the store with `createSitepingHandler({ store })` from `@siteping/adapter-prisma`.
+Turso / libSQL: same shape with `createSitepingSqliteTables` and `createLibSQLSitepingStore` from `@siteping/adapter-drizzle/libsql`. Serve the store with `createSitepingHandler({ store })` from `@siteping/server`.
 
 ## Documentation
 

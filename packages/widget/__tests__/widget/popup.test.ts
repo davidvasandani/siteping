@@ -616,6 +616,31 @@ describe("Popup", () => {
       expect(dialog.hasAttribute("inert")).toBe(false);
     });
 
+    it("keeps its own fade-out inert, but drops a host modal's inert on the open popup", async () => {
+      const flushMutationObservers = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+      const dialog = findDialog();
+      popup.show(makeBounds());
+      dialog.setAttribute("inert", ""); // a sibling-inerting host modal
+      await flushMutationObservers();
+      expect(dialog.hasAttribute("inert")).toBe(false);
+
+      findCancelButton().click();
+      await flushMutationObservers();
+
+      expect(dialog.hasAttribute("inert")).toBe(true);
+    });
+
+    it("stays clickable when a host modal makes <body> click-through", () => {
+      document.body.style.pointerEvents = "none";
+      try {
+        popup.show(makeBounds());
+
+        expect(getComputedStyle(findDialog()).pointerEvents).toBe("auto");
+      } finally {
+        document.body.removeAttribute("style");
+      }
+    });
+
     it("stays closed when cancelled before show()'s first frame", async () => {
       const previous = document.body.appendChild(document.createElement("button"));
       try {
@@ -1446,7 +1471,7 @@ describe("Popup on phones", () => {
     mockMediaQueries([]);
   });
 
-  it("docks to the bottom edge as a full-width sheet with a grab handle", () => {
+  it("docks to the bottom edge as a full-width sheet, with no grab handle it could not honour", () => {
     void popup.show(makeBounds({ top: 500, bottom: 550 }));
     const el = dialog();
     expect(el.style.top).toBe("auto");
@@ -1456,7 +1481,8 @@ describe("Popup on phones", () => {
     expect(el.style.width).toBe("auto");
     expect(el.style.borderRadius).toBe("20px 20px 0 0");
     expect(el.style.background).toBe("rgb(255, 255, 255)"); // solid colors.bg, not glass
-    expect((el.firstElementChild as HTMLElement).style.display).toBe("block");
+    // Only the panel sheet can be swiped away — no handle promising a drag here
+    expect(el.firstElementChild!.querySelector("button[data-type]")).not.toBeNull();
     // jsdom has no layout: the sheet reports its top as the viewport bottom
     expect(popup.sheetTop).toBe(window.innerHeight);
   });
@@ -1490,7 +1516,7 @@ describe("Popup on phones", () => {
       expect(dialog().style.bottom).toBe("300px");
       expect(dialog().style.maxHeight).toBe(`${window.innerHeight - 308}px`);
       // The keyboard covers the home indicator — no safe-area gap above it
-      expect(dialog().style.padding).toBe("8px 16px 16px");
+      expect(dialog().style.padding).toBe("16px");
 
       popup.dismiss();
       expect(dialog().style.transform).toBe("translateY(100%)");
@@ -1524,7 +1550,7 @@ describe("Popup on phones", () => {
     expect(el.style.right).toBe("");
     expect(el.style.bottom).toBe("");
     expect(el.style.top).toBe("158px");
-    expect((el.firstElementChild as HTMLElement).style.display).toBe("none");
+    expect(el.style.padding).toBe("16px");
     expect(popup.sheetTop).toBeNull();
     // Still a touch screen: finger-sized actions and 16px text
     expect(byText(t("popup.cancel")).style.height).toBe("44px");

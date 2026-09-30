@@ -1,9 +1,10 @@
-import type { AnnotationPayload, FeedbackType, ScreenshotRegion } from "@siteping/core";
+import { type AnnotationPayload, type FeedbackType, newClientId, type ScreenshotRegion } from "@siteping/core";
 import { INSTANT_ANNOTATION_SIZE, Z_INDEX_MAX } from "./constants.js";
 import { deepElementFromPoint, findAnchorElement, generateAnchor, rectToPercentages } from "./dom/anchor.js";
 import { el, setText } from "./dom-utils.js";
 import type { EventBus, WidgetEvents } from "./events.js";
 import { deepFocusTarget, isWidgetChrome } from "./focus-tracker.js";
+import { isolateFromHost, registerEscapeLayer } from "./host-isolation.js";
 import type { TFunction } from "./i18n/index.js";
 import { Popup } from "./popup.js";
 import { NO_VIEWPORT_INSETS, type ViewportInsets } from "./popup-placement.js";
@@ -13,6 +14,18 @@ import { isCoarsePointer, isCompactViewport } from "./viewport.js";
 
 /** Below this size (px) a drawn rect is an accidental click — or, on touch, a tap. */
 const MIN_RECT_SIZE = 10;
+
+/** The part of a viewport rect that is on screen. */
+function clampToViewport(r: DOMRect): DOMRect {
+  const left = Math.max(0, r.left);
+  const top = Math.max(0, r.top);
+  return new DOMRect(
+    left,
+    top,
+    Math.max(0, Math.min(r.right, window.innerWidth) - left),
+    Math.max(0, Math.min(r.bottom, window.innerHeight) - top),
+  );
+}
 
 export interface AnnotationComplete {
   annotation: AnnotationPayload;
@@ -55,12 +68,7 @@ interface PopupSession {
 }
 
 function newPopupSession(): PopupSession {
-  // crypto.randomUUID() throws in non-secure contexts (plain HTTP)
-  try {
-    return { clientId: crypto.randomUUID() };
-  } catch {
-    return { clientId: `${Date.now()}-${Math.random().toString(36).slice(2)}` };
-  }
+  return { clientId: newClientId() };
 }
 
 /**
@@ -103,6 +111,11 @@ export class Annotator {
    * than leaving the awaiting closure hung past teardown.
    */
   private rejectPendingSubmission: ((reason: Error) => void) | null = null;
+  /**
+   * The session's Escape handler listens on `document` and also ends a
+   * session from its comment popup: one layer covers overlay, toolbar and popup.
+   */
+  private readonly unregisterEscapeLayer = registerEscapeLayer(document, () => this.isActive);
 
   constructor(
     private readonly colors: ThemeColors,
@@ -152,9 +165,9 @@ export class Annotator {
     const drawMode = !this.instantMode;
     const compact = isCompactViewport();
     const touch = isCoarsePointer();
-    // Touch copy: a tap selects the element under the finger — there is no
-    // focused element to annotate with Enter.
-    const instruction = touch ? this.t("annotator.touchInstruction") : this.t("annotator.instruction");
+    // The visible copy on touch says "tap an element". The overlay's name keeps
+    // the Enter route (#162): tablets with a keyboard, and screen readers on them.
+    const instruction = this.t("annotator.instruction");
 
     // Capture the focused element before activation for keyboard annotation
     this.preActiveFocusElement = document.activeElement;
@@ -186,9 +199,10 @@ export class Annotator {
     // and the accent-colored selection border plus the page tint end up
     // baked into the captured JPEG. See issue #124.
     this.overlay = el("div", {
-      style: `
+      style: /* css */ `
         position:fixed;inset:0;
         z-index:${Z_INDEX_MAX - 1};
+        pointer-events:auto;
         background:rgba(15, 23, 42, 0.04);
         cursor:${drawMode ? "crosshair" : "default"};
         touch-action:none;-webkit-touch-callout:none;
@@ -208,9 +222,10 @@ export class Annotator {
     // "Draw a rectangle" copy is wrong when the composer is already open)
     if (drawMode) {
       this.toolbar = el("div", {
-        style: `
+        style: /* css */ `
           position:fixed;top:0;left:0;right:0;
           z-index:${Z_INDEX_MAX};
+          pointer-events:auto;
           min-height:52px;box-sizing:border-box;
           padding:calc(env(safe-area-inset-top, 0px) + 8px) ${compact ? "12px 8px 16px" : "16px 8px"};
           background:${compact ? this.colors.bg : this.colors.glassBg};
@@ -227,7 +242,7 @@ export class Annotator {
       this.toolbar.setAttribute("data-siteping-ignore", "true");
 
       const dot = el("span", {
-        style: `
+        style: /* css */ `
           width:8px;height:8px;border-radius:50%;flex-shrink:0;
           background:${this.colors.accent};
           box-shadow:0 0 8px ${this.colors.accentGlow};
@@ -244,10 +259,10 @@ export class Annotator {
       this.toolbar.appendChild(style);
 
       const instructionEl = el("span", { style: "font-weight:500;letter-spacing:-0.01em;min-width:0;" });
-      setText(instructionEl, instruction);
+      setText(instructionEl, touch ? this.t("annotator.touchInstruction") : instruction);
 
       const cancelBtn = document.createElement("button");
-      cancelBtn.style.cssText = `
+      cancelBtn.style.cssText = /* css */ `
         height:${touch ? 40 : 34}px;padding:0 18px;border-radius:9999px;flex-shrink:0;
         border:1px solid ${this.colors.border};
         background:${this.colors.glassBg};
@@ -294,6 +309,8 @@ export class Annotator {
     // Escape to cancel
     document.addEventListener("keydown", this.onKeyDown);
 
+    isolateFromHost(this.overlay);
+    if (this.toolbar) isolateFromHost(this.toolbar);
     document.body.appendChild(this.overlay);
     if (this.toolbar) document.body.appendChild(this.toolbar);
 
@@ -403,9 +420,11 @@ export class Annotator {
 
   /**
    * Comment on a whole element with a full-bounds rect — the keyboard (Enter)
-   * path and the touch tap path.
+   * path and the touch tap path. A tapped element can be far taller than the
+   * screen, and the capture renders at devicePixelRatio (3 on phones): the tap
+   * path captures only its visible part, like the instant flow.
    */
-  private async annotateElement(target: HTMLElement): Promise<void> {
+  private async annotateElement(target: HTMLElement, tap = false): Promise<void> {
     const bounds = target.getBoundingClientRect();
     if (bounds.width <= 0 || bounds.height <= 0) return;
 
@@ -437,7 +456,7 @@ export class Annotator {
 
     // Submission stays inside the popup so the user gets a visible spinner
     // until the server confirms — see finishDrawing for the rationale.
-    const result = await this.openForm(annotation, rectBounds);
+    const result = await this.openForm(annotation, rectBounds, tap ? clampToViewport(rectBounds) : rectBounds);
 
     this.drawingRect?.remove();
     this.drawingRect = null;
@@ -477,7 +496,7 @@ export class Annotator {
    */
   private createDrawingRect(): HTMLElement {
     const rect = el("div", {
-      style: `
+      style: /* css */ `
         position:fixed;
         border:2px solid ${this.colors.accent};
         background:${this.colors.accent}12;
@@ -526,18 +545,18 @@ export class Annotator {
   private onTouchEnd = async (e: TouchEvent): Promise<void> => {
     const touch = e.changedTouches[0];
     if (!touch) return;
-    // A tap, not a drag: comment on the element under the finger — a
-    // fingertip hides the very corner it is trying to place.
+    // A tap, or a slide too thin to frame an area (a finger along a line of
+    // text): comment on the element under the finger instead of dropping the
+    // gesture — a fingertip hides the very corner it is trying to place.
     if (
       this.isDrawing &&
-      Math.abs(touch.clientX - this.startX) < MIN_RECT_SIZE &&
-      Math.abs(touch.clientY - this.startY) < MIN_RECT_SIZE
+      (Math.abs(touch.clientX - this.startX) < MIN_RECT_SIZE || Math.abs(touch.clientY - this.startY) < MIN_RECT_SIZE)
     ) {
       this.isDrawing = false;
       this.drawingRect?.remove();
       this.drawingRect = null;
       const target = this.elementAt(touch.clientX, touch.clientY);
-      if (target) await this.annotateElement(target);
+      if (target) await this.annotateElement(target, true);
       return;
     }
     await this.finishDrawing(touch.clientX, touch.clientY);
@@ -637,19 +656,12 @@ export class Annotator {
     // Use the anchor element's bounding box (clamped to viewport) for
     // screenshot capture so reviewers get meaningful context, not a 20×20 px
     // postage stamp.
-    const left = Math.max(0, anchorBounds.left);
-    const top = Math.max(0, anchorBounds.top);
-    const captureRect = new DOMRect(
-      left,
-      top,
-      Math.max(0, Math.min(anchorBounds.right, window.innerWidth) - left),
-      Math.max(0, Math.min(anchorBounds.bottom, window.innerHeight) - top),
-    );
+    const captureRect = clampToViewport(anchorBounds);
 
     // Create a visual indicator at the click point
     this.drawingRect?.remove();
     this.drawingRect = el("div", {
-      style: `
+      style: /* css */ `
         position:fixed;
         left:${x}px;
         top:${y}px;
@@ -817,6 +829,7 @@ export class Annotator {
   }
   destroy(): void {
     this.deactivate();
+    this.unregisterEscapeLayer();
     // Settle an in-flight submission BEFORE tearing down the popup, so the
     // `runSubmission` promise cannot outlive teardown. The launcher's
     // `destroy()` also calls `bus.removeAll()`, which would otherwise strip

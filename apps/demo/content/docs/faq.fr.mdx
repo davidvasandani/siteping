@@ -10,7 +10,7 @@ Par ordre de probabilité :
 1. **Vous êtes dans un build de production.** Le widget passe son tour quand `NODE_ENV` vaut `production` (seul `process.env.NODE_ENV` est lu). Passez `forceShow: true` en staging, ou vérifiez avec `onSkip`.
 2. **Config invalide** — un `endpoint`/`store` ou un `projectName` manquant affiche un `console.error` et ne monte rien. Ce cas ne déclenche *pas* `onSkip`, donc ouvrez la console.
 3. **Il est déjà monté.** Un second `initSiteping()` renvoie l'instance existante au lieu d'un deuxième bouton.
-4. **La fenêtre est plus étroite que votre `minViewportWidth`.** Seulement si vous en avez défini un — par défaut le widget s'affiche à toutes les largeurs, téléphones compris. `onSkip("mobile")` vous le dit.
+4. **La fenêtre est plus étroite que votre `minViewportWidth`.** Seulement si vous en avez défini un — par défaut le widget s'affiche à toutes les largeurs, téléphones compris (avant la 0.11, le défaut était 768 px). `onSkip("mobile")` vous le dit.
 
 ## Mes clients ont-ils besoin d'un compte ?
 
@@ -32,7 +32,7 @@ Le commentaire, son type et son statut, la page (le **chemin** de l'URL uniqueme
 
 ## N'importe qui peut-il lire mon API de feedback ?
 
-Les lectures sont publiques par défaut, avec les e-mails des auteurs masqués pour les appelants non authentifiés, et `clientId` jamais exposé. Les appels destructifs (changements de statut, suppressions) exigent un `apiKey` d'origine — et en production, l'adapter serveur refuse de démarrer sans. [Détails](/fr/docs/adapters/prisma#le-modèle-de-sécurité-franchement).
+Les lectures sont publiques par défaut, avec les e-mails des auteurs masqués pour les appelants non authentifiés, et `clientId` jamais exposé. Les appels destructifs (changements de statut, suppressions) exigent un `apiKey` d'origine — et en production, l'adapter serveur refuse de démarrer sans. [Détails](/fr/docs/server#le-modèle-de-sécurité-franchement).
 
 ## Que se passe-t-il si le réseau lâche en plein envoi ?
 

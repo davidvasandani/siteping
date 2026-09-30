@@ -3,6 +3,7 @@
 import type { AnnotationResponse, FeedbackResponse } from "@siteping/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventBus, type WidgetEvents } from "../../src/events.js";
+import { isolateFromHost } from "../../src/host-isolation.js";
 import { createT } from "../../src/i18n/index.js";
 import { buildThemeColors } from "../../src/styles/theme.js";
 import type { Tooltip } from "../../src/tooltip.js";
@@ -413,6 +414,55 @@ describe("MarkerManager", () => {
   });
 
   // -------------------------------------------------------------------------
+  // revealPin — the panel's "Go to annotation"; false sends it to the stored offsets
+  // -------------------------------------------------------------------------
+
+  describe("revealPin", () => {
+    let scrollIntoView = vi.fn<Element["scrollIntoView"]>();
+    const original = Element.prototype.scrollIntoView;
+    beforeEach(() => {
+      scrollIntoView = vi.fn<Element["scrollIntoView"]>();
+      Element.prototype.scrollIntoView = scrollIntoView; // jsdom lacks it
+    });
+    afterEach(() => {
+      Element.prototype.scrollIntoView = original;
+    });
+
+    it("scrolls to a pin that is on screen", () => {
+      markers.render([makeFeedback({ id: "fb-1" })]);
+
+      expect(markers.revealPin("fb-1")).toBe(true);
+      expect(scrollIntoView).toHaveBeenCalledOnce();
+    });
+
+    it("returns false when the anchor no longer resolves (every pin hidden)", () => {
+      mockState.returnNull = true;
+      markers.render([makeFeedback({ id: "fb-orphan" })]);
+
+      expect(markers.revealPin("fb-orphan")).toBe(false);
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      // The public focusFeedback contract is unchanged: the entry exists
+      expect(markers.focusFeedback("fb-orphan")).toBe(true);
+    });
+
+    it("returns false while the markers are hidden with the eye toggle", () => {
+      markers.render([makeFeedback({ id: "fb-1" })]);
+      bus.emit("annotations:toggle", false);
+
+      expect(markers.revealPin("fb-1")).toBe(false);
+      expect(scrollIntoView).not.toHaveBeenCalled();
+
+      bus.emit("annotations:toggle", true);
+      expect(markers.revealPin("fb-1")).toBe(true);
+    });
+
+    it("returns false for an unknown id", () => {
+      markers.render([makeFeedback({ id: "fb-1" })]);
+      expect(markers.revealPin("nope")).toBe(false);
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // Annotations toggle via event bus
   // -------------------------------------------------------------------------
 
@@ -486,6 +536,33 @@ describe("MarkerManager", () => {
       if (badge) {
         expect(badge.style.display).not.toBe("none");
       }
+    });
+
+    it("clicking another widget surface collapses an expanded cluster", () => {
+      markers.render([makeFeedback({ id: "fb-s1" }), makeFeedback({ id: "fb-s2" })]);
+      document.querySelector<HTMLElement>('[data-feedback-id="fb-s1"]')!.click();
+      const badge = document.querySelector<HTMLElement>(".sp-cluster-badge")!;
+      expect(badge.style.display).toBe("none");
+      // e.g. the FAB's shadow host, which stops `click` before the document
+      const otherSurface = document.createElement("div");
+      document.body.appendChild(otherSurface);
+      isolateFromHost(otherSurface);
+
+      otherSurface.click();
+
+      expect(badge.style.display).toBe("flex");
+      otherSurface.remove();
+    });
+
+    it("keeps marker clicks away from host document listeners", () => {
+      markers.render([makeFeedback({ id: "fb-h1" })]);
+      const onHostClick = vi.fn();
+      document.addEventListener("click", onHostClick);
+
+      document.querySelector<HTMLElement>('[data-feedback-id="fb-h1"]')!.click();
+      document.removeEventListener("click", onHostClick);
+
+      expect(onHostClick).not.toHaveBeenCalled();
     });
 
     it("expanded cluster hides badges, collapsed shows them", () => {

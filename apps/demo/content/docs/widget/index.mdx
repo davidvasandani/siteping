@@ -18,7 +18,7 @@ const siteping = initSiteping({
 });
 ```
 
-`initSiteping` is the package's main runtime export, alongside the two i18n helpers (`registerLocale`, `loadLocale`) and the TypeScript types. It weighs about **35 KB gzipped** (ESM), lazy-loads its heavier parts (panel, locales, screenshot engine), and renders inside a closed Shadow DOM so your page styles and the widget's never collide.
+`initSiteping` is the package's main runtime export, alongside the two i18n helpers (`registerLocale`, `loadLocale`) and the TypeScript types. It weighs about **34 KB gzipped** (ESM), lazy-loads its heavier parts (panel, locales, screenshot engine), and renders inside a closed Shadow DOM so your page styles and the widget's never collide.
 
 ## When the widget shows — and when it doesn't
 
@@ -30,6 +30,8 @@ const siteping = initSiteping({
 4. **Minimum width (opt-in)** — below `minViewportWidth` it skips with `onSkip("mobile")`. The default, `0`, renders at every width: phones get the [compact layout](#on-phones-and-tablets). Also bypassed by `forceShow`.
 5. **Config validation** — no `endpoint`/`store`, or no `projectName`? The widget logs a `console.error` and no-ops. This one does **not** call `onSkip` — check the console, not the callback.
 
+> **Changed in 0.11:** `minViewportWidth` used to default to `768`, which kept the widget off phones. A site that upgrades without setting it now shows the widget on phones too, and `onSkip("mobile")` no longer fires. Set `minViewportWidth: 768` to keep the previous behaviour. With `enableRightClickComment` on, a long-press on an Android phone now opens the composer as well.
+
 ## On phones and tablets
 
 The same widget adapts to the screen it lands on — there is nothing to configure.
@@ -40,7 +42,7 @@ The same widget adapts to the screen it lands on — there is nothing to configu
 - The floating menu shows its labels (there is no hover to reveal them), and every control is sized for a finger.
 - Form fields use 16 px text, so iOS Safari doesn't zoom the page when one is focused.
 
-**Phones** (viewport up to 640 px wide):
+**Phones** (viewport up to 640 px wide, or a touch screen up to 500 px tall — a phone held sideways):
 
 - The feedback form is a **bottom sheet** that stays above the on-screen keyboard. If it would cover what the client just selected, the page scrolls so the selection stays in view.
 - The feedback panel is a bottom sheet over the dimmed page — close it with the ✕, by tapping the page, or by swiping its header down. Filters fit on one scrollable row, and the type and sort menus open as action sheets.
@@ -62,12 +64,13 @@ const off = siteping.on("feedback:sent", (feedback) => { ... });
 siteping.destroy();               // full teardown, restores all patched globals
 ```
 
-`on()` returns an unsubscribe function. Seven public events are available:
+`on()` returns an unsubscribe function. Eight public events are available:
 
 | Event | Payload | Fires when |
 |---|---|---|
 | `feedback:sent` | the created feedback | A submission succeeded |
 | `feedback:deleted` | the feedback id | A feedback was deleted |
+| `comment:added` | the stored comment | A reply was posted from a feedback's [discussion thread](/docs/comments#in-the-widget) |
 | `feedback:error` | the `Error` | A feedback API call failed — same payload as the `onError` config callback, which additionally receives [panel action](/docs/widget/panel-actions#errors) failures |
 | `panel:open` / `panel:close` | — | The panel opened / closed |
 | `annotation:start` / `annotation:end` | — | An annotation session started / ended. `end` fires whether the user submitted or cancelled, and both entry paths — the FAB and [right-click comments](/docs/widget/right-click) — emit the symmetric pair, so you can pause chat bubbles or analytics overlays in between |
@@ -90,7 +93,7 @@ export function Feedback() {
 }
 ```
 
-The hook returns `null` until it mounts, then the instance. Changing `endpoint` or another structural option requires a remount; changing a callback does not — **every** callback the config accepts (`onFeedbackSent`, `onError`, `onOpen`, `onClose`, `onAnnotationStart`, `onAnnotationEnd`, `onSkip`) is read at call time, so a handler that closes over fresh state fires with that state — and so are the [panel actions](/docs/widget/panel-actions#react) callbacks. They also go quiet after unmount, so a late response can't call into a torn-down tree.
+The hook returns `null` until it mounts, then the instance. Changing `endpoint` or another structural option requires a remount; changing a callback does not — **every** callback the config accepts (`onFeedbackSent`, `onCommentAdded`, `onError`, `onOpen`, `onClose`, `onAnnotationStart`, `onAnnotationEnd`, `onSkip`) is read at call time, so a handler that closes over fresh state fires with that state — and so are the [panel actions](/docs/widget/panel-actions#react) callbacks. They also go quiet after unmount, so a late response can't call into a torn-down tree.
 
 ## Handling errors
 
@@ -112,6 +115,33 @@ Branch on `error.code`, not `instanceof` — the error classes themselves are no
 ## Statuses, from the widget's side
 
 Feedback has four statuses (`open`, `in_progress`, `resolved`, `wont_fix`). The widget **displays** all four but its own actions are deliberately binary: resolve and reopen. The in-between states belong to your triage workflow in the [dashboard](/docs/dashboard).
+
+## Filtering the panel
+
+The panel's filters combine, and narrow the list only — the markers on the page keep showing the page's feedback:
+
+- **Search** matches the message text.
+- **Type** keeps one feedback type.
+- **Status**: *Open* covers `open` and `in_progress`, *Resolved* covers `resolved` and `wont_fix`.
+- **Scope**: *This page* (the default), *This type* — every page sharing the current route template, offered when [`getPageScope`](/docs/widget/configuration#page-scoping) returns a `urlPattern` — or *All pages*.
+- **Mine** keeps the feedback sent from this browser.
+
+"Mine" needs no identity and no server support, in HTTP and `store` mode alike. The widget remembers the id of each feedback it sends — the 500 most recent per project and endpoint, in `localStorage`, those the offline queue sends later included — and filters on its side: it walks the list's pages until it has found them all, then shows them at once. The server can't do it for the widget: its public `GET` [blanks author emails](/docs/server#what-responses-expose), and a filter by email would let anyone check whether an address sent feedback. So "Mine" means *this browser*: feedback sent from another browser or device, or before the site's data was cleared, isn't listed.
+
+## Over your modals
+
+Clients often need to report a problem *inside* a dialog. The widget stays usable on top of an open modal — tested against Radix / shadcn/ui `Dialog`, and built for any modal that works the same way (outside-click dismissal, focus trap, scroll lock, hidden siblings):
+
+- its button, annotation overlay, comment popup and panel stay clickable, even when the modal makes the rest of the page click-through (`body { pointer-events: none }`);
+- drawing, typing, clicking or scrolling in the widget neither closes the modal nor lets it pull the focus back;
+- **Escape** closes the widget's open layer first (menu, panel, comment popup, annotation mode); with nothing open in the widget, it closes your modal as usual;
+- the widget stays exposed to screen readers when the modal hides the rest of the page (`aria-hidden`, `inert`).
+
+The widget's own `pointerdown`, `mousedown`, `touchstart`, `touchend`, `click`, `focusin`, `focusout`, `wheel` and `touchmove` events stop at the widget, modal or not: bubble-phase listeners on your page's `document` or `window` never see them. Capture-phase listeners still do, and other events (`pointerup`, `mouseup`, `keydown`…) keep propagating.
+
+Beyond that, the widget steps in only while a modal is open — a visible `aria-modal="true"` element, or a click-through `<body>` — so on a page without one, your fields' own focus and blur handlers see every event. While a modal is open, capture-phase listeners no longer see the widget's `pointerdown` and `focusin` either, and moving the focus from one of the modal's fields into the widget doesn't fire that field's `focusout`, so React's `onBlur` doesn't run; its native `blur` still fires. That is what keeps the modal's focus trap from pulling the focus back.
+
+Limits: a native `<dialog>` opened with `showModal()` makes everything outside it inert, and no script can undo that — the widget can't be used while such a dialog is open. And a modal that intercepts outside `mousedown`, `click` or Tab keys before they reach the page (capture-phase listeners, as focus-trap does by default) can still get in the widget's way.
 
 ## Reliability details you get for free
 

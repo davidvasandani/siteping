@@ -1,19 +1,23 @@
 import {
   CLOSED_FEEDBACK_STATUSES,
+  type CommentResponse,
   FEEDBACK_STATUSES,
   type FeedbackResponse,
+  type FeedbackResponseList,
   type FeedbackStatus,
   type FeedbackType,
   isClosedStatus,
+  MAX_PAGE_LIMIT,
   type PageScope,
   type SitepingPanelAction,
 } from "@siteping/core";
 import type { GetFeedbacksOptions, WidgetClient } from "./api-client.js";
 import { SegmentedControl } from "./components/segmented-control.js";
 import { PAGE_SIZE } from "./constants.js";
-import { el, formatRelativeDate, onClickOutside, parseSvg, setButtonLoading, setText } from "./dom-utils.js";
+import { el, formatRelativeDate, onClickOutside, parseSvg, setButtonLoading, setHidden, setText } from "./dom-utils.js";
 import type { EventBus, WidgetEvents } from "./events.js";
 import { ExportButton } from "./export-utils.js";
+import { registerEscapeLayer } from "./host-isolation.js";
 import { getStatusLabel, getTypeLabel, type TFunction, tWithParams } from "./i18n/index.js";
 import {
   ICON_BUG,
@@ -28,13 +32,17 @@ import {
   ICON_SEARCH,
   ICON_TRASH,
   ICON_UNDO,
+  ICON_USER,
 } from "./icons.js";
+import type { Identity } from "./identity.js";
 import type { MarkerManager } from "./markers.js";
+import type { OwnFeedback } from "./own-feedback.js";
 import { normalizePanelActions } from "./panel-actions.js";
-import { BulkActions } from "./panel-bulk.js";
+import { BulkActions, type TriagePermission } from "./panel-bulk.js";
 import { DetailView } from "./panel-detail.js";
 import { createPageGroupHeader, groupFeedbacksByPage, PanelSortControls, sortFeedbacks } from "./panel-sort.js";
 import { PanelStats } from "./panel-stats.js";
+import { buildThread } from "./panel-thread.js";
 import { focusCardByIndex, getFocusedCardIndex, KeyboardShortcuts } from "./shortcuts.js";
 import { getStatusBgColor, getStatusColor, getTypeBgColor, getTypeColor, type ThemeColors } from "./styles/theme.js";
 import { isCoarsePointer, isCompactViewport } from "./viewport.js";
@@ -82,6 +90,12 @@ export class Panel {
   private pendingScrollId: string | null = null;
   /** Tracks feedback IDs with in-flight mutations to prevent spam-click race conditions */
   private pendingMutations = new Set<string>();
+  /** Whether the backend takes replies — advertised by the last list response. */
+  private canComment = false;
+  /** Reviewer mode (`config.readOnly`): no triage action, whatever the server allows. */
+  private readonly readOnly: boolean;
+  /** The visitor a reply is posted as — `null` when they dismiss the identity prompt. */
+  private readonly resolveIdentity: () => Promise<Identity | null>;
 
   // New feature modules
   private readonly stats: PanelStats;
@@ -102,6 +116,9 @@ export class Panel {
   private scopeSegmented!: SegmentedControl<"this" | "template" | "all">;
   /** Cached initial scope value — applied after construction in `buildScopeSegmented`. */
   private readonly initialScopeFilter: "this" | "template" | "all" = "this";
+  /** "Mine" filter: only the feedback sent from this browser, whose ids the launcher remembers. */
+  private mineOnly = false;
+  private readonly ownFeedback: Pick<OwnFeedback, "ids" | "remove">;
 
   constructor(
     shadowRoot: ShadowRoot,
@@ -116,11 +133,17 @@ export class Panel {
       getScope: () => PageScope;
       scopeAnnotationsByUrl: boolean;
       panelActions?: readonly SitepingPanelAction[] | undefined;
+      ownFeedback?: Pick<OwnFeedback, "ids" | "remove"> | undefined;
+      resolveIdentity?: () => Promise<Identity | null>;
+      readOnly?: boolean | undefined;
     },
   ) {
     this.shadowRoot = shadowRoot;
+    this.readOnly = !!options?.readOnly;
+    this.resolveIdentity = options?.resolveIdentity ?? (async () => null);
     this.getScope = options?.getScope ?? (() => ({ url: window.location.pathname, urlPattern: null }));
     this.scopeAnnotationsByUrl = options?.scopeAnnotationsByUrl ?? true;
+    this.ownFeedback = options?.ownFeedback ?? { ids: () => new Set(), remove: () => {} };
 
     // Phone layout: dims the page behind the sheet; a tap on it closes the panel.
     this.scrim = el("div", { class: "sp-scrim" });
@@ -150,6 +173,8 @@ export class Panel {
     setText(deleteAllLabel, ` ${this.t("panel.deleteAll")}`);
     this.deleteAllBtn.appendChild(deleteAllLabel);
     this.deleteAllBtn.addEventListener("click", () => this.confirmDeleteAll());
+    // Until a list says whether this visitor may use it.
+    setHidden(this.deleteAllBtn, true);
 
     // Export button
     this.exportBtn = new ExportButton(colors, () => this.feedbacks, this.t);
@@ -184,13 +209,14 @@ export class Panel {
     searchWrap.appendChild(searchIcon);
     searchWrap.appendChild(this.searchInput);
 
-    // Filter bar (type dropdown + status segmented + scope segmented).
+    // Filter bar (type dropdown + status segmented + scope segmented + "Mine").
     // The scope control gives users a fast way to widen results to "this type
     // of page" or "all pages" when the host provides a route template.
     const filterBar = el("div", { class: "sp-filter-bar" });
     filterBar.appendChild(this.buildTypeDropdown());
     filterBar.appendChild(this.buildStatusSegmented());
     filterBar.appendChild(this.buildScopeSegmented());
+    filterBar.appendChild(this.buildMineToggle());
 
     // Sort controls
     this.sortControls = new PanelSortControls(colors, () => this.renderList(), this.t);
@@ -210,6 +236,7 @@ export class Panel {
       {
         onResolve: (ids) => this.bulkResolve(ids),
         onDelete: (ids) => this.bulkDelete(ids),
+        permits: (ids, permission) => this.feedbacks.every((f) => !ids.includes(f.id) || this.can(f, permission)),
       },
       this.t,
     );
@@ -256,8 +283,8 @@ export class Panel {
             if (!ann) return;
             // Follow the live pin: the stored offsets come from the author's
             // layout and miss on another screen size. They remain the fallback
-            // when no pin is rendered for this feedback.
-            if (!this.markers.focusFeedback(fb.id)) {
+            // when no pin is on screen (anchor lost, or markers hidden).
+            if (!this.markers.revealPin(fb.id)) {
               window.scrollTo({ left: ann.scrollX, top: ann.scrollY, behavior: "smooth" });
               this.markers.pinHighlight(fb);
             }
@@ -273,6 +300,14 @@ export class Panel {
           }
         },
         onCustomActionError: (error) => this.reportActionError(error),
+        permits: (fb, permission) => this.can(fb, permission),
+        buildThread: (fb) =>
+          buildThread(fb, {
+            t: this.t,
+            locale,
+            canPost: this.canComment && fb.permissions?.canComment !== false,
+            post: (body, clientId) => this.postComment(fb, body, clientId),
+          }),
       },
       this.t,
       locale,
@@ -287,27 +322,10 @@ export class Panel {
           const idx = getFocusedCardIndex(this.listContainer);
           focusCardByIndex(this.listContainer, dir === "down" ? idx + 1 : idx - 1);
         },
-        onResolve: () => {
-          const fb = this.getFocusedFeedback();
-          if (fb && !this.pendingMutations.has(fb.id)) {
-            const card = this.listContainer.querySelector<HTMLElement>(`[data-feedback-id="${CSS.escape(fb.id)}"]`);
-            const btn = card?.querySelector<HTMLButtonElement>('[data-action="resolve"]');
-            if (btn) this.toggleResolve(fb, btn).catch(() => {});
-          }
-        },
-        onDelete: () => {
-          const fb = this.getFocusedFeedback();
-          if (fb && !this.pendingMutations.has(fb.id)) {
-            const card = this.listContainer.querySelector<HTMLElement>(`[data-feedback-id="${CSS.escape(fb.id)}"]`);
-            const btn = card?.querySelector<HTMLButtonElement>('[data-action="delete"]');
-            if (btn) this.deleteFeedback(fb, btn).catch(() => {});
-          }
-        },
+        onResolve: () => this.pressInFocusedCard('[data-action="resolve"]'),
+        onDelete: () => this.pressInFocusedCard('[data-action="delete"]'),
         onFocusSearch: () => this.searchInput.focus(),
-        onToggleSelect: () => {
-          const fb = this.getFocusedFeedback();
-          if (fb) this.bulk.toggle(fb.id);
-        },
+        onToggleSelect: () => this.pressInFocusedCard(".sp-bulk-checkbox"),
         // The detail view covers the whole list (and would hide the help overlay).
         isSuspended: () => this.detail.isVisible,
       },
@@ -414,6 +432,7 @@ export class Panel {
     // Keyboard handling: Escape to close + focus trap. Nested layers (menus,
     // confirm dialog) stop Escape before it bubbles here; the help overlay's
     // handler sits on this same shadow root but runs later, so defer to it.
+    registerEscapeLayer(shadowRoot, () => this.isOpen);
     shadowRoot.addEventListener("keydown", (e) => {
       const ke = e as KeyboardEvent;
       if (ke.key === "Escape" && this.isOpen) {
@@ -431,13 +450,15 @@ export class Panel {
         // (either on themselves or any ancestor up to this.root) and elements
         // explicitly disabled. Without this filter, the trap can jump to a
         // button inside a closed detail view and effectively swallow the Tab
-        // key. We use a walk of style.display rather than `offsetParent`
+        // key. We walk the computed display rather than `offsetParent`
         // because the latter is unreliable in jsdom (always null without
-        // layout) and breaks unit tests.
+        // layout) and breaks unit tests. Computed, not inline: the touch layer
+        // hides the trailing shortcuts button from its stylesheet, and a
+        // hidden `last` let Tab walk out of the sheet onto the page.
         const isVisible = (el: HTMLElement): boolean => {
           let cur: HTMLElement | null = el;
           while (cur && cur !== this.root) {
-            if (cur.style.display === "none") return false;
+            if (getComputedStyle(cur).display === "none") return false;
             cur = cur.parentElement;
           }
           return true;
@@ -478,6 +499,11 @@ export class Panel {
   async open(): Promise<void> {
     if (this.isOpen) return;
     this.isOpen = true;
+    // Phones: a sheet over a scrim is a modal dialog, and says so to screen
+    // readers (VoiceOver then keeps to it); elsewhere the panel sits beside the page.
+    const modal = isCompactViewport();
+    this.root.setAttribute("role", modal ? "dialog" : "complementary");
+    modal ? this.root.setAttribute("aria-modal", "true") : this.root.removeAttribute("aria-modal");
     this.root.classList.add("sp-panel--open");
     this.scrim.classList.add("sp-scrim--open");
     this.root.setAttribute("aria-hidden", "false");
@@ -631,12 +657,15 @@ export class Panel {
     // feedbacks whatever the list's filters or scope: a "Resolved" tab must
     // not wipe the open markers. The list result serves them when its query
     // is theirs; otherwise their query runs alongside the list's.
-    const listIsMarkerQuery = this.isMarkerQuery(options, scope);
+    const listIsMarkerQuery = !this.mineOnly && this.isMarkerQuery(options, scope);
     this.isLoading = true;
     try {
-      const listRequest = this.client.getFeedbacks(this.projectName, options);
+      const listRequest = this.mineOnly
+        ? this.fetchOwnFeedbacks(options, signal)
+        : this.client.getFeedbacks(this.projectName, options);
       if (!listIsMarkerQuery) void this.loadPageMarkers(scope, signal);
-      let { feedbacks, total } = await listRequest;
+      const first = await listRequest;
+      let { feedbacks, total } = first;
       let page = 1;
       while (page < pages && feedbacks.length < total && !signal.aborted) {
         page++;
@@ -648,6 +677,9 @@ export class Panel {
       this.currentPage = page;
       this.feedbacks = feedbacks;
       this.totalFeedbacks = total;
+      // Absent from a server that predates threads — which then has none.
+      this.canComment = first.capabilities?.comments === true;
+      setHidden(this.deleteAllBtn, this.readOnly || first.permissions?.canDeleteAll === false);
       this.stats.update(feedbacks, total);
       this.bulk.reset();
       this.renderList();
@@ -723,6 +755,51 @@ export class Panel {
     return !options.type && !options.statuses && !options.search && !options.urlPattern && options.url === markerUrl;
   }
 
+  /**
+   * The "Mine" list: the feedback of the list query that this browser sent,
+   * all of it at once. The server cannot filter by sender (see
+   * own-feedback.ts), so the query's pages are walked until every
+   * remembered id has turned up or none are left.
+   */
+  private async fetchOwnFeedbacks(options: GetFeedbacksOptions, signal: AbortSignal): Promise<FeedbackResponseList> {
+    const own = this.ownFeedback.ids();
+    // By id: a feedback created mid-walk shifts the pages, so one can come twice
+    const found = new Map<string, FeedbackResponse>();
+    const met = new Set<string>();
+    let seen = 0;
+    let firstTotal: number | undefined;
+    let steady = true; // The total never changed: no page shifted under the walk
+    // What the server takes (replies) and allows (Delete all), as the plain list reports it
+    let capabilities: FeedbackResponseList["capabilities"];
+    let permissions: FeedbackResponseList["permissions"];
+    for (let page = 1; found.size < own.size && !signal.aborted; page++) {
+      const list = await this.client.getFeedbacks(this.projectName, {
+        ...options,
+        page,
+        limit: MAX_PAGE_LIMIT,
+      });
+      const { feedbacks, total } = list;
+      capabilities = list.capabilities;
+      permissions = list.permissions;
+      firstTotal ??= total;
+      steady &&= total === firstTotal;
+      for (const feedback of feedbacks) {
+        met.add(feedback.id);
+        if (own.has(feedback.id)) found.set(feedback.id, feedback);
+      }
+      seen += feedbacks.length;
+      if (feedbacks.length === 0 || seen >= total) break;
+    }
+    // A steady walk that met every feedback of the project (no filter: only
+    // `page` and `limit` set) proves the remembered ids it missed deleted,
+    // from the dashboard say. Forgetting them lets the next walk stop early.
+    const wholeProject = Object.keys(options).every((key) => key === "page" || key === "limit");
+    if (wholeProject && steady && met.size === firstTotal) {
+      this.ownFeedback.remove(...[...own].filter((id) => !found.has(id)));
+    }
+    return { feedbacks: [...found.values()], total: found.size, capabilities, permissions };
+  }
+
   /** Fetch the page markers' own query (the launcher's) when the list shows a filtered or wider one. */
   private async loadPageMarkers(scope: PageScope, signal: AbortSignal): Promise<void> {
     const query = this.scopeAnnotationsByUrl ? { limit: PAGE_SIZE, url: scope.url } : { limit: PAGE_SIZE };
@@ -760,10 +837,11 @@ export class Panel {
     // Apply sorting
     const sorted = sortFeedbacks(this.feedbacks, this.sortControls.sortMode);
 
-    // Select all bar
-    const feedbackIds = sorted.map((f) => f.id);
-    const selectAllBar = this.bulk.createSelectAllBar(feedbackIds, this.t("bulk.selectAll"));
-    this.listContainer.appendChild(selectAllBar);
+    // Select all bar — over the feedbacks a bulk action can reach
+    const feedbackIds = sorted.filter((f) => this.selectable(f)).map((f) => f.id);
+    if (feedbackIds.length > 0) {
+      this.listContainer.appendChild(this.bulk.createSelectAllBar(feedbackIds, this.t("bulk.selectAll")));
+    }
 
     if (this.sortControls.groupByPage) {
       // Group by page rendering
@@ -833,9 +911,8 @@ export class Panel {
     // Header: checkbox + #number + badge + date
     const header = el("div", { class: "sp-card-header" });
 
-    // Bulk checkbox — inline in the header row
-    const checkbox = this.bulk.createCheckbox(feedback.id);
-    header.appendChild(checkbox);
+    // Bulk checkbox — inline in the header row, when a bulk action can reach the card
+    if (this.selectable(feedback)) header.appendChild(this.bulk.createCheckbox(feedback.id));
 
     const num = el("span", { class: "sp-card-number" });
     setText(num, `#${number}`);
@@ -887,17 +964,10 @@ export class Panel {
     const resolveBtn = document.createElement("button");
     resolveBtn.className = "sp-btn-resolve";
     resolveBtn.dataset.action = "resolve";
-    if (isResolved) {
-      resolveBtn.appendChild(parseSvg(ICON_UNDO));
-      const span = document.createElement("span");
-      setText(span, ` ${this.t("panel.reopen")}`);
-      resolveBtn.appendChild(span);
-    } else {
-      resolveBtn.appendChild(parseSvg(ICON_CHECK));
-      const span = document.createElement("span");
-      setText(span, ` ${this.t("panel.resolve")}`);
-      resolveBtn.appendChild(span);
-    }
+    resolveBtn.appendChild(parseSvg(isResolved ? ICON_UNDO : ICON_CHECK));
+    const resolveBtnLabel = document.createElement("span");
+    setText(resolveBtnLabel, ` ${this.t(isResolved ? "panel.reopen" : "panel.resolve")}`);
+    resolveBtn.appendChild(resolveBtnLabel);
 
     const deleteBtn = document.createElement("button");
     deleteBtn.className = "sp-btn-delete";
@@ -907,18 +977,28 @@ export class Panel {
     setText(deleteBtnLabel, ` ${this.t("panel.delete")}`);
     deleteBtn.appendChild(deleteBtnLabel);
 
-    footer.appendChild(resolveBtn);
-    footer.appendChild(deleteBtn);
+    if (this.can(feedback, "canChangeStatus")) footer.appendChild(resolveBtn);
+    if (this.can(feedback, "canDelete")) footer.appendChild(deleteBtn);
 
     body.appendChild(header);
     body.appendChild(message);
     body.appendChild(expandBtn);
-    body.appendChild(footer);
+    if (footer.hasChildNodes()) body.appendChild(footer);
 
     card.appendChild(bar);
     card.appendChild(body);
 
     return card;
+  }
+
+  /** Whether the visitor may triage `feedback` this way: never in reviewer mode, else unless the server refuses. */
+  private can(feedback: FeedbackResponse, permission: TriagePermission): boolean {
+    return !this.readOnly && feedback.permissions?.[permission] !== false;
+  }
+
+  /** Whether a bulk action can reach `feedback` — else it gets no checkbox. */
+  private selectable(feedback: FeedbackResponse): boolean {
+    return this.can(feedback, "canChangeStatus") || this.can(feedback, "canDelete");
   }
 
   // ---------------------------------------------------------------------------
@@ -1345,13 +1425,30 @@ export class Panel {
     }
   }
 
-  /** Get the focused feedback (for keyboard shortcuts) */
-  private getFocusedFeedback(): FeedbackResponse | undefined {
-    const idx = getFocusedCardIndex(this.listContainer);
-    if (idx < 0) return undefined;
-    const card = this.listContainer.querySelectorAll<HTMLElement>(".sp-card")[idx];
-    if (!card) return undefined;
-    return this.feedbacks.find((f) => f.id === card.dataset.feedbackId);
+  /** "Mine" toggle: narrows the list to the feedback sent from this browser. */
+  private buildMineToggle(): HTMLButtonElement {
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "sp-mine-toggle";
+    toggle.title = this.t("panel.filterMineHint");
+    toggle.setAttribute("aria-pressed", "false");
+    toggle.append(parseSvg(ICON_USER), this.t("panel.filterMine"));
+    toggle.addEventListener("click", () => {
+      this.mineOnly = !this.mineOnly;
+      toggle.classList.toggle("sp-mine-toggle--active", this.mineOnly);
+      toggle.setAttribute("aria-pressed", String(this.mineOnly));
+      this.loadFeedbacks().catch(() => {});
+    });
+    return toggle;
+  }
+
+  /**
+   * Click a control of the focused card, as the visitor would: a shortcut
+   * does nothing on a card without it — one the visitor may not triage.
+   */
+  private pressInFocusedCard(selector: string): void {
+    const card = this.listContainer.querySelectorAll(".sp-card")[getFocusedCardIndex(this.listContainer)];
+    card?.querySelector<HTMLElement>(selector)?.click();
   }
 
   scrollToFeedback(feedbackId: string): void {
@@ -1381,6 +1478,36 @@ export class Panel {
       // rather than leaving the user to find the card in the list.
       const feedback = this.feedbacks.find((f) => f.id === feedbackId);
       if (feedback && isCompactViewport()) this.detail.show(feedback, Number(card.dataset.number));
+    }
+  }
+
+  /**
+   * Post a reply as the visitor and add it to the cached feedback, so the
+   * thread still holds it when the visitor comes back to this feedback.
+   * Resolves `null` when they dismissed the identity prompt — nothing was
+   * sent, and nothing went wrong.
+   */
+  private async postComment(
+    feedback: FeedbackResponse,
+    body: string,
+    clientId: string,
+  ): Promise<CommentResponse | null> {
+    const identity = await this.resolveIdentity();
+    if (!identity) return null;
+    try {
+      const comment = await this.client.addComment(feedback.id, {
+        body,
+        clientId,
+        authorName: identity.name,
+        authorEmail: identity.email,
+        authorRole: "client",
+      });
+      feedback.comments = [...(feedback.comments ?? []), comment];
+      this.bus.emit("comment:added", comment);
+      return comment;
+    } catch (error) {
+      this.bus.emit("feedback:error", error instanceof Error ? error : new Error(String(error)));
+      throw error;
     }
   }
 

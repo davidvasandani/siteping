@@ -1,4 +1,5 @@
 import { type APIRequestContext, expect, type Page, type TestInfo, test } from "@playwright/test";
+import type { FeedbackPayload, FeedbackResponse, FeedbackResponseList } from "../packages/core/src/index.js";
 
 /**
  * Real-stack E2E — the widget and the dashboard against the real
@@ -11,29 +12,28 @@ import { type APIRequestContext, expect, type Page, type TestInfo, test } from "
 const ORIGIN = "http://localhost:3998";
 const API = `${ORIGIN}/api/siteping`;
 
-/** One project per test — the store is shared, so this is the isolation. */
+/**
+ * One project per test attempt — the store is shared and never reset, so this
+ * is the isolation. Retries and `--repeat-each` runs start from an empty project.
+ */
 function projectFor(testInfo: TestInfo): string {
-  return `stack-${testInfo.project.name}-${testInfo.testId}`;
+  return `stack-${testInfo.project.name}-${testInfo.testId}-${testInfo.repeatEachIndex}-${testInfo.retry}`;
 }
 
-interface StoredFeedback {
-  id: string;
-  message: string;
-  status: string;
-  resolvedAt: string | null;
-  clientId?: string;
-  annotations: { xPct: number; yPct: number; wPct: number; hPct: number; scrollX: number }[];
-  diagnostics: { console: unknown[]; network: unknown[] } | null;
-}
-
-async function listFeedbacks(request: APIRequestContext, projectName: string): Promise<StoredFeedback[]> {
+async function listFeedbacks(request: APIRequestContext, projectName: string): Promise<FeedbackResponse[]> {
   const res = await request.get(`${API}?projectName=${encodeURIComponent(projectName)}&limit=100`);
   expect(res.ok()).toBe(true);
-  return ((await res.json()) as { feedbacks: StoredFeedback[] }).feedbacks;
+  return ((await res.json()) as FeedbackResponseList).feedbacks;
+}
+
+/** Generic-webhook bodies received for `projectName`, in arrival order. */
+async function receivedWebhooks(request: APIRequestContext, projectName: string): Promise<FeedbackResponse[]> {
+  const res = await request.get(`${ORIGIN}/__e2e/webhooks?projectName=${encodeURIComponent(projectName)}`);
+  return (await res.json()) as FeedbackResponse[];
 }
 
 /** Create a feedback through the real POST route (full schema validation). */
-async function seed(request: APIRequestContext, projectName: string, message: string): Promise<StoredFeedback> {
+async function seed(request: APIRequestContext, projectName: string, message: string): Promise<FeedbackResponse> {
   const res = await request.post(API, {
     data: {
       projectName,
@@ -46,10 +46,10 @@ async function seed(request: APIRequestContext, projectName: string, message: st
       authorEmail: "seed@example.com",
       annotations: [],
       clientId: `seed-${Math.random().toString(36).slice(2)}`,
-    },
+    } satisfies FeedbackPayload,
   });
   expect(res.status()).toBe(201);
-  return (await res.json()) as StoredFeedback;
+  return (await res.json()) as FeedbackResponse;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,7 +110,7 @@ async function annotateAndSend(page: Page, message: string) {
 // ---------------------------------------------------------------------------
 
 test.describe("Widget against the real handler", () => {
-  test("a drawn annotation passes real validation, persists, and notifies the webhook once", async ({
+  test("a drawn annotation passes real validation, persists, and notifies the webhook once, replay included", async ({
     page,
     request,
   }, testInfo) => {
@@ -119,7 +119,8 @@ test.describe("Widget against the real handler", () => {
 
     const response = await annotateAndSend(page, "Real stack bug");
     expect(response.status()).toBe(201);
-    expect(await response.json()).not.toHaveProperty("clientId");
+    const created = (await response.json()) as FeedbackResponse;
+    expect(created).not.toHaveProperty("clientId");
 
     const [stored] = await listFeedbacks(request, project);
     expect(stored?.message).toBe("Real stack bug");
@@ -130,13 +131,24 @@ test.describe("Widget against the real handler", () => {
       expect(v).toBeLessThanOrEqual(1);
     }
 
-    // Fire-and-forget dispatch: poll until it lands, then check it's alone.
-    await expect
-      .poll(async () => (await (await request.get(`${ORIGIN}/__e2e/webhooks?projectName=${project}`)).json()).length)
-      .toBe(1);
-    const [hook] = await (await request.get(`${ORIGIN}/__e2e/webhooks?projectName=${project}`)).json();
-    expect(hook.message).toBe("Real stack bug");
+    // Fire-and-forget dispatch: poll until it lands.
+    await expect.poll(async () => (await receivedWebhooks(request, project)).length).toBe(1);
+    const [hook] = await receivedWebhooks(request, project);
+    expect(hook?.message).toBe("Real stack bug");
     expect(hook).not.toHaveProperty("clientId");
+
+    // The widget's retry path: the same submission (same clientId) again
+    // answers with the stored record, and must neither insert nor notify.
+    const replay = await request.post(API, { data: response.request().postDataJSON() });
+    expect(replay.status()).toBe(201);
+    expect(((await replay.json()) as FeedbackResponse).id).toBe(created.id);
+    // Dispatch starts before the handler answers, so any webhook the replay
+    // sent was on its way before the barrier's: wait for the barrier's.
+    await seed(request, project, "Barrier");
+    const messages = async () => (await receivedWebhooks(request, project)).map((w) => w.message);
+    await expect.poll(messages).toContain("Barrier");
+    expect(await messages()).toEqual(["Real stack bug", "Barrier"]);
+    expect(await listFeedbacks(request, project)).toHaveLength(2);
   });
 
   test("an annotation from a horizontally scrolled RTL page is accepted (negative scrollX)", async ({
@@ -154,18 +166,20 @@ test.describe("Widget against the real handler", () => {
     expect(stored?.annotations[0]?.scrollX).toBeLessThan(0);
   });
 
-  test("a diagnostics buffer configured above the server cap still submits", async ({ page, request }, testInfo) => {
+  test("diagnostics buffers configured above the server caps still submit", async ({ page, request }, testInfo) => {
     const project = projectFor(testInfo);
-    // The launcher's own docs example: maxConsoleEntries 200 (server cap: 50).
+    // Larger limits clamp to the server's caps: 50 console and 20 network entries.
     await openWidgetPage(page, { project, diag: "200" });
-    await page.evaluate(() => {
+    await page.evaluate(async () => {
       for (let i = 0; i < 120; i++) console.error(`noisy log ${i}`);
+      await Promise.all(Array.from({ length: 30 }, (_, i) => fetch(`/missing-${i}`)));
     });
 
     const response = await annotateAndSend(page, "With diagnostics");
     expect(response.status()).toBe(201);
     const [stored] = await listFeedbacks(request, project);
     expect(stored?.diagnostics?.console).toHaveLength(50);
+    expect(stored?.diagnostics?.network).toHaveLength(20);
   });
 
   test("the panel loads from an endpoint that already carries a query string", async ({ page, request }, testInfo) => {
@@ -182,6 +196,32 @@ test.describe("Widget against the real handler", () => {
           ?.shadowRoot?.querySelector(".sp-card")
           ?.textContent?.includes("Seeded for the panel") ?? false,
     );
+  });
+
+  test("the panel's 'Mine' filter lists only the feedback sent from this browser, after a reload too", async ({
+    page,
+    request,
+  }, testInfo) => {
+    const project = projectFor(testInfo);
+    await seed(request, project, "Sent by someone else");
+    await openWidgetPage(page, { project });
+    expect((await annotateAndSend(page, "Sent from here")).status()).toBe(201);
+    const cardMessages = () =>
+      page.evaluate(() =>
+        [...(document.querySelector("siteping-widget")?.shadowRoot?.querySelectorAll(".sp-card-message") ?? [])].map(
+          (message) => message.textContent,
+        ),
+      );
+
+    for (const pageLoad of ["after the send", "after a reload"]) {
+      if (pageLoad === "after a reload") await openWidgetPage(page, { project });
+      await clickInShadow(page, ".sp-fab");
+      await clickInShadow(page, '[data-item-id="chat"]');
+      await expect.poll(cardMessages, { message: pageLoad }).toEqual(["Sent from here", "Sent by someone else"]);
+
+      await clickInShadow(page, ".sp-mine-toggle");
+      await expect.poll(cardMessages, { message: pageLoad }).toEqual(["Sent from here"]);
+    }
   });
 });
 
@@ -209,6 +249,7 @@ test.describe("Dashboard inbox against the real handler", () => {
     await expect(rowMessages(page)).toHaveText(["Resolve me"]);
 
     const patched = page.waitForResponse((r) => r.url().startsWith(API) && r.request().method() === "PATCH");
+    const beforeResolve = Date.now();
     await page.locator(".spd-list").focus();
     await page.keyboard.press("j");
     await page.keyboard.press("e");
@@ -218,7 +259,8 @@ test.describe("Dashboard inbox against the real handler", () => {
     const [stored] = await listFeedbacks(request, project);
     expect(stored?.id).toBe(seeded.id);
     expect(stored?.status).toBe("resolved");
-    expect(stored?.resolvedAt).not.toBeNull();
+    // The closure timestamp is derived by the handler, not sent by the dashboard.
+    expect(Date.parse(stored?.resolvedAt ?? "")).toBeGreaterThanOrEqual(beforeResolve);
   });
 
   test("a failed change rolls back only its own row, not a concurrent success", async ({ page, request }, testInfo) => {
@@ -229,7 +271,7 @@ test.describe("Dashboard inbox against the real handler", () => {
     await expect(rowMessages(page)).toHaveText(["Will fail", "Will succeed"]);
 
     // Hold the first PATCH (for "Will fail") until the second one has been
-    // answered by the real server, then fail it — the D1 interleaving.
+    // answered by the real server, then fail it.
     let releaseFailure!: () => void;
     const secondDone = new Promise<void>((resolve) => {
       releaseFailure = resolve;
@@ -269,5 +311,142 @@ test.describe("Dashboard inbox against the real handler", () => {
     await seed(request, project, "Tenant-scoped");
     await openInbox(page, { project, endpoint: "/api/siteping?tenant=acme" });
     await expect(rowMessages(page)).toHaveText(["Tenant-scoped"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Discussion thread: widget ↔ real handler ↔ inbox
+// ---------------------------------------------------------------------------
+
+/** The widget's detail view of the (only) seeded feedback, reached from the panel. */
+async function openWidgetThread(page: Page, project: string): Promise<void> {
+  await openWidgetPage(page, { project });
+  await clickInShadow(page, ".sp-fab");
+  await clickInShadow(page, '[data-item-id="chat"]');
+  await clickInShadow(page, ".sp-card");
+  await page.waitForFunction(
+    () => !!document.querySelector("siteping-widget")?.shadowRoot?.querySelector(".sp-detail textarea"),
+  );
+}
+
+/** The replies the widget's detail view shows, as text. */
+function widgetReplies(page: Page): Promise<string[]> {
+  return page.evaluate(() =>
+    [...(document.querySelector("siteping-widget")?.shadowRoot?.querySelectorAll(".sp-comment") ?? [])].map(
+      (reply) => reply.textContent ?? "",
+    ),
+  );
+}
+
+test.describe("Discussion thread across the widget and the inbox", () => {
+  test("a reply goes from the widget to the inbox and back, and the inbox deletes one", async ({
+    page,
+    request,
+  }, testInfo) => {
+    const project = projectFor(testInfo);
+    const seeded = await seed(request, project, "Which font size?");
+
+    // The widget: the server advertises threads, so the reviewer can answer.
+    await openWidgetThread(page, project);
+    const posted = page.waitForResponse((r) => r.url().startsWith(API) && r.request().method() === "POST");
+    await page.evaluate(() => {
+      const shadow = document.querySelector("siteping-widget")?.shadowRoot;
+      const input = shadow?.querySelector<HTMLTextAreaElement>(".sp-detail textarea");
+      if (input) input.value = "  16 px, please  ";
+      shadow?.querySelector<HTMLButtonElement>(".sp-thread-foot button")?.click();
+    });
+    expect((await posted).status()).toBe(201);
+    await expect.poll(() => widgetReplies(page)).toEqual([expect.stringContaining("16 px, please")]);
+
+    // The inbox shows it in the drawer and answers.
+    await openInbox(page, { project, author: "Studio" });
+    await page.locator(".spd-list").focus();
+    await page.keyboard.press("j");
+    await page.keyboard.press("Enter");
+    // 1280 px wide: the drawer sits beside the list, a region rather than a dialog.
+    const drawer = page.getByRole("region", { name: /Feedback details/ });
+    await expect(drawer.locator(".spd-comment .spd-message")).toHaveText(["16 px, please"]);
+    await drawer.getByRole("textbox", { name: "Reply to the client…" }).fill("Done in the next deploy");
+    const answered = page.waitForResponse((r) => r.url().startsWith(API) && r.request().method() === "POST");
+    await drawer.getByRole("button", { name: "Send" }).click();
+    expect((await answered).status()).toBe(201);
+    await expect(drawer.locator(".spd-comment .spd-message")).toHaveText(["16 px, please", "Done in the next deploy"]);
+
+    const [stored] = await listFeedbacks(request, project);
+    expect(stored?.comments?.map((c) => [c.body, c.authorName, c.authorRole])).toEqual([
+      ["16 px, please", "E2E Tester", "client"],
+      // No apiKey on this handler: the role the inbox asks for is not kept.
+      ["Done in the next deploy", "Studio", "client"],
+    ]);
+
+    // Back on the site, the reviewer reads the answer.
+    await openWidgetThread(page, project);
+    await expect
+      .poll(() => widgetReplies(page))
+      .toEqual([expect.stringContaining("16 px, please"), expect.stringContaining("Done in the next deploy")]);
+
+    // The inbox deletes the first reply, after asking.
+    await openInbox(page, { project, author: "Studio" });
+    await page.locator(".spd-list").focus();
+    await page.keyboard.press("j");
+    await page.keyboard.press("Enter");
+    await drawer.getByRole("button", { name: "Delete reply" }).first().click();
+    const deleted = page.waitForResponse((r) => r.url().startsWith(API) && r.request().method() === "DELETE");
+    await drawer.getByRole("button", { name: "Delete", exact: true }).click();
+    expect((await deleted).status()).toBe(200);
+    await expect(drawer.locator(".spd-comment .spd-message")).toHaveText(["Done in the next deploy"]);
+    const [after] = await listFeedbacks(request, project);
+    expect(after?.id).toBe(seeded.id);
+    expect(after?.comments?.map((c) => c.body)).toEqual(["Done in the next deploy"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Permissions: what the server lets each requester do (#101)
+// ---------------------------------------------------------------------------
+
+test.describe("Permissions sent by the real handler", () => {
+  const KEYED = "/api/siteping-keyed";
+
+  test("a visitor without the key gets no triage action; the key holder's inbox has them", async ({
+    page,
+    request,
+  }, testInfo) => {
+    const project = projectFor(testInfo);
+    await seed(request, project, "Only the team triages this");
+
+    // The site's visitor: reads and replies, never resolves or deletes.
+    await openWidgetPage(page, { project, endpoint: KEYED });
+    await clickInShadow(page, ".sp-fab");
+    await clickInShadow(page, '[data-item-id="chat"]');
+    await clickInShadow(page, ".sp-card");
+    await page.waitForFunction(
+      () => !!document.querySelector("siteping-widget")?.shadowRoot?.querySelector(".sp-detail textarea"),
+    );
+    const offered = await page.evaluate(() => {
+      const shadow = document.querySelector("siteping-widget")?.shadowRoot;
+      return {
+        card: !!shadow?.querySelector(".sp-card .sp-btn-resolve, .sp-card .sp-btn-delete"),
+        detail: !!shadow?.querySelector(".sp-detail-btn-resolve, .sp-detail-btn-delete"),
+        deleteAll: shadow?.querySelector<HTMLElement>(".sp-btn-delete-all")?.style.display !== "none",
+      };
+    });
+    expect(offered).toEqual({ card: false, detail: false, deleteAll: false });
+
+    // An inbox without the key reads the status; with it, changes it.
+    await openInbox(page, { project, endpoint: KEYED });
+    await page.locator(".spd-list").focus();
+    await page.keyboard.press("j");
+    await page.keyboard.press("Enter");
+    const drawer = page.getByRole("region", { name: /Feedback details/ });
+    await expect(drawer.locator('span.spd-status-menu-trigger[data-status="open"]')).toBeVisible();
+    await expect(drawer.getByRole("button", { name: "Delete feedback" })).toHaveCount(0);
+
+    await openInbox(page, { project, endpoint: KEYED, apiKey: "e2e-key" });
+    await page.locator(".spd-list").focus();
+    await page.keyboard.press("j");
+    await page.keyboard.press("Enter");
+    await expect(drawer.getByRole("button", { name: "Open" })).toBeVisible();
+    await expect(drawer.getByRole("button", { name: "Delete feedback" })).toBeVisible();
   });
 });

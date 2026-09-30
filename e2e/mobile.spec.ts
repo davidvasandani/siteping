@@ -72,6 +72,39 @@ test("tap an element → feedback sheet → identity sheet → saved against tha
   expect(data.feedbacks[0].annotations[0]).toMatchObject({ xPct: 0, yPct: 0, wPct: 1, hPct: 1 });
 });
 
+test("the filter row stays one row of finger-sized controls, the Mine toggle included", async ({
+  page,
+  browserName,
+}) => {
+  await page.locator(".sp-fab").tap();
+  await page.locator('[data-item-id="chat"]').tap();
+  await expect(page.locator(".sp-panel")).toHaveClass(/sp-panel--open/);
+
+  const boxes = await page.locator(".sp-filter-bar > *").evaluateAll((controls) =>
+    controls
+      .map((control) => control.getBoundingClientRect())
+      .filter((box) => box.height > 0)
+      .map((box) => ({ top: box.top, bottom: box.bottom, height: box.height })),
+  );
+  expect(boxes.length).toBeGreaterThanOrEqual(3);
+  // One row: the row scrolls sideways instead of wrapping onto a second line
+  const firstBottom = Math.min(...boxes.map((box) => box.bottom));
+  expect(boxes.filter((box) => box.top >= firstBottom)).toEqual([]);
+
+  const mine = page.locator(".sp-mine-toggle");
+  await mine.scrollIntoViewIfNeeded();
+  // The sizes come from the `pointer: coarse` rules. Chromium's touch
+  // emulation reports a coarse pointer; other engines' emulation may not.
+  const coarse = await page.evaluate(() => matchMedia("(pointer: coarse)").matches);
+  if (browserName === "chromium") expect(coarse).toBe(true);
+  if (coarse) {
+    for (const box of boxes) expect(Math.round(box.height)).toBeGreaterThanOrEqual(32);
+    expect(Math.round((await mine.boundingBox())!.height)).toBeGreaterThanOrEqual(36);
+  }
+  await mine.tap();
+  await expect(mine).toHaveAttribute("aria-pressed", "true");
+});
+
 test("the panel is a bottom sheet that a tap on the dimmed page closes", async ({ page }) => {
   await page.locator(".sp-fab").tap();
   await page.locator('[data-item-id="chat"]').tap();
@@ -85,4 +118,48 @@ test("the panel is a bottom sheet that a tap on the dimmed page closes", async (
   // The page above the sheet is the scrim
   await page.touchscreen.tap(195, 12);
   await expect(panel).not.toHaveClass(/sp-panel--open/);
+});
+
+test("the panel sheet is a modal dialog that Tab never leaves", async ({ page, browserName }) => {
+  test.skip(browserName === "webkit", "WebKit's Tab order over buttons depends on its full-keyboard-access setting");
+  await page.locator(".sp-fab").tap();
+  await page.locator('[data-item-id="chat"]').tap();
+  const panel = page.locator(".sp-panel");
+  await expect(panel).toHaveClass(/sp-panel--open/);
+  await expect(panel).toHaveAttribute("role", "dialog");
+  await expect(panel).toHaveAttribute("aria-modal", "true");
+
+  // A tablet keyboard: the touch layer hides the panel's trailing shortcuts
+  // button, and Tab used to walk past it onto the page behind the scrim.
+  const outside: string[] = [];
+  for (let i = 0; i < 40; i++) {
+    await page.keyboard.press("Tab");
+    const where = await page.evaluate(() => {
+      const host = document.querySelector("siteping-widget");
+      const inner = host?.shadowRoot?.activeElement;
+      return document.activeElement === host && inner?.closest(".sp-panel") ? null : document.activeElement?.tagName;
+    });
+    if (where) outside.push(where);
+  }
+  expect(outside).toEqual([]);
+});
+
+test.describe("a phone held sideways", () => {
+  test.use({ viewport: { width: 844, height: 390 } });
+
+  test("gets the bottom sheets too, where the keyboard would cover a floating card", async ({ page }) => {
+    // The sideways rule reads `pointer: coarse`, which only some engines'
+    // touch emulation reports (Chromium's does).
+    test.skip(!(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)), "no coarse pointer emulated");
+
+    await page.locator(".sp-fab").tap();
+    await page.locator('[data-item-id="annotate"]').tap();
+    const target = (await page.locator("#target-element").boundingBox())!;
+    await page.touchscreen.tap(target.x + target.width / 2, target.y + target.height / 2);
+
+    const form = '[role="dialog"][aria-label="Feedback form"]';
+    await expect(page.locator(form)).toBeVisible();
+    await expect.poll(() => bottomEdge(page, form)).toBe(390);
+    expect(Math.round((await page.locator(form).boundingBox())!.width)).toBe(844);
+  });
 });

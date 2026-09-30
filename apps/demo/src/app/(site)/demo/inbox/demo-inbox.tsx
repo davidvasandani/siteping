@@ -28,6 +28,7 @@ const LOCALES = [
   ["it", "Italiano"],
   ["pt", "Português"],
   ["ru", "Русский"],
+  ["ja", "日本語"],
 ] as const;
 
 type LocaleCode = (typeof LOCALES)[number][0];
@@ -92,6 +93,8 @@ export function DemoInbox() {
     accentColor: "#173CFF",
     locale,
     className: "h-full",
+    // Who the demo replies as: without an author, threads are read-only.
+    author: { name: "SitePing demo" },
   } as const;
 
   return (

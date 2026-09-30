@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import type {
+  CommentResponse,
   FeedbackResponse,
   SitepingPanelAction,
   SitepingPanelActionContext,
@@ -8,6 +9,7 @@ import type {
 } from "@siteping/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventBus, type WidgetEvents } from "../../src/events.js";
+import { installHostIsolationGuard, isolateFromHost } from "../../src/host-isolation.js";
 import { createT, tWithParams } from "../../src/i18n/index.js";
 import { Panel } from "../../src/panel.js";
 import { buildThemeColors } from "../../src/styles/theme.js";
@@ -24,6 +26,7 @@ function createMockApiClient() {
     resolveFeedback: vi.fn(),
     deleteFeedback: vi.fn(),
     deleteAllFeedbacks: vi.fn(),
+    addComment: vi.fn(),
   };
 }
 
@@ -33,7 +36,7 @@ function createMockMarkers() {
     highlight: vi.fn(),
     pinHighlight: vi.fn(),
     // No live pin by default — "Go to annotation" falls back to the stored offsets.
-    focusFeedback: vi.fn().mockReturnValue(false),
+    revealPin: vi.fn().mockReturnValue(false),
     addFeedback: vi.fn(),
     destroy: vi.fn(),
     count: 0,
@@ -1089,6 +1092,34 @@ describe("Panel", () => {
       shadow.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
 
       expect(root.getAttribute("aria-hidden")).toBe("true");
+    });
+
+    it("over a host modal, hides the Escape that closes the panel, not the next one", async () => {
+      isolateFromHost(shadow.host as HTMLElement);
+      const removeGuard = installHostIsolationGuard();
+      document.body.style.pointerEvents = "none"; // a Radix modal is open
+      await panel.open();
+      const closeBtn = shadow.querySelector<HTMLButtonElement>(".sp-panel-close")!;
+      closeBtn.focus();
+      const escapeIsHandled = (): boolean => {
+        const escapeKeyDown = new KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+        });
+        closeBtn.dispatchEvent(escapeKeyDown);
+        return escapeKeyDown.defaultPrevented;
+      };
+
+      try {
+        expect(escapeIsHandled()).toBe(true);
+        expect(shadow.querySelector(".sp-panel--open")).toBeNull();
+        expect(escapeIsHandled()).toBe(false);
+      } finally {
+        document.body.removeAttribute("style");
+        removeGuard();
+      }
     });
 
     it("Tab at last focusable wraps to first", async () => {
@@ -3624,7 +3655,7 @@ describe("Panel", () => {
       // Focus card via J
       shadow.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true }));
 
-      // Remove the resolve button to trigger `if (btn)` false branch (line 230)
+      // Remove the resolve button: the shortcut has nothing to press
       const card = shadow.querySelector<HTMLElement>('[data-feedback-id="fb-1"]')!;
       card.querySelector(".sp-btn-resolve")?.remove();
 
@@ -3657,8 +3688,7 @@ describe("Panel", () => {
       apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [], total: 0 });
       await panel.open();
 
-      // No card to focus → getFocusedFeedback returns undefined
-      // X key → if (fb) is false → no toggle
+      // No card to focus → X has no checkbox to press
       const initialSelected = shadow.querySelectorAll(".sp-card--selected").length;
       shadow.dispatchEvent(new KeyboardEvent("keydown", { key: "x", bubbles: true }));
 
@@ -3684,7 +3714,7 @@ describe("Panel", () => {
       shadow.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true }));
       shadow.dispatchEvent(new KeyboardEvent("keydown", { key: "r", bubbles: true }));
 
-      // Second R press while pending — covers the `!pendingMutations.has` false case (line 227)
+      // Second R press while pending — the busy button ignores it
       shadow.dispatchEvent(new KeyboardEvent("keydown", { key: "r", bubbles: true }));
 
       await new Promise((r) => setTimeout(r, 20));
@@ -4461,6 +4491,282 @@ describe("Panel", () => {
       expect(detailEl().classList.contains("sp-detail--visible")).toBe(false);
     });
   });
+  describe("discussion thread", () => {
+    const identity = { name: "Alice", email: "alice@example.com" };
+    const reply: CommentResponse = {
+      id: "c-1",
+      feedbackId: "fb-1",
+      body: "Here it is",
+      authorName: "Alice",
+      authorEmail: "alice@example.com",
+      authorRole: "client",
+      createdAt: new Date().toISOString(),
+    };
+
+    function rebuild(resolveIdentity: () => Promise<typeof identity | null>): void {
+      panel.destroy();
+      shadow.host.remove();
+      shadow = createShadowRoot();
+      bus = new EventBus<WidgetEvents>();
+      apiClient = createMockApiClient();
+      panel = new Panel(shadow, colors, bus, apiClient as never, "test-project", markers as never, t, "fr", {
+        getScope: () => ({ url: "/", urlPattern: null }),
+        scopeAnnotationsByUrl: true,
+        resolveIdentity,
+      });
+    }
+
+    async function openDetail(fb: FeedbackResponse, comments: boolean | undefined): Promise<void> {
+      apiClient.getFeedbacks.mockResolvedValue({
+        feedbacks: [fb],
+        total: 1,
+        ...(comments === undefined ? {} : { capabilities: { comments } }),
+      });
+      await panel.open();
+      shadow.querySelector<HTMLElement>(`[data-feedback-id="${fb.id}"]`)!.click();
+    }
+
+    async function sendReply(text: string): Promise<void> {
+      shadow.querySelector<HTMLTextAreaElement>(".sp-detail textarea")!.value = text;
+      shadow.querySelector<HTMLButtonElement>(".sp-thread-foot button")!.click();
+    }
+
+    it("offers a composer only when the list response advertises comments", async () => {
+      rebuild(async () => identity);
+      await openDetail(makeFeedback({ id: "fb-1" }), true);
+      expect(shadow.querySelector(".sp-detail textarea")).not.toBeNull();
+
+      rebuild(async () => identity);
+      await openDetail(makeFeedback({ id: "fb-1" }), false);
+      expect(shadow.querySelector(".sp-detail textarea")).toBeNull();
+    });
+
+    it("stays read-only against a server that predates threads (no capabilities, no comments)", async () => {
+      rebuild(async () => identity);
+      await openDetail(makeFeedback({ id: "fb-1" }), undefined);
+      expect(shadow.querySelector(".sp-detail-message")).not.toBeNull();
+      expect(shadow.querySelector(".sp-detail textarea")).toBeNull();
+      expect(shadow.querySelector(".sp-comment")).toBeNull();
+    });
+
+    it("posts as the visitor, caches the reply on the feedback and emits comment:added", async () => {
+      rebuild(async () => identity);
+      const fb = makeFeedback({ id: "fb-1" });
+      const added = vi.fn();
+      bus.on("comment:added", added);
+      apiClient.addComment.mockResolvedValue(reply);
+      await openDetail(fb, true);
+
+      await sendReply("Here it is");
+
+      await vi.waitFor(() => expect(added).toHaveBeenCalledWith(reply));
+      expect(apiClient.addComment).toHaveBeenCalledWith("fb-1", {
+        body: "Here it is",
+        clientId: expect.any(String),
+        authorName: "Alice",
+        authorEmail: "alice@example.com",
+        authorRole: "client",
+      });
+      // The list's own record holds it: reopening the feedback shows the reply.
+      expect(fb.comments).toEqual([reply]);
+      shadow.querySelector<HTMLButtonElement>(".sp-detail-back")!.click();
+      shadow.querySelector<HTMLElement>('[data-feedback-id="fb-1"]')!.click();
+      expect(shadow.querySelectorAll(".sp-comment")).toHaveLength(1);
+    });
+
+    it("sends nothing and reports nothing when the visitor dismisses the identity prompt", async () => {
+      rebuild(async () => null);
+      const errors = vi.fn();
+      bus.on("feedback:error", errors);
+      await openDetail(makeFeedback({ id: "fb-1" }), true);
+
+      await sendReply("Maybe later");
+      await vi.waitFor(() =>
+        expect(shadow.querySelector<HTMLButtonElement>(".sp-thread-foot button")!.disabled).toBe(false),
+      );
+
+      expect(apiClient.addComment).not.toHaveBeenCalled();
+      expect(errors).not.toHaveBeenCalled();
+      expect(shadow.querySelector('.sp-detail [role="alert"]')!.textContent).toBe("");
+    });
+
+    it("reports a failed post on feedback:error and keeps the reply out of the cache", async () => {
+      rebuild(async () => identity);
+      const fb = makeFeedback({ id: "fb-1" });
+      const errors = vi.fn();
+      bus.on("feedback:error", errors);
+      const failure = new Error("500");
+      apiClient.addComment.mockRejectedValue(failure);
+      await openDetail(fb, true);
+
+      await sendReply("Lost?");
+
+      await vi.waitFor(() => expect(errors).toHaveBeenCalledWith(failure));
+      expect(fb.comments).toBeUndefined();
+      await vi.waitFor(() =>
+        expect(shadow.querySelector('.sp-detail [role="alert"]')!.textContent).toBe(t("comments.error")),
+      );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Server permissions and reviewer mode (#101)
+  // -------------------------------------------------------------------------
+
+  describe("permissions and reviewer mode", () => {
+    const VISITOR = { canChangeStatus: false, canDelete: false, canComment: true, canDeleteComment: false };
+    const OWNER = { ...VISITOR, canDelete: true };
+    const TRIAGER = { ...VISITOR, canChangeStatus: true };
+
+    function rebuild(readOnly: boolean): void {
+      panel.destroy();
+      shadow.host.remove();
+      shadow = createShadowRoot();
+      bus = new EventBus<WidgetEvents>();
+      apiClient = createMockApiClient();
+      panel = new Panel(shadow, colors, bus, apiClient as never, "test-project", markers as never, t, "fr", {
+        getScope: () => ({ url: "/", urlPattern: null }),
+        scopeAnnotationsByUrl: true,
+        readOnly,
+      });
+    }
+
+    const card = (id: string) => shadow.querySelector<HTMLElement>(`[data-feedback-id="${id}"]`)!;
+    const hidden = (selector: string) => shadow.querySelector<HTMLElement>(selector)!.style.display === "none";
+    const stubScrollOnCards = () => {
+      for (const c of shadow.querySelectorAll<HTMLElement>(".sp-card")) c.scrollIntoView = vi.fn();
+    };
+    const press = async (key: string) => {
+      shadow.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+      await new Promise((r) => setTimeout(r, 20));
+    };
+
+    it("leaves out what the server refuses, on cards, selection, shortcuts and Delete all", async () => {
+      apiClient.getFeedbacks.mockResolvedValue({
+        feedbacks: [makeFeedback({ id: "fb-1", permissions: VISITOR })],
+        total: 1,
+        permissions: { canDeleteAll: false },
+      });
+
+      await panel.open();
+      stubScrollOnCards();
+
+      expect(card("fb-1").querySelector(".sp-card-footer")).toBeNull();
+      expect(card("fb-1").querySelector(".sp-bulk-checkbox")).toBeNull();
+      expect(shadow.querySelector(".sp-bulk-select-all")).toBeNull();
+      expect(hidden(".sp-btn-delete-all")).toBe(true);
+      await press("j");
+      await press("r");
+      await press("d");
+      await press("x");
+      expect(apiClient.resolveFeedback).not.toHaveBeenCalled();
+      expect(apiClient.deleteFeedback).not.toHaveBeenCalled();
+      expect(shadow.querySelector(".sp-card--selected")).toBeNull();
+    });
+
+    it("offers each action a feedback allows: an owner deletes, the D shortcut included, but never resolves", async () => {
+      apiClient.getFeedbacks.mockResolvedValue({
+        feedbacks: [makeFeedback({ id: "fb-1", permissions: OWNER })],
+        total: 1,
+      });
+      apiClient.deleteFeedback.mockResolvedValue(undefined);
+
+      await panel.open();
+      stubScrollOnCards();
+
+      expect(card("fb-1").querySelector(".sp-btn-resolve")).toBeNull();
+      expect(card("fb-1").querySelector(".sp-btn-delete")).not.toBeNull();
+      await press("j");
+      await press("r");
+      expect(apiClient.resolveFeedback).not.toHaveBeenCalled();
+      await press("d");
+      expect(apiClient.deleteFeedback).toHaveBeenCalledWith("fb-1");
+    });
+
+    it("keeps Delete all hidden until a list allows it — an older server's silence does", async () => {
+      expect(hidden(".sp-btn-delete-all")).toBe(true);
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [makeFeedback()], total: 1 });
+
+      await panel.open();
+
+      expect(hidden(".sp-btn-delete-all")).toBe(false);
+      expect(card("fb-1").querySelector(".sp-btn-resolve")).not.toBeNull();
+      expect(card("fb-1").querySelector(".sp-btn-delete")).not.toBeNull();
+    });
+
+    it("hides a bulk action that part of the selection refuses, rather than acting on the rest", async () => {
+      apiClient.getFeedbacks.mockResolvedValue({
+        feedbacks: [
+          makeFeedback({ id: "owned", permissions: OWNER }),
+          makeFeedback({ id: "triaged", permissions: TRIAGER }),
+        ],
+        total: 2,
+      });
+      await panel.open();
+
+      card("owned").querySelector<HTMLElement>(".sp-bulk-checkbox")!.click();
+      expect(hidden(".sp-bulk-btn-delete")).toBe(false);
+      expect(hidden(".sp-bulk-btn-resolve")).toBe(true);
+
+      card("triaged").querySelector<HTMLElement>(".sp-bulk-checkbox")!.click();
+      expect(hidden(".sp-bulk-btn-delete")).toBe(true);
+      expect(hidden(".sp-bulk-btn-resolve")).toBe(true);
+
+      card("owned").querySelector<HTMLElement>(".sp-bulk-checkbox")!.click();
+      expect(hidden(".sp-bulk-btn-delete")).toBe(true);
+      expect(hidden(".sp-bulk-btn-resolve")).toBe(false);
+    });
+
+    it("leaves out Resolve and Delete in the detail view when the server refuses them", async () => {
+      apiClient.getFeedbacks.mockResolvedValue({
+        feedbacks: [makeFeedback({ id: "fb-1", permissions: VISITOR })],
+        total: 1,
+        capabilities: { comments: true },
+      });
+      await panel.open();
+
+      card("fb-1").click();
+
+      const actions = shadow.querySelector(".sp-detail-actions")!;
+      expect(actions.querySelector(".sp-detail-btn-resolve")).toBeNull();
+      expect(actions.querySelector(".sp-detail-btn-delete")).toBeNull();
+      // Replying is not triage: the visitor may still answer.
+      expect(shadow.querySelector(".sp-detail textarea")).not.toBeNull();
+    });
+
+    it("closes the thread's composer on a feedback the server refuses replies on", async () => {
+      apiClient.getFeedbacks.mockResolvedValue({
+        feedbacks: [makeFeedback({ id: "fb-1", permissions: { ...VISITOR, canComment: false } })],
+        total: 1,
+        capabilities: { comments: true },
+      });
+      await panel.open();
+
+      card("fb-1").click();
+
+      expect(shadow.querySelector(".sp-detail textarea")).toBeNull();
+    });
+
+    it("in reviewer mode, triages nothing even when the server would allow it, and still replies", async () => {
+      rebuild(true);
+      apiClient.getFeedbacks.mockResolvedValue({
+        feedbacks: [makeFeedback({ id: "fb-1" })],
+        total: 1,
+        capabilities: { comments: true },
+        permissions: { canDeleteAll: true },
+      });
+
+      await panel.open();
+
+      expect(card("fb-1").querySelector(".sp-card-footer")).toBeNull();
+      expect(card("fb-1").querySelector(".sp-bulk-checkbox")).toBeNull();
+      expect(hidden(".sp-btn-delete-all")).toBe(true);
+      card("fb-1").click();
+      expect(shadow.querySelector(".sp-detail-btn-resolve")).toBeNull();
+      expect(shadow.querySelector(".sp-detail-btn-delete")).toBeNull();
+      expect(shadow.querySelector(".sp-detail textarea")).not.toBeNull();
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -4523,6 +4829,39 @@ describe("Panel on phones", () => {
     Reflect.deleteProperty(window, "matchMedia");
   });
 
+  it("is a modal dialog on phones, and a complementary panel again when wide", async () => {
+    await panel.open();
+    expect(root().getAttribute("role")).toBe("dialog");
+    expect(root().getAttribute("aria-modal")).toBe("true");
+    panel.close();
+
+    mockMediaQueries([]);
+    await panel.open();
+    expect(root().getAttribute("role")).toBe("complementary");
+    expect(root().hasAttribute("aria-modal")).toBe(false);
+  });
+
+  it("keeps Tab inside the sheet when the trailing control is hidden by the stylesheet", async () => {
+    // The touch layer hides the shortcuts button from CSS, not inline: the
+    // trap must wrap from the last control the user can actually reach.
+    const sheet = document.createElement("style");
+    sheet.textContent = ".sp-shortcuts-hint { display: none; }";
+    shadow.appendChild(sheet);
+    await panel.open();
+    const reachable = Array.from(
+      root().querySelectorAll<HTMLElement>('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'),
+    ).filter((el) => !el.closest("[style*='display: none']") && !el.matches(".sp-shortcuts-hint"));
+    const last = reachable[reachable.length - 1]!;
+    expect(last.matches(".sp-shortcuts-hint")).toBe(false);
+
+    const tab = new KeyboardEvent("keydown", { key: "Tab", bubbles: true });
+    const preventDefault = vi.spyOn(tab, "preventDefault");
+    Object.defineProperty(shadow, "activeElement", { value: last, configurable: true });
+    shadow.dispatchEvent(tab);
+
+    expect(preventDefault).toHaveBeenCalled();
+  });
+
   it("dims the page with a scrim that closes the sheet on tap", async () => {
     await panel.open();
     const scrim = shadow.querySelector<HTMLElement>(".sp-scrim")!;
@@ -4555,14 +4894,14 @@ describe("Panel on phones", () => {
   it("'Go to annotation' follows the live pin, then gets the sheet out of the way", async () => {
     const fb = makeFeedback({ id: "fb-1", url: "/", annotations: [annotation] });
     apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [fb], total: 1 });
-    markers.focusFeedback.mockReturnValue(true);
+    markers.revealPin.mockReturnValue(true);
     const scrollSpy = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
     try {
       await panel.open();
       shadow.querySelector<HTMLElement>('[data-feedback-id="fb-1"]')!.click();
       shadow.querySelector<HTMLButtonElement>(".sp-detail-btn-goto")!.click();
 
-      expect(markers.focusFeedback).toHaveBeenCalledWith("fb-1");
+      expect(markers.revealPin).toHaveBeenCalledWith("fb-1");
       // The author's stored offsets (desktop layout) are only a fallback
       expect(scrollSpy).not.toHaveBeenCalled();
       expect(markers.pinHighlight).not.toHaveBeenCalled();
@@ -4579,17 +4918,26 @@ describe("Panel on phones", () => {
     });
 
     it("follows the finger from the header and closes past a quarter of the sheet", () => {
-      const title = shadow.querySelector(".sp-panel-title")!;
-      pointer("pointerdown", title, 100);
-      pointer("pointermove", title, 350);
-      expect(root().style.transform).toBe("translateY(250px)");
-      expect(root().style.transition).toBe("none");
+      // A slow drag (250 px over a second): only the distance can close it,
+      // not the flick rule. jsdom's own timeStamps are ~0 ms apart.
+      const now = vi.spyOn(Event.prototype, "timeStamp", "get");
+      try {
+        const title = shadow.querySelector(".sp-panel-title")!;
+        now.mockReturnValue(0);
+        pointer("pointerdown", title, 100);
+        pointer("pointermove", title, 350);
+        expect(root().style.transform).toBe("translateY(250px)");
+        expect(root().style.transition).toBe("none");
 
-      pointer("pointerup", title, 350);
-      expect(panel.isCurrentlyOpen).toBe(false);
-      // Handed back to the stylesheet, which animates the rest of the way
-      expect(root().style.transform).toBe("");
-      expect(root().style.transition).toBe("");
+        now.mockReturnValue(1000);
+        pointer("pointerup", title, 350);
+        expect(panel.isCurrentlyOpen).toBe(false);
+        // Handed back to the stylesheet, which animates the rest of the way
+        expect(root().style.transform).toBe("");
+        expect(root().style.transition).toBe("");
+      } finally {
+        now.mockRestore();
+      }
     });
 
     it("never drags the sheet upward", () => {

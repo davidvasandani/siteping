@@ -1,12 +1,12 @@
-import { createSitepingHandler, type SitepingHandler } from "@siteping/adapter-prisma";
+import { createSitepingHandler, type SitepingHandler } from "@siteping/server";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLibSQLSitepingStore } from "../src/libsql/index.js";
 import { createPgSitepingStore } from "../src/pg/index.js";
 import type { DrizzleStore } from "../src/shared/store.js";
 import { createLibSQLTestDatabase, createPgTestDatabase } from "./databases.js";
 
-// The documented deployment: the Drizzle store mounted behind adapter-prisma's
-// store-agnostic handler, over the same real engines as the other tests.
+// The documented deployment: the Drizzle store mounted behind @siteping/server's
+// handler, over the same real engines as the other tests.
 
 const ENDPOINT = "http://localhost/api/siteping";
 const WEBHOOK = { url: "https://hooks.example.com/siteping" };
@@ -120,6 +120,37 @@ for (const dialect of dialects) {
       expect((await api.DELETE(request("DELETE", { id, projectName: "site" }))).status).toBe(200);
       const emptied = await api.GET(request("GET", undefined, "?projectName=site"));
       expect(((await emptied.json()) as { total: number }).total).toBe(0);
+    });
+
+    it("serves a thread: a comment, its list with the capability, and its delete", async () => {
+      const api = handler();
+      const created = await api.POST(request("POST", { ...payload, clientId: crypto.randomUUID() }));
+      const { id: feedbackId } = (await created.json()) as { id: string };
+
+      const posted = await api.POST(
+        request("POST", {
+          projectName: "site",
+          feedbackId,
+          body: "Fixed on staging",
+          authorName: "Bob",
+          authorEmail: "bob@example.com",
+          clientId: crypto.randomUUID(),
+        }),
+      );
+      expect(posted.status).toBe(201);
+      const { id: commentId } = (await posted.json()) as { id: string };
+
+      const listed = (await (await api.GET(request("GET", undefined, "?projectName=site"))).json()) as {
+        capabilities: unknown;
+        feedbacks: Array<{ comments: unknown[] }>;
+      };
+      expect(listed.capabilities).toEqual({ comments: true, deleteComments: true });
+      expect(listed.feedbacks[0]?.comments).toEqual([
+        expect.objectContaining({ id: commentId, body: "Fixed on staging", authorRole: "client", authorEmail: "" }),
+      ]);
+
+      const deleted = await api.DELETE(request("DELETE", { projectName: "site", feedbackId, commentId }));
+      expect(await deleted.json()).toEqual({ deleted: true });
     });
 
     it("notifies the webhooks once when two server processes race on one clientId", async () => {

@@ -1,10 +1,10 @@
 import type { ReactElement, KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Fragment, useEffect, useRef } from "react";
-import { useInboxUi } from "./context.js";
-
-const FOCUSABLE = 'a[href], button:not([disabled]), input, select, textarea, [tabindex]:not([tabindex="-1"])';
+import { trapTab, useInboxUi } from "./context.js";
 
 interface ShortcutsOverlayProps {
+  /** False leaves out the status keys and undo. */
+  canChangeStatus: boolean;
   onClose: () => void;
 }
 
@@ -13,7 +13,7 @@ interface ShortcutsOverlayProps {
  * Esc or a click outside the card closes it, and Esc never bubbles to the
  * root (the overlay is always the topmost layer).
  */
-export function ShortcutsOverlay({ onClose }: ShortcutsOverlayProps): ReactElement {
+export function ShortcutsOverlay({ canChangeStatus, onClose }: ShortcutsOverlayProps): ReactElement {
   const { t } = useInboxUi();
   const overlayRef = useRef<HTMLDivElement | null>(null);
 
@@ -32,33 +32,20 @@ export function ShortcutsOverlay({ onClose }: ShortcutsOverlayProps): ReactEleme
       onClose();
       return;
     }
-    if (event.key !== "Tab") return;
-    const root = overlayRef.current;
-    if (!root) return;
-    const focusables = root.querySelectorAll<HTMLElement>(FOCUSABLE);
-    const first = focusables[0];
-    const last = focusables[focusables.length - 1];
-    if (!first || !last) {
-      // Nothing focusable inside — keep focus on the overlay itself.
-      event.preventDefault();
-      return;
-    }
-    if (event.shiftKey && (document.activeElement === first || document.activeElement === root)) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
+    if (event.key === "Tab" && overlayRef.current) trapTab(event, overlayRef.current);
   };
 
   const rows: Array<{ keys: string[]; label: string }> = [
     { keys: ["j", "k"], label: t("hints.navigate") },
     { keys: ["⏎"], label: t("hints.open") },
-    { keys: ["e"], label: t("hints.resolve") },
-    { keys: ["p"], label: t("hints.inProgress") },
-    { keys: ["x"], label: t("hints.wontFix") },
-    { keys: ["u"], label: t("inbox.undo") },
+    ...(canChangeStatus
+      ? [
+          { keys: ["e"], label: t("hints.resolve") },
+          { keys: ["p"], label: t("hints.inProgress") },
+          { keys: ["x"], label: t("hints.wontFix") },
+          { keys: ["u"], label: t("inbox.undo") },
+        ]
+      : []),
     { keys: ["r"], label: t("inbox.refresh") },
     { keys: ["/"], label: t("inbox.searchAria") },
     { keys: ["1–5"], label: t("inbox.statusFilter") },

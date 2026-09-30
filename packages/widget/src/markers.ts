@@ -4,6 +4,7 @@ import { resolveAnnotation } from "./dom/resolver.js";
 import { classifyVisibility } from "./dom/visibility.js";
 import { el, setText } from "./dom-utils.js";
 import type { EventBus, WidgetEvents } from "./events.js";
+import { isolateFromHost } from "./host-isolation.js";
 import { getTypeLabel, type TFunction, tWithParams } from "./i18n/index.js";
 import { getTypeColor, type ThemeColors } from "./styles/theme.js";
 import type { Tooltip } from "./tooltip.js";
@@ -145,6 +146,7 @@ export class MarkerManager {
       style: `position:absolute;top:0;left:0;pointer-events:none;z-index:${Z_INDEX_MAX - 1};`,
     });
     this.container.id = "siteping-markers";
+    isolateFromHost(this.container);
     document.body.appendChild(this.container);
 
     this.bus.on("annotations:toggle", (visible) => {
@@ -183,11 +185,13 @@ export class MarkerManager {
       characterData: false,
     });
 
+    // Capture phase: the widget's other surfaces (FAB, panel, popup) stop
+    // `click` from bubbling to the document, and must still collapse clusters.
     this.onDocumentClickForClusters = (e: MouseEvent) => {
       if (this.container.contains(e.target as Node)) return;
       this.collapseAllClusters();
     };
-    document.addEventListener("click", this.onDocumentClickForClusters);
+    document.addEventListener("click", this.onDocumentClickForClusters, true);
   }
 
   private scheduleReposition(cause: "scroll" | "mutation" | "resize" = "mutation"): void {
@@ -483,7 +487,7 @@ export class MarkerManager {
     if (!topMarker) return;
     const badge = el("div", {
       class: "sp-cluster-badge",
-      style: `
+      style: /* css */ `
         position:absolute;top:-6px;right:-6px;
         min-width:16px;height:16px;padding:0 4px;
         border-radius:9999px;
@@ -563,7 +567,7 @@ export class MarkerManager {
     const isResolved = isClosedStatus(feedback.status);
 
     const marker = el("div", {
-      style: `
+      style: /* css */ `
         position:absolute;
         top:${pos.top}px;
         left:${pos.left}px;
@@ -679,6 +683,21 @@ export class MarkerManager {
     return true;
   }
 
+  /**
+   * `focusFeedback`, but only when the feedback has a pin on screen. Returns
+   * false (and does nothing) when its anchor no longer resolves (every pin is
+   * display:none) or the markers are hidden with the eye toggle: a pin with
+   * no box cannot be scrolled to, so the caller falls back to the stored
+   * scroll offsets.
+   */
+  revealPin(feedbackId: string): boolean {
+    return (
+      this.container.style.display !== "none" &&
+      this.entries.some((e) => e.feedback.id === feedbackId && e.elements.some((m) => m.style.display !== "none")) &&
+      this.focusFeedback(feedbackId)
+    );
+  }
+
   highlight(feedbackId: string): void {
     for (const entry of this.entries) {
       if (entry.feedback.id === feedbackId) {
@@ -705,7 +724,7 @@ export class MarkerManager {
       const typeColor = getTypeColor(feedback.type, this.colors);
       const rect = resolved.rect;
       const highlight = el("div", {
-        style: `
+        style: /* css */ `
           position:absolute;
           top:${rect.top + window.scrollY}px;
           left:${rect.left + window.scrollX}px;
@@ -777,7 +796,7 @@ export class MarkerManager {
     }
     if (this.resizeHandler) window.removeEventListener("resize", this.resizeHandler);
     if (this.scrollHandler) window.removeEventListener("scroll", this.scrollHandler, { capture: true });
-    if (this.onDocumentClickForClusters) document.removeEventListener("click", this.onDocumentClickForClusters);
+    if (this.onDocumentClickForClusters) document.removeEventListener("click", this.onDocumentClickForClusters, true);
     this.mutationObserver?.disconnect();
     this.container.remove();
   }

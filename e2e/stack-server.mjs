@@ -8,22 +8,28 @@
  *   /api/siteping   → `createSitepingHandler` (adapter-prisma) over a
  *                     `MemoryStore` (adapter-memory): real schema validation,
  *                     replay detection, webhooks, status/resolvedAt pairing.
+ *   /api/siteping-keyed → the same store behind `apiKey: "e2e-key"`, reads
+ *                     and submissions left public: what a visitor and the
+ *                     key holder are each allowed to do.
  *   /               → a page running the widget in HTTP mode against it.
  *   /inbox          → `<SitepingInbox />` (dashboard) against the same API,
  *                     bundled with esbuild at startup.
  *   /__e2e/webhook  → generic-webhook receiver; GET /__e2e/webhooks lists
  *                     what it received, for assertions.
  *
- * Tests isolate by project name (one per test), so no global reset is needed
+ * Tests isolate by project name, one per test attempt (retry and repeat-each
+ * included — see `projectFor` in stack.spec.ts), so no global reset is needed
  * and specs can run in parallel against the shared store.
  *
- * Requires `bun run build` (widget, dashboard, adapter-prisma, adapter-memory).
+ * Requires `bun run build` (widget, dashboard, adapter-prisma and the
+ * @siteping/server it imports, adapter-memory).
  */
 import { existsSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { dirname, join, normalize } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { scriptSafeJson } from "./script-safe-json.mjs";
 
 const PORT = 3998;
 const ORIGIN = `http://localhost:${PORT}`;
@@ -48,6 +54,13 @@ const handler = createSitepingHandler({
   webhooks: [{ url: `${ORIGIN}/__e2e/webhook`, type: "generic" }],
 });
 
+// A public site: visitors read and submit, only the key holder triages.
+const keyedHandler = createSitepingHandler({
+  store,
+  apiKey: "e2e-key",
+  publicEndpoints: ["GET", "POST", "OPTIONS"],
+});
+
 const widgetDist = join(pkg("widget"), "dist");
 
 const inboxBundle = (
@@ -62,8 +75,11 @@ const inboxBundle = (
           createElement(SitepingInbox, {
             endpoint: params.get("endpoint") ?? "/api/siteping",
             projects: [params.get("project") ?? "e2e-stack"],
+            apiKey: params.get("apiKey") ?? undefined,
             locale: "en",
-            theme: "light",
+            theme: params.get("theme") === "dark" ? "dark" : "light",
+            // Replies need someone to post them as.
+            ...(params.get("author") ? { author: { name: params.get("author") } } : {}),
           }),
         );
       `,
@@ -80,13 +96,14 @@ const inboxBundle = (
 function widgetPage(params) {
   const project = params.get("project") ?? "e2e-stack";
   const rtl = params.get("rtl") === "1";
+  const diag = Number(params.get("diag"));
   const config = {
     endpoint: params.get("endpoint") ?? "/api/siteping",
     projectName: project,
     forceShow: true,
     // Skips the identity modal — the submission path is what's under test.
     identity: { name: "E2E Tester", email: "e2e@example.com" },
-    ...(params.get("diag") ? { captureDiagnostics: { maxConsoleEntries: Number(params.get("diag")) } } : {}),
+    ...(diag ? { captureDiagnostics: { maxConsoleEntries: diag, maxNetworkEntries: diag } } : {}),
   };
   return `<!DOCTYPE html>
 <html lang="en"${rtl ? ' dir="rtl"' : ""}>
@@ -108,7 +125,7 @@ function widgetPage(params) {
   <script>globalThis.process = { env: { NODE_ENV: "test" } };</script>
   <script type="module">
     import { initSiteping } from "/widget.js";
-    window.__siteping = initSiteping(${JSON.stringify(config)});
+    window.__siteping = initSiteping(${scriptSafeJson(config)});
   </script>
 </body>
 </html>`;
@@ -126,10 +143,10 @@ async function readBody(req) {
   return Buffer.concat(chunks);
 }
 
-/** Node request → Fetch `Request` → handler → Node response. */
-async function callHandler(req, res, url) {
+/** Node request → Fetch `Request` → `api` → Node response. */
+async function callHandler(api, req, res, url) {
   const method = req.method ?? "GET";
-  const route = handler[method];
+  const route = api[method];
   if (!route) {
     res.writeHead(405).end();
     return;
@@ -147,7 +164,8 @@ async function callHandler(req, res, url) {
 const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", ORIGIN);
   try {
-    if (url.pathname === "/api/siteping") return await callHandler(req, res, url);
+    if (url.pathname === "/api/siteping") return await callHandler(handler, req, res, url);
+    if (url.pathname === "/api/siteping-keyed") return await callHandler(keyedHandler, req, res, url);
 
     if (url.pathname === "/__e2e/webhook" && req.method === "POST") {
       webhookLog.push(JSON.parse((await readBody(req)).toString("utf-8")));
@@ -190,4 +208,5 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => console.log(`[stack-server] listening on ${ORIGIN}`));
+// Loopback only: the API is unauthenticated and destructive methods are open.
+server.listen(PORT, "127.0.0.1", () => console.log(`[stack-server] listening on ${ORIGIN}`));

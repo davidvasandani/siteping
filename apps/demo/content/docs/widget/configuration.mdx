@@ -38,7 +38,7 @@ function mountFeedback(config: SitepingHttpConfig) { /* endpoint guaranteed */ }
 | Option | Type | Default | What it does |
 |---|---|---|---|
 | `forceShow` | `boolean` | `false` | Bypasses the production and viewport guards (never the SSR guard) |
-| `minViewportWidth` | `number` | `0` | Below this width the widget skips with `onSkip("mobile")`. The default renders at every width — phones get the [compact layout](/docs/widget#on-phones-and-tablets) |
+| `minViewportWidth` | `number` | `0` | Below this width the widget skips with `onSkip("mobile")`. The default renders at every width — phones get the [compact layout](/docs/widget#on-phones-and-tablets). Before 0.11 the default was `768`: set it to keep the widget off phones |
 | `position` | `"bottom-right"` \| `"bottom-left"` | `"bottom-right"` | Corner for the floating button |
 | `showAnnotationsToggle` | `boolean` | `true` | Set `false` to remove the marker-visibility toggle from the radial menu |
 
@@ -58,8 +58,16 @@ function mountFeedback(config: SitepingHttpConfig) { /* endpoint guaranteed */ }
 | `enableRightClickComment` | `boolean` | `false` | Right-click anywhere to comment instantly — see [Right-click comments](/docs/widget/right-click) |
 | `captureDiagnostics` | `boolean` or object | `false` | Attach recent console entries (max 50) and failed network requests (max 20, URL recorded without credentials, query string or hash) to each feedback. `true` enables both; an object picks channels and lower limits (`maxConsoleEntries` / `maxNetworkEntries` — larger values are clamped to 50 / 20, the server's caps) |
 | `deepLink` | `boolean` or `{ param?: string }` | `false` | On first load, focus the feedback referenced by `?siteping=<id>` (or your custom param). Initial load only — for route changes, call `focusFeedback()` |
-| `identity` | `{ name, email }` | — | Pre-fill the author (SSO apps): skips the identity modal entirely, never persisted to localStorage |
+| `identity` | `{ name, email }` | — | Pre-fill author fields from the host app's session (e.g. SSO): skips the identity modal, never persisted to localStorage. It does not authenticate API requests — send a bearer token with `headers`. Read at init: remount the widget after an account change |
 | `panelActions` | array | — | Your own buttons and links in the feedback detail view — create a ticket, open it in your tracker. See [Panel actions](/docs/widget/panel-actions) |
+
+## Reviewer mode
+
+| Option | Type | Default | What it does |
+|---|---|---|---|
+| `readOnly` | `boolean` | `false` | Hide what triages feedback — resolve, reopen, delete, the bulk actions, "Delete all". Creating, browsing and replying stay |
+
+For a client who reviews while your team triages. On top of it, the widget hides what the server says this visitor may not do — its [`permissions`](/docs/server#what-each-requester-may-do) — so a public widget in front of an `apiKey` offers no button that would answer `401`, even without `readOnly`. Either way it only hides: the server decides what it accepts.
 
 ## Page scoping
 
@@ -76,6 +84,7 @@ function mountFeedback(config: SitepingHttpConfig) { /* endpoint guaranteed */ }
 | Option | Signature | Fires when |
 |---|---|---|
 | `onFeedbackSent` | `(feedback) => void` | A feedback was successfully created |
+| `onCommentAdded` | `(comment) => void` | A reply was posted from a feedback's [discussion thread](/docs/comments#in-the-widget) |
 | `onError` | `(error) => void` | A submission or fetch failed, or one of your [panel actions](/docs/widget/panel-actions#errors) threw — see [error handling](/docs/widget#handling-errors) |
 | `onOpen` / `onClose` | `() => void` | The panel opened / closed |
 | `onAnnotationStart` / `onAnnotationEnd` | `() => void` | An annotation session began / ended — pause chat bubbles or analytics overlays here |

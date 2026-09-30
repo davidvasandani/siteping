@@ -1,3 +1,4 @@
+export { buildDeepLink, parseHttpUrl } from "./deep-link.js";
 export { EMAIL_PATTERN, isValidEmail } from "./email.js";
 export type { SitepingErrorCode } from "./errors.js";
 export { SitepingAuthError, SitepingError, SitepingNetworkError, SitepingValidationError } from "./errors.js";
@@ -28,7 +29,12 @@ export { isRelationField, isScalarField, SITEPING_MODELS } from "./schema.js";
 export type { ScreenshotStorage } from "./screenshot-storage.js";
 export { screenshotMimeType } from "./screenshot-storage.js";
 export type { CollectionStore, CollectionStoreBackend } from "./store-helpers.js";
-export { buildAnnotationRecord, buildFeedbackRecord, createCollectionStore } from "./store-helpers.js";
+export {
+  buildAnnotationRecord,
+  buildCommentRecord,
+  buildFeedbackRecord,
+  createCollectionStore,
+} from "./store-helpers.js";
 export type { AssertEqual, IfEquals, Prettify, Serialized } from "./type-utils.js";
 export { hasOwn, isRecord } from "./type-utils.js";
 export type {
@@ -39,14 +45,22 @@ export type {
   AnnotationResponse,
   BuiltinLocale,
   ClosedFeedbackStatus,
+  CommentAuthorRole,
+  CommentCreateInput,
+  CommentDeletePayload,
+  CommentPayload,
+  CommentRecord,
+  CommentResponse,
   ConsoleDiagnosticEntry,
   ConsoleDiagnosticLevel,
   DiagnosticsCaptureOptions,
   DiagnosticsSnapshot,
   FeedbackCreateInput,
   FeedbackCreateOutcome,
+  FeedbackListPermissions,
   FeedbackPage,
   FeedbackPayload,
+  FeedbackPermissions,
   FeedbackQuery,
   FeedbackRecord,
   FeedbackResponse,
@@ -60,6 +74,7 @@ export type {
   RectData,
   ScreenshotRegion,
   SitepingBaseConfig,
+  SitepingCapabilities,
   SitepingConfig,
   SitepingDeepLinkOptions,
   SitepingHeadersOption,
@@ -86,6 +101,8 @@ export {
   ANCHOR_ELEMENT_TAG_MAX,
   BUILTIN_LOCALES,
   CLOSED_FEEDBACK_STATUSES,
+  COMMENT_AUTHOR_ROLES,
+  COMMENT_BODY_MAX_LENGTH,
   CONSOLE_DIAGNOSTIC_LEVELS,
   FEEDBACK_STATUSES,
   FEEDBACK_TYPES,
@@ -93,10 +110,13 @@ export {
   IDENTITY_FIELD_MAX_LENGTH,
   isClosedStatus,
   isStoreDuplicate,
+  isStoreLimit,
   isStoreNotFound,
   isStorePersistence,
+  MAX_COMMENTS_PER_FEEDBACK,
   OPEN_FEEDBACK_STATUSES,
   StoreDuplicateError,
+  StoreLimitError,
   StoreNotFoundError,
   StorePersistenceError,
   toFeedbackUpdate,
@@ -106,5 +126,6 @@ export {
   feedbackQueryToSearchParams,
   mergeRequestHeaders,
   networkErrorFromException,
+  newClientId,
   withSearchParams,
 } from "./wire.js";

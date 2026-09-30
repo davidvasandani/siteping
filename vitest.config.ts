@@ -1,7 +1,8 @@
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
-const source = (pkg: string) => fileURLToPath(new URL(`packages/${pkg}/src/index.ts`, import.meta.url));
+const source = (pkg: string, entry = "index") =>
+  fileURLToPath(new URL(`packages/${pkg}/src/${entry}.ts`, import.meta.url));
 
 export default defineConfig({
   esbuild: {
@@ -12,18 +13,23 @@ export default defineConfig({
   resolve: {
     conditions: ["import", "module", "default"],
     // These packages export only their built `dist`. Tests that import one
-    // (the widget's bulk-action test runs over real stores, adapter-drizzle
-    // mounts its store behind adapter-prisma's handler) resolve it to source
-    // like `@siteping/core`, so they need no prior build and never run a
-    // stale copy of the engine after a core edit.
+    // (the widget's bulk-action test runs over real stores, adapter-prisma
+    // delegates to @siteping/server and stores screenshots through
+    // @siteping/screenshot-storage, adapter-drizzle mounts its store behind
+    // the server) resolve it to source like `@siteping/core`, so they need no
+    // prior build and never run a stale copy of the engine after a core edit.
+    // A subpath entry comes before its package: the first matching prefix wins.
     alias: {
       "@siteping/adapter-localstorage": source("adapter-localstorage"),
       "@siteping/adapter-memory": source("adapter-memory"),
-      "@siteping/adapter-prisma": source("adapter-prisma"),
+      "@siteping/screenshot-storage/memory": source("screenshot-storage", "backends/memory"),
+      "@siteping/screenshot-storage": source("screenshot-storage"),
+      "@siteping/server": source("server"),
     },
   },
   test: {
-    include: ["packages/**/__tests__/**/*.test.{ts,tsx}"],
+    // e2e/: unit tests of the fixture servers' helpers (Playwright runs *.spec.ts there).
+    include: ["packages/**/__tests__/**/*.test.{ts,tsx}", "e2e/**/*.test.mjs"],
     setupFiles: ["packages/widget/__tests__/setup-i18n.ts"],
     // Type-level tests: *.test-d.ts files are statically checked by tsc via
     // vitest's typecheck mode (they never execute). They lock the public

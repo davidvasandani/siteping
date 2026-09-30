@@ -18,7 +18,7 @@ const siteping = initSiteping({
 });
 ```
 
-`initSiteping` est l'export runtime principal du package, aux côtés des deux helpers i18n (`registerLocale`, `loadLocale`) et des types TypeScript. Il pèse environ **35 KB gzip** (ESM), charge ses parties lourdes à la demande (panneau, locales, moteur de capture) et s'affiche dans un Shadow DOM fermé — les styles de votre page et ceux du widget ne peuvent jamais se marcher dessus.
+`initSiteping` est l'export runtime principal du package, aux côtés des deux helpers i18n (`registerLocale`, `loadLocale`) et des types TypeScript. Il pèse environ **34 KB gzip** (ESM), charge ses parties lourdes à la demande (panneau, locales, moteur de capture) et s'affiche dans un Shadow DOM fermé — les styles de votre page et ceux du widget ne peuvent jamais se marcher dessus.
 
 ## Quand le widget s'affiche — et quand il ne s'affiche pas
 
@@ -30,6 +30,8 @@ const siteping = initSiteping({
 4. **Largeur minimale (optionnelle)** — en dessous de `minViewportWidth`, il passe son tour avec `onSkip("mobile")`. La valeur par défaut, `0`, l'affiche à toutes les largeurs : les téléphones ont droit à la [mise en page compacte](#sur-téléphone-et-tablette). Également contourné par `forceShow`.
 5. **Validation de la config** — pas d'`endpoint`/`store`, ou pas de `projectName` ? Le widget affiche un `console.error` et ne fait rien. Ce cas-là n'appelle **pas** `onSkip` — regardez la console, pas le callback.
 
+> **Modifié en 0.11 :** `minViewportWidth` valait `768` par défaut, ce qui tenait le widget à l'écart des téléphones. Un site qui passe à la 0.11 sans l'avoir défini affiche désormais le widget sur téléphone aussi, et `onSkip("mobile")` ne se déclenche plus. Mettez `minViewportWidth: 768` pour garder l'ancien comportement. Avec `enableRightClickComment` activé, un appui long sur un téléphone Android ouvre aussi le composeur.
+
 ## Sur téléphone et tablette
 
 Le même widget s'adapte à l'écran sur lequel il arrive — il n'y a rien à configurer.
@@ -40,7 +42,7 @@ Le même widget s'adapte à l'écran sur lequel il arrive — il n'y a rien à c
 - Le menu flottant affiche ses libellés (il n'y a pas de survol pour les révéler), et chaque contrôle est dimensionné pour un doigt.
 - Les champs de formulaire utilisent un texte de 16 px : iOS Safari ne zoome donc pas la page quand l'un d'eux prend le focus.
 
-**Téléphones** (fenêtre jusqu'à 640 px de large) :
+**Téléphones** (fenêtre jusqu'à 640 px de large, ou écran tactile jusqu'à 500 px de haut — un téléphone tenu à l'horizontale) :
 
 - Le formulaire de feedback est une **feuille en bas d'écran** qui reste au-dessus du clavier virtuel. S'il devait recouvrir ce que le client vient de sélectionner, la page défile pour garder la sélection visible.
 - Le panneau des feedbacks est une feuille par-dessus la page assombrie — fermez-le avec le ✕, en touchant la page, ou en faisant glisser son en-tête vers le bas. Les filtres tiennent sur une seule ligne défilante, et les menus de type et de tri s'ouvrent en feuilles d'actions.
@@ -62,12 +64,13 @@ const off = siteping.on("feedback:sent", (feedback) => { ... });
 siteping.destroy();               // démontage complet, restaure tous les globals patchés
 ```
 
-`on()` renvoie une fonction de désabonnement. Sept événements publics sont disponibles :
+`on()` renvoie une fonction de désabonnement. Huit événements publics sont disponibles :
 
 | Événement | Charge utile | Déclenché quand |
 |---|---|---|
 | `feedback:sent` | le feedback créé | Un envoi a réussi |
 | `feedback:deleted` | l'id du feedback | Un feedback a été supprimé |
+| `comment:added` | le commentaire enregistré | Une réponse a été postée depuis le [fil de discussion](/fr/docs/comments#dans-le-widget) d'un feedback |
 | `feedback:error` | l'`Error` | Un appel à l'API de feedback a échoué — même charge utile que le callback de config `onError`, qui reçoit en plus les échecs des [actions du panneau](/fr/docs/widget/panel-actions#erreurs) |
 | `panel:open` / `panel:close` | — | Le panneau s'est ouvert / fermé |
 | `annotation:start` / `annotation:end` | — | Une session d'annotation a commencé / s'est terminée. `end` se déclenche que l'utilisateur ait envoyé ou annulé, et les deux points d'entrée — le bouton flottant et les [commentaires au clic droit](/fr/docs/widget/right-click) — émettent la paire symétrique : de quoi mettre en pause vos bulles de chat ou vos overlays d'analytics entre les deux |
@@ -90,7 +93,7 @@ export function Feedback() {
 }
 ```
 
-Le hook renvoie `null` jusqu'à son montage, puis l'instance. Changer `endpoint` ou une autre option structurelle demande un remontage ; changer un callback, non — **tous** les callbacks acceptés par la config (`onFeedbackSent`, `onError`, `onOpen`, `onClose`, `onAnnotationStart`, `onAnnotationEnd`, `onSkip`) sont lus au moment de l'appel, donc un handler qui capture un état frais se déclenche avec cet état — tout comme les callbacks des [actions du panneau](/fr/docs/widget/panel-actions#react). Ils se taisent également après le démontage : une réponse tardive ne peut pas rappeler dans un arbre déjà démonté.
+Le hook renvoie `null` jusqu'à son montage, puis l'instance. Changer `endpoint` ou une autre option structurelle demande un remontage ; changer un callback, non — **tous** les callbacks acceptés par la config (`onFeedbackSent`, `onCommentAdded`, `onError`, `onOpen`, `onClose`, `onAnnotationStart`, `onAnnotationEnd`, `onSkip`) sont lus au moment de l'appel, donc un handler qui capture un état frais se déclenche avec cet état — tout comme les callbacks des [actions du panneau](/fr/docs/widget/panel-actions#react). Ils se taisent également après le démontage : une réponse tardive ne peut pas rappeler dans un arbre déjà démonté.
 
 ## Gérer les erreurs
 
@@ -112,6 +115,33 @@ Branchez sur `error.code`, pas sur `instanceof` — les classes d'erreur elles-m
 ## Les statuts, côté widget
 
 Un feedback a quatre statuts (`open`, `in_progress`, `resolved`, `wont_fix`). Le widget **affiche** les quatre mais ses propres actions sont volontairement binaires : résoudre et rouvrir. Les états intermédiaires appartiennent à votre flux de tri dans le [dashboard](/fr/docs/dashboard).
+
+## Filtrer le panneau
+
+Les filtres du panneau se combinent et ne restreignent que la liste — les marqueurs de la page continuent d'afficher les feedbacks de la page :
+
+- **Recherche** : cherche dans le texte du message.
+- **Type** : garde un seul type de feedback.
+- **Statut** : *Ouvert* couvre `open` et `in_progress`, *Résolu* couvre `resolved` et `wont_fix`.
+- **Portée** : *Cette page* (par défaut), *Ce type* — toutes les pages qui partagent le modèle de route courant, proposé quand [`getPageScope`](/fr/docs/widget/configuration#cadrage-par-page) renvoie un `urlPattern` — ou *Toutes les pages*.
+- **Mes feedbacks** : garde les feedbacks envoyés depuis ce navigateur.
+
+« Mes feedbacks » ne demande ni identité ni support côté serveur, en mode HTTP comme en mode `store`. Le widget retient l'identifiant de chaque feedback qu'il envoie — les 500 plus récents par projet et par endpoint, dans le `localStorage`, y compris ceux que la file d'attente hors ligne envoie plus tard — et filtre de son côté : il parcourt les pages de la liste jusqu'à les avoir tous trouvés, puis les affiche d'un coup. Le serveur ne peut pas le faire à sa place : son `GET` public [masque les emails des auteurs](/fr/docs/server#ce-que-les-réponses-exposent), et un filtre par email permettrait à n'importe qui de vérifier si une adresse a envoyé des feedbacks. « Mes feedbacks » veut donc dire *ce navigateur* : les feedbacks envoyés depuis un autre navigateur ou appareil, ou avant l'effacement des données du site, n'y figurent pas.
+
+## Par-dessus vos modales
+
+Vos clients ont souvent besoin de signaler un problème *dans* une boîte de dialogue. Le widget reste utilisable par-dessus une modale ouverte — testé avec le `Dialog` de Radix / shadcn/ui, et conçu pour toute modale qui fonctionne de la même façon (fermeture au clic extérieur, piège à focus, blocage du défilement, masquage du reste de la page) :
+
+- son bouton, son calque d'annotation, sa popup de commentaire et son panneau restent cliquables, même quand la modale rend le reste de la page insensible aux clics (`body { pointer-events: none }`) ;
+- dessiner, taper, cliquer ou faire défiler dans le widget ne ferme pas la modale et ne la laisse pas reprendre le focus ;
+- **Échap** ferme d'abord la couche ouverte du widget (menu, panneau, popup de commentaire, mode annotation) ; quand rien n'est ouvert dans le widget, il ferme votre modale comme d'habitude ;
+- le widget reste exposé aux lecteurs d'écran quand la modale masque le reste de la page (`aria-hidden`, `inert`).
+
+Les événements `pointerdown`, `mousedown`, `touchstart`, `touchend`, `click`, `focusin`, `focusout`, `wheel` et `touchmove` du widget s'arrêtent au widget, modale ou non : les écouteurs en phase de bouillonnement posés sur le `document` ou la `window` de votre page ne les voient jamais. Les écouteurs en phase de capture les voient toujours, et les autres événements (`pointerup`, `mouseup`, `keydown`…) continuent de se propager.
+
+Au-delà, le widget n'intervient que pendant qu'une modale est ouverte — un élément `aria-modal="true"` visible, ou un `<body>` insensible aux clics —, donc sur une page sans modale, les gestionnaires de focus et de blur de vos champs voient tous les événements. Pendant qu'une modale est ouverte, les écouteurs en phase de capture ne voient plus non plus les `pointerdown` et `focusin` du widget, et passer le focus d'un des champs de la modale au widget ne déclenche pas le `focusout` de ce champ, donc pas non plus le `onBlur` de React ; son `blur` natif, lui, se déclenche toujours. C'est ce qui empêche le piège à focus de la modale de reprendre le focus.
+
+Limites : un `<dialog>` natif ouvert avec `showModal()` rend inerte tout ce qui est en dehors de lui, et aucun script ne peut l'annuler — le widget est inutilisable tant qu'un tel dialogue est ouvert. Et une modale qui intercepte les `mousedown`, `click` ou touches Tab extérieurs avant qu'ils n'atteignent la page (écouteurs en phase de capture, comme focus-trap par défaut) peut encore gêner le widget.
 
 ## La fiabilité, sans rien faire
 

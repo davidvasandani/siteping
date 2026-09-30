@@ -1,5 +1,6 @@
 import type { FeedbackResponse } from "@siteping/core";
 import { el, onClickOutside, parseSvg, setText } from "./dom-utils.js";
+import { isolateFromHost } from "./host-isolation.js";
 import type { TFunction } from "./i18n/index.js";
 import type { ThemeColors } from "./styles/theme.js";
 
@@ -17,7 +18,7 @@ const ICON_JSON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 // CSS
 // ---------------------------------------------------------------------------
 
-export const EXPORT_CSS = `
+export const EXPORT_CSS = /* css */ `
   /* ============================
      Export Button & Menu
      ============================ */
@@ -204,6 +205,9 @@ export function downloadFile(content: string, filename: string, mimeType: string
   anchor.href = url;
   anchor.download = filename;
   anchor.style.display = "none";
+  // The synthetic click bubbles like a real one: a host modal the export ran
+  // over must not read it as an outside click.
+  isolateFromHost(anchor);
   document.body.appendChild(anchor);
   anchor.click();
   // Clean up after a tick to ensure the download starts
