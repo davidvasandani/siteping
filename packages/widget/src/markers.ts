@@ -1,6 +1,7 @@
 import { type AnchorData, type FeedbackResponse, isClosedStatus, type RectData } from "@siteping/core";
 import { Z_INDEX_MAX } from "./constants.js";
 import { resolveAnnotation } from "./dom/resolver.js";
+import { scrollRectIntoView } from "./dom/scroll-into-view.js";
 import { classifyVisibility } from "./dom/visibility.js";
 import { el, setText } from "./dom-utils.js";
 import type { EventBus, WidgetEvents } from "./events.js";
@@ -638,17 +639,48 @@ export class MarkerManager {
    * annotation time. That keeps the focus correct after layout changes
    * (responsive breakpoints, lazy-loaded content) because the marker has
    * already been re-positioned to track the live anchor.
+   *
+   * The marker layer hangs off `<body>`, so it can only scroll the document:
+   * when the anchor sits in an inner scroll container (app shells), the
+   * anchor's own scrollers are driven instead.
    */
   focusFeedback(feedbackId: string): boolean {
     const entry = this.entries.find((e) => e.feedback.id === feedbackId);
     if (!entry) return false;
-    const markerEl = entry.elements[0];
-    if (markerEl) {
+    const markerEl = entry.elements.find((m) => m.style.display !== "none");
+    if (markerEl && !this.scrollAnchorIntoView(entry)) {
       markerEl.scrollIntoView({ behavior: "smooth", block: "center" });
     }
     this.pinHighlight(entry.feedback);
     this.highlight(feedbackId);
     return true;
+  }
+
+  /**
+   * Centre the first annotation that resolves in its inner scrollers; `false`
+   * when it has none (or nothing resolves). Markers exist only for resolved
+   * annotations, so `elements[i]` is not `annotations[i]`: resolve in order.
+   */
+  private scrollAnchorIntoView(entry: MarkerEntry): boolean {
+    for (const annotation of entry.feedback.annotations) {
+      const resolved = resolveAnnotation(toAnchorData(annotation), toRectData(annotation));
+      if (resolved) return scrollRectIntoView(resolved.element, resolved.rect);
+    }
+    return false;
+  }
+
+  /**
+   * `focusFeedback`, but only when the feedback has a pin on screen. Returns
+   * false (and does nothing) when its anchor no longer resolves (every pin is
+   * hidden) or the marker layer is hidden: a pin with no box cannot be
+   * scrolled to, so the caller falls back to the stored scroll offsets.
+   */
+  revealPin(feedbackId: string): boolean {
+    return (
+      this.container.style.display !== "none" &&
+      this.entries.some((e) => e.feedback.id === feedbackId && e.elements.some((m) => m.style.display !== "none")) &&
+      this.focusFeedback(feedbackId)
+    );
   }
 
   highlight(feedbackId: string): void {
