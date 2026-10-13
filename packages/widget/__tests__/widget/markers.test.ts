@@ -461,6 +461,29 @@ describe("MarkerManager", () => {
       main.remove();
     });
 
+    it("never drives the scrollers of a hidden anchor (collapsed section)", () => {
+      const main = document.createElement("main");
+      main.style.overflowY = "auto";
+      Object.defineProperty(main, "scrollHeight", { configurable: true, value: 3000 });
+      Object.defineProperty(main, "clientHeight", { configurable: true, value: 800 });
+      const scrollBy = vi.fn();
+      main.scrollBy = scrollBy as unknown as typeof main.scrollBy;
+      const anchor = document.createElement("div") as HTMLDivElement & { checkVisibility?: () => boolean };
+      main.appendChild(anchor);
+      document.body.appendChild(main);
+      mockState.element = anchor;
+
+      markers.render([makeFeedback({ id: "fb-1" })]);
+      const marker = document.querySelector<HTMLElement>('[data-feedback-id="fb-1"]')!;
+      marker.scrollIntoView = vi.fn();
+      anchor.checkVisibility = () => false;
+
+      expect(markers.focusFeedback("fb-1")).toBe(true);
+      expect(scrollBy).not.toHaveBeenCalled();
+      expect(marker.scrollIntoView).toHaveBeenCalled();
+      main.remove();
+    });
+
     it("pins the highlight overlay and pulses the marker on match", () => {
       markers.render([makeFeedback({ id: "fb-1" })]);
       const marker = document.querySelector<HTMLElement>('[data-feedback-id="fb-1"]')!;

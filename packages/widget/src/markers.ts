@@ -657,14 +657,18 @@ export class MarkerManager {
   }
 
   /**
-   * Centre the first annotation that resolves in its inner scrollers; `false`
-   * when it has none (or nothing resolves). Markers exist only for resolved
-   * annotations, so `elements[i]` is not `annotations[i]`: resolve in order.
+   * Centre the first annotation whose anchor is on screen in its inner
+   * scrollers; `false` when it has none (or no anchor qualifies). Markers
+   * exist only for resolved annotations, so `elements[i]` is not
+   * `annotations[i]`: resolve in order, skipping hidden anchors (a collapsed
+   * section) the way repositioning hides their pins.
    */
   private scrollAnchorIntoView(entry: MarkerEntry): boolean {
     for (const annotation of entry.feedback.annotations) {
       const resolved = resolveAnnotation(toAnchorData(annotation), toRectData(annotation));
-      if (resolved) return scrollRectIntoView(resolved.element, resolved.rect);
+      if (resolved && classifyVisibility(resolved.element) !== "hidden") {
+        return scrollRectIntoView(resolved.element, resolved.rect);
+      }
     }
     return false;
   }
