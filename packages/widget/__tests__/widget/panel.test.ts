@@ -27,6 +27,7 @@ function createMockMarkers() {
     render: vi.fn(),
     highlight: vi.fn(),
     pinHighlight: vi.fn(),
+    revealPin: vi.fn(() => false),
     addFeedback: vi.fn(),
     destroy: vi.fn(),
     count: 0,
@@ -1386,7 +1387,26 @@ describe("Panel", () => {
       });
     });
 
-    it("detail onGoToAnnotation scrolls and pins the highlight", async () => {
+    it("detail onGoToAnnotation follows the live pin when one is on screen", async () => {
+      const fb = makeFeedback({ id: "fb-1", annotations: [annotation] });
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [fb], total: 1 });
+      markers.revealPin.mockReturnValue(true);
+
+      const scrollSpy = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+
+      await panel.open();
+      shadow.querySelector<HTMLElement>('[data-feedback-id="fb-1"]')!.click();
+      shadow.querySelector<HTMLButtonElement>(".sp-detail-btn-goto")!.click();
+
+      expect(markers.revealPin).toHaveBeenCalledWith("fb-1");
+      // The stored offsets come from the author's layout: never used when a pin is on screen.
+      expect(scrollSpy).not.toHaveBeenCalled();
+      expect(markers.pinHighlight).not.toHaveBeenCalled();
+
+      scrollSpy.mockRestore();
+    });
+
+    it("detail onGoToAnnotation falls back to the stored offsets when no pin is on screen", async () => {
       const fb = makeFeedback({ id: "fb-1", annotations: [annotation] });
       apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [fb], total: 1 });
 
