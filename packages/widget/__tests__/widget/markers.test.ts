@@ -397,6 +397,37 @@ describe("MarkerManager", () => {
       expect(scrollSpy).toHaveBeenCalledWith({ behavior: "smooth", block: "center" });
     });
 
+    it("scrolls the anchor's inner container, not the marker, on app-shell layouts", () => {
+      // Host content scrolls inside <main>: the body-level marker can't reach it.
+      const main = document.createElement("main");
+      main.style.overflowY = "auto";
+      Object.defineProperty(main, "scrollHeight", { configurable: true, value: 3000 });
+      Object.defineProperty(main, "clientHeight", { configurable: true, value: 800 });
+      main.getBoundingClientRect = () => new DOMRect(0, 0, 800, 800);
+      const scrollBy = vi.fn();
+      main.scrollBy = scrollBy as unknown as typeof main.scrollBy;
+      const anchor = document.createElement("div");
+      main.appendChild(anchor);
+      document.body.appendChild(main);
+      mockState.element = anchor;
+      const windowScrollBy = vi.spyOn(window, "scrollBy").mockImplementation(() => {});
+
+      // Annotated rect 2000..2100, far below the container's 0..800 view.
+      const below = { x: 100, y: 2000, w: 200, h: 100 };
+      mockState.rectQueue.push(below, below); // render + focus resolutions
+
+      markers.render([makeFeedback({ id: "fb-1" })]);
+      const marker = document.querySelector<HTMLElement>('[data-feedback-id="fb-1"]')!;
+      marker.scrollIntoView = vi.fn();
+
+      expect(markers.focusFeedback("fb-1")).toBe(true);
+      // Centre 2050 vs container centre 400.
+      expect(scrollBy).toHaveBeenCalledWith({ top: 1650, left: 0, behavior: "smooth" });
+      expect(marker.scrollIntoView).not.toHaveBeenCalled();
+      windowScrollBy.mockRestore();
+      main.remove();
+    });
+
     it("pins the highlight overlay and pulses the marker on match", () => {
       markers.render([makeFeedback({ id: "fb-1" })]);
       const marker = document.querySelector<HTMLElement>('[data-feedback-id="fb-1"]')!;
