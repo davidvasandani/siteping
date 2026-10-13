@@ -105,15 +105,17 @@ function centreIn(el: Element, top: number, left: number, h: number, w: number):
 /**
  * Centre `rect` (viewport coordinates, inside `anchor`) in every scroller
  * between it and the viewport, then in the window. Returns `false` without
- * scrolling when the anchor has no inner scroller — window-only pages keep
- * the caller's own path.
+ * scrolling when the anchor has no inner scroller and is not fixed —
+ * window-only pages keep the caller's own path.
  *
  * Each scroller's applied delta shifts the rect before the next (outer) one
  * is measured, so the concurrent smooth scrolls compose.
  */
 export function scrollRectIntoView(anchor: Element, rect: DOMRect): boolean {
   const { scrollers, fixed } = scrollChain(anchor);
-  if (scrollers.length === 0) return false;
+  // A fixed anchor with no scroller is already where it will ever be: handled,
+  // or the caller's marker path would scroll the page for nothing.
+  if (scrollers.length === 0) return fixed;
 
   let top = rect.top;
   let left = rect.left;
