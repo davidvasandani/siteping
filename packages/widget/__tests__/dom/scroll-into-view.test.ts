@@ -204,6 +204,17 @@ describe("scrollRectIntoView", () => {
     expect(smoothScroll(panel)).toEqual({ top: 1025, left: 0, behavior: "smooth" });
     expect(windowScrollBy).not.toHaveBeenCalled();
   });
+
+  it("handles a fixed anchor with no scroller without scrolling anything", () => {
+    const header = document.createElement("header");
+    header.setAttribute("style", "position: fixed");
+    const anchor = document.createElement("div");
+    header.appendChild(anchor);
+    document.body.appendChild(header);
+
+    expect(scrollRectIntoView(anchor, new DOMRect(0, 10, 100, 50))).toBe(true);
+    expect(windowScrollBy).not.toHaveBeenCalled();
+  });
 });
 
 describe("scrollableAncestors", () => {
