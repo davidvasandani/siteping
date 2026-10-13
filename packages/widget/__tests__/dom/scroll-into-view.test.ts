@@ -17,11 +17,18 @@ interface Box {
   scrollWidth?: number;
 }
 
-/** A scroll container with stubbed geometry and a spied `scrollBy`. */
-function scroller(box: Box, overflow = "overflow-y: auto"): HTMLElement {
+/**
+ * A scroll container with stubbed geometry. `scrollBy`/`scrollTo` emulate the
+ * browser: instant requests move the offsets, clamped to the scroll range
+ * (negative in RTL); smooth ones are only recorded.
+ */
+function scroller(box: Box, style = "overflow-y: auto"): HTMLElement {
   const el = document.createElement("div");
-  el.setAttribute("style", overflow);
+  el.setAttribute("style", style);
   const width = box.width ?? 800;
+  const maxY = box.scrollHeight - box.height;
+  const maxX = (box.scrollWidth ?? width) - width;
+  const rtl = style.includes("rtl");
   const props: Record<string, number> = {
     clientHeight: box.height,
     clientWidth: width,
@@ -29,15 +36,31 @@ function scroller(box: Box, overflow = "overflow-y: auto"): HTMLElement {
     clientLeft: 0,
     scrollHeight: box.scrollHeight,
     scrollWidth: box.scrollWidth ?? width,
-    scrollTop: box.scrollTop ?? 0,
-    scrollLeft: 0,
   };
   for (const [key, value] of Object.entries(props)) {
     Object.defineProperty(el, key, { configurable: true, value });
   }
+  const offsets = { top: box.scrollTop ?? 0, left: 0 };
+  Object.defineProperty(el, "scrollTop", { configurable: true, get: () => offsets.top });
+  Object.defineProperty(el, "scrollLeft", { configurable: true, get: () => offsets.left });
+  const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
+  const moveTo = (top: number, left: number) => {
+    offsets.top = clamp(top, 0, maxY);
+    offsets.left = rtl ? clamp(left, -maxX, 0) : clamp(left, 0, maxX);
+  };
   el.getBoundingClientRect = () => new DOMRect(box.left ?? 0, box.top, width, box.height);
-  el.scrollBy = vi.fn() as unknown as typeof el.scrollBy;
+  el.scrollBy = vi.fn((opts: ScrollToOptions) => {
+    if (opts.behavior === "instant") moveTo(offsets.top + (opts.top ?? 0), offsets.left + (opts.left ?? 0));
+  }) as unknown as typeof el.scrollBy;
+  el.scrollTo = vi.fn((opts: ScrollToOptions) =>
+    moveTo(opts.top ?? 0, opts.left ?? 0),
+  ) as unknown as typeof el.scrollTo;
   return el;
+}
+
+/** The smooth (visible) scroll an element was asked for. */
+function smoothScroll(el: HTMLElement) {
+  return vi.mocked(el.scrollBy).mock.calls.find(([opts]) => (opts as ScrollToOptions).behavior === "smooth")?.[0];
 }
 
 describe("scrollRectIntoView", () => {
@@ -72,28 +95,36 @@ describe("scrollRectIntoView", () => {
 
     // Rect 2000..2100 → centre 2050; container centre 400 → delta 1650.
     expect(scrollRectIntoView(anchor, new DOMRect(10, 2000, 100, 100))).toBe(true);
-    expect(main.scrollBy).toHaveBeenCalledWith({ top: 1650, left: 0, behavior: "smooth" });
+    expect(smoothScroll(main)).toEqual({ top: 1650, left: 0, behavior: "smooth" });
   });
 
   it("then centres what is left in the window", () => {
-    // Document scrolls too (800px viewport, 3000px page); the container sits below the fold.
-    const html = document.documentElement;
-    const doc = { clientHeight: 800, clientWidth: 1200, scrollHeight: 3000, scrollWidth: 1200, scrollTop: 0 };
-    for (const [key, value] of Object.entries(doc)) Object.defineProperty(html, key, { configurable: true, value });
+    // The container sits below the fold of an 800px viewport.
     const main = scroller({ top: 1500, height: 400, scrollHeight: 2000 });
     const anchor = document.createElement("div");
     main.appendChild(anchor);
     document.body.appendChild(main);
 
-    try {
-      // Rect 2500..2600: container centre 1700 → +850, rect lands at 1650..1750;
-      // window centre 400 → +1300.
-      scrollRectIntoView(anchor, new DOMRect(0, 2500, 100, 100));
-      expect(main.scrollBy).toHaveBeenCalledWith({ top: 850, left: 0, behavior: "smooth" });
-      expect(windowScrollBy).toHaveBeenCalledWith({ top: 1300, left: 0, behavior: "smooth" });
-    } finally {
-      for (const key of Object.keys(doc)) delete (html as unknown as Record<string, unknown>)[key];
-    }
+    // Rect 2500..2600: container centre 1700 → +850, rect lands at 1650..1750;
+    // window centre 400 → +1300 (the window clamps itself).
+    scrollRectIntoView(anchor, new DOMRect(0, 2500, 100, 100));
+    expect(smoothScroll(main)).toEqual({ top: 850, left: 0, behavior: "smooth" });
+    expect(windowScrollBy).toHaveBeenCalledWith({ top: 1300, left: -550, behavior: "smooth" });
+  });
+
+  it("never slides an app shell whose viewport is clipped", () => {
+    // html/body overflow hidden: the marker layer still makes the window
+    // programmatically scrollable — it must not be touched.
+    document.documentElement.style.overflowY = "hidden";
+    document.documentElement.style.overflowX = "hidden";
+    const main = scroller({ top: 64, height: 736, scrollHeight: 3000 });
+    const anchor = document.createElement("div");
+    main.appendChild(anchor);
+    document.body.appendChild(main);
+
+    scrollRectIntoView(anchor, new DOMRect(0, 2500, 100, 100));
+    expect(smoothScroll(main)).toBeDefined();
+    expect(windowScrollBy).not.toHaveBeenCalled();
   });
 
   it("clamps to the container's scroll range", () => {
@@ -104,7 +135,7 @@ describe("scrollRectIntoView", () => {
 
     // Wants +1650, only 1000 - 800 - 100 = 100 left to scroll.
     scrollRectIntoView(anchor, new DOMRect(10, 2000, 100, 100));
-    expect(main.scrollBy).toHaveBeenCalledWith({ top: 100, left: 0, behavior: "smooth" });
+    expect(smoothScroll(main)).toEqual({ top: 100, left: 0, behavior: "smooth" });
   });
 
   it("accounts for the inner scroll when scrolling an outer container", () => {
@@ -119,8 +150,8 @@ describe("scrollRectIntoView", () => {
     // Rect 1500..1550 (centre 1525): inner centre 1200 → +325, rect lands at 1175..1225.
     // Outer: centre 1200 vs 400 → +800.
     scrollRectIntoView(anchor, new DOMRect(0, 1500, 100, 50));
-    expect(inner.scrollBy).toHaveBeenCalledWith({ top: 325, left: 0, behavior: "smooth" });
-    expect(outer.scrollBy).toHaveBeenCalledWith({ top: 800, left: 0, behavior: "smooth" });
+    expect(smoothScroll(inner)).toEqual({ top: 325, left: 0, behavior: "smooth" });
+    expect(smoothScroll(outer)).toEqual({ top: 800, left: 0, behavior: "smooth" });
   });
 
   it("does not touch an axis the container clips", () => {
@@ -134,7 +165,18 @@ describe("scrollRectIntoView", () => {
     document.body.appendChild(main);
 
     scrollRectIntoView(anchor, new DOMRect(1500, 2000, 100, 100));
-    expect(main.scrollBy).toHaveBeenCalledWith({ top: 1650, left: 0, behavior: "smooth" });
+    expect(smoothScroll(main)).toEqual({ top: 1650, left: 0, behavior: "smooth" });
+  });
+
+  it("puts the container back before animating, so only the smooth scroll shows", () => {
+    const main = scroller({ top: 0, height: 800, scrollHeight: 3000 });
+    const anchor = document.createElement("div");
+    main.appendChild(anchor);
+    document.body.appendChild(main);
+
+    scrollRectIntoView(anchor, new DOMRect(10, 2000, 100, 100));
+    expect(main.scrollTo).toHaveBeenCalledWith({ top: 0, left: 0, behavior: "instant" });
+    expect(main.scrollTop).toBe(0);
   });
 
   it("scrolls an RTL container towards negative scrollLeft", () => {
@@ -149,7 +191,7 @@ describe("scrollRectIntoView", () => {
 
     // Rect -1000..-900 (centre -950) vs container centre 200 → -1150.
     scrollRectIntoView(anchor, new DOMRect(-1000, 100, 100, 50));
-    expect(main.scrollBy).toHaveBeenCalledWith({ top: 0, left: -1150, behavior: "smooth" });
+    expect(smoothScroll(main)).toEqual({ top: 0, left: -1150, behavior: "smooth" });
   });
 
   it("leaves the window alone inside a position:fixed layer", () => {
@@ -159,7 +201,7 @@ describe("scrollRectIntoView", () => {
     document.body.appendChild(panel);
 
     scrollRectIntoView(anchor, new DOMRect(0, 1200, 100, 50));
-    expect(panel.scrollBy).toHaveBeenCalledWith({ top: 1025, left: 0, behavior: "smooth" });
+    expect(smoothScroll(panel)).toEqual({ top: 1025, left: 0, behavior: "smooth" });
     expect(windowScrollBy).not.toHaveBeenCalled();
   });
 });

@@ -404,8 +404,16 @@ describe("MarkerManager", () => {
       Object.defineProperty(main, "scrollHeight", { configurable: true, value: 3000 });
       Object.defineProperty(main, "clientHeight", { configurable: true, value: 800 });
       main.getBoundingClientRect = () => new DOMRect(0, 0, 800, 800);
-      const scrollBy = vi.fn();
+      // Browser-like: instant requests move scrollTop (the helper reads the applied delta back).
+      let scrollTop = 0;
+      Object.defineProperty(main, "scrollTop", { configurable: true, get: () => scrollTop });
+      const scrollBy = vi.fn((opts: ScrollToOptions) => {
+        if (opts.behavior === "instant") scrollTop = Math.min(2200, Math.max(0, scrollTop + (opts.top ?? 0)));
+      });
       main.scrollBy = scrollBy as unknown as typeof main.scrollBy;
+      main.scrollTo = ((opts: ScrollToOptions) => {
+        scrollTop = opts.top ?? 0;
+      }) as typeof main.scrollTo;
       const anchor = document.createElement("div");
       main.appendChild(anchor);
       document.body.appendChild(main);
