@@ -100,10 +100,14 @@ jobs:
       - run: bun install --frozen-lockfile
 
       - name: Build
-        run: bunx turbo run build --filter=@siteping/${{ steps.tag.outputs.component }}
+        env:
+          COMPONENT: ${{ steps.tag.outputs.component }}
+        run: bunx turbo run build "--filter=@siteping/$COMPONENT"
 
       - name: Test
-        run: bunx vitest run packages/${{ steps.tag.outputs.component }}
+        env:
+          COMPONENT: ${{ steps.tag.outputs.component }}
+        run: bunx vitest run "packages/$COMPONENT"
 
       - name: Pack
         id: pack
