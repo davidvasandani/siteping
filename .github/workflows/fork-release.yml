@@ -94,7 +94,8 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 20
+          # vitest 5 / jsdom 30 need Node >= 22.12; npm pack runs here too.
+          node-version: 24
           package-manager-cache: false
 
       - run: bun install --frozen-lockfile
