@@ -41,5 +41,8 @@ tasks: [vk/57e4-fix-go-to-annota]
   must be the **pathname** (scope URL), not the full URL, or no marker renders.
   On NixOS the Playwright-downloaded Chromium lacks libs — use
   `nix build nixpkgs#chromium` and `executablePath`.
-- The widget IIFE budget (`packages/widget/.size-limit.json`) is tight (tens
-  of bytes); prefer shrinking code over raising limits.
+- The widget IIFE budget (`packages/widget/.size-limit.json`) is tight, and CI
+  measures ~0.6 kB gzipped **more** than a local NixOS build of the same commit
+  — a local pass with < 1 kB headroom is not proof. Features that genuinely
+  need bytes raise the budget in the same PR, stating the cost (this fix:
+  ~0.6 kB, 137 → 138 kB).
