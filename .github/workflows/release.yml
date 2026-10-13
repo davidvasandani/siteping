@@ -11,6 +11,11 @@ on:
         type: boolean
         default: true
 
+# Upstream's npm pipeline. Every release job is scoped to the upstream
+# repository (NeosiaNexus/SitePing): the @siteping npm scope is upstream's, so
+# in a fork only CI runs and the run is green. Forks release with
+# fork-release.yml.
+
 # Read-only floor. Every job that needs more (release-please, the npm publish
 # fan-out) re-declares its own scope, which replaces this block rather than
 # adding to it — so the default stays least-privilege even if a new job forgets.
@@ -29,7 +34,7 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   release-please:
-    if: ${{ github.event_name == 'push' }}
+    if: ${{ github.repository_owner == 'NeosiaNexus' && github.event_name == 'push' }}
     needs: ci
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -63,6 +68,7 @@ jobs:
   build:
     needs: release-please
     if: |
+      github.repository_owner == 'NeosiaNexus' &&
       !failure() && !cancelled() &&
       (needs.release-please.outputs.releases_created == 'true' ||
        (github.event_name == 'workflow_dispatch' && inputs.publish))
@@ -105,6 +111,7 @@ jobs:
   publish-widget:
     needs: [release-please, build]
     if: |
+      github.repository_owner == 'NeosiaNexus' &&
       !failure() && !cancelled() &&
       (needs.release-please.outputs.widget-release_created == 'true' ||
        (github.event_name == 'workflow_dispatch' && inputs.publish))
@@ -148,6 +155,7 @@ jobs:
   publish-adapter-prisma:
     needs: [release-please, build, publish-server]
     if: |
+      github.repository_owner == 'NeosiaNexus' &&
       !failure() && !cancelled() &&
       (needs.release-please.outputs.adapter-release_created == 'true' ||
        (github.event_name == 'workflow_dispatch' && inputs.publish))
@@ -193,6 +201,7 @@ jobs:
   publish-cli:
     needs: [release-please, build]
     if: |
+      github.repository_owner == 'NeosiaNexus' &&
       !failure() && !cancelled() &&
       (needs.release-please.outputs.cli-release_created == 'true' ||
        (github.event_name == 'workflow_dispatch' && inputs.publish))
@@ -232,6 +241,7 @@ jobs:
   publish-adapter-memory:
     needs: [release-please, build]
     if: |
+      github.repository_owner == 'NeosiaNexus' &&
       !failure() && !cancelled() &&
       (needs.release-please.outputs.adapter-memory-release_created == 'true' ||
        (github.event_name == 'workflow_dispatch' && inputs.publish))
@@ -271,6 +281,7 @@ jobs:
   publish-dashboard:
     needs: [release-please, build]
     if: |
+      github.repository_owner == 'NeosiaNexus' &&
       !failure() && !cancelled() &&
       (needs.release-please.outputs.dashboard-release_created == 'true' ||
        (github.event_name == 'workflow_dispatch' && inputs.publish))
@@ -310,6 +321,7 @@ jobs:
   publish-adapter-localstorage:
     needs: [release-please, build]
     if: |
+      github.repository_owner == 'NeosiaNexus' &&
       !failure() && !cancelled() &&
       (needs.release-please.outputs.adapter-localstorage-release_created == 'true' ||
        (github.event_name == 'workflow_dispatch' && inputs.publish))
@@ -349,6 +361,7 @@ jobs:
   publish-adapter-kit:
     needs: [release-please, build]
     if: |
+      github.repository_owner == 'NeosiaNexus' &&
       !failure() && !cancelled() &&
       (needs.release-please.outputs.adapter-kit-release_created == 'true' ||
        (github.event_name == 'workflow_dispatch' && inputs.publish))
@@ -388,6 +401,7 @@ jobs:
   publish-adapter-drizzle:
     needs: [release-please, build]
     if: |
+      github.repository_owner == 'NeosiaNexus' &&
       !failure() && !cancelled() &&
       (needs.release-please.outputs.adapter-drizzle-release_created == 'true' ||
        (github.event_name == 'workflow_dispatch' && inputs.publish))
@@ -427,6 +441,7 @@ jobs:
   publish-server:
     needs: [release-please, build]
     if: |
+      github.repository_owner == 'NeosiaNexus' &&
       !failure() && !cancelled() &&
       (needs.release-please.outputs.server-release_created == 'true' ||
        (github.event_name == 'workflow_dispatch' && inputs.publish))
@@ -475,6 +490,7 @@ jobs:
   publish-screenshot-storage:
     needs: [release-please, build]
     if: |
+      github.repository_owner == 'NeosiaNexus' &&
       !failure() && !cancelled() &&
       (needs.release-please.outputs.screenshot-storage-release_created == 'true' ||
        (github.event_name == 'workflow_dispatch' && inputs.publish))
@@ -516,6 +532,7 @@ jobs:
   publish-integration-issues:
     needs: [release-please, build, publish-server]
     if: |
+      github.repository_owner == 'NeosiaNexus' &&
       !failure() && !cancelled() &&
       (needs.release-please.outputs.integration-issues-release_created == 'true' ||
        (github.event_name == 'workflow_dispatch' && inputs.publish))
@@ -588,6 +605,7 @@ jobs:
       - publish-screenshot-storage
       - publish-integration-issues
     if: |
+      github.repository_owner == 'NeosiaNexus' &&
       !cancelled() &&
       (needs.release-please.result == 'success' ||
        (github.event_name == 'workflow_dispatch' && inputs.publish))
