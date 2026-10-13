@@ -75,6 +75,27 @@ describe("scrollRectIntoView", () => {
     expect(main.scrollBy).toHaveBeenCalledWith({ top: 1650, left: 0, behavior: "smooth" });
   });
 
+  it("then centres what is left in the window", () => {
+    // Document scrolls too (800px viewport, 3000px page); the container sits below the fold.
+    const html = document.documentElement;
+    const doc = { clientHeight: 800, clientWidth: 1200, scrollHeight: 3000, scrollWidth: 1200, scrollTop: 0 };
+    for (const [key, value] of Object.entries(doc)) Object.defineProperty(html, key, { configurable: true, value });
+    const main = scroller({ top: 1500, height: 400, scrollHeight: 2000 });
+    const anchor = document.createElement("div");
+    main.appendChild(anchor);
+    document.body.appendChild(main);
+
+    try {
+      // Rect 2500..2600: container centre 1700 → +850, rect lands at 1650..1750;
+      // window centre 400 → +1300.
+      scrollRectIntoView(anchor, new DOMRect(0, 2500, 100, 100));
+      expect(main.scrollBy).toHaveBeenCalledWith({ top: 850, left: 0, behavior: "smooth" });
+      expect(windowScrollBy).toHaveBeenCalledWith({ top: 1300, left: 0, behavior: "smooth" });
+    } finally {
+      for (const key of Object.keys(doc)) delete (html as unknown as Record<string, unknown>)[key];
+    }
+  });
+
   it("clamps to the container's scroll range", () => {
     const main = scroller({ top: 0, height: 800, scrollHeight: 1000, scrollTop: 100 });
     const anchor = document.createElement("div");
@@ -115,6 +136,32 @@ describe("scrollRectIntoView", () => {
     scrollRectIntoView(anchor, new DOMRect(1500, 2000, 100, 100));
     expect(main.scrollBy).toHaveBeenCalledWith({ top: 1650, left: 0, behavior: "smooth" });
   });
+
+  it("scrolls an RTL container towards negative scrollLeft", () => {
+    // RTL: scrollLeft runs from -(2000 - 400) to 0, starting at 0 (right edge).
+    const main = scroller(
+      { top: 0, height: 400, scrollHeight: 400, width: 400, scrollWidth: 2000 },
+      "overflow-x: auto; direction: rtl",
+    );
+    const anchor = document.createElement("div");
+    main.appendChild(anchor);
+    document.body.appendChild(main);
+
+    // Rect -1000..-900 (centre -950) vs container centre 200 → -1150.
+    scrollRectIntoView(anchor, new DOMRect(-1000, 100, 100, 50));
+    expect(main.scrollBy).toHaveBeenCalledWith({ top: 0, left: -1150, behavior: "smooth" });
+  });
+
+  it("leaves the window alone inside a position:fixed layer", () => {
+    const panel = scroller({ top: 0, height: 400, scrollHeight: 2000 }, "position: fixed; overflow-y: auto");
+    const anchor = document.createElement("div");
+    panel.appendChild(anchor);
+    document.body.appendChild(panel);
+
+    scrollRectIntoView(anchor, new DOMRect(0, 1200, 100, 50));
+    expect(panel.scrollBy).toHaveBeenCalledWith({ top: 1025, left: 0, behavior: "smooth" });
+    expect(windowScrollBy).not.toHaveBeenCalled();
+  });
 });
 
 describe("scrollableAncestors", () => {
@@ -142,6 +189,22 @@ describe("scrollableAncestors", () => {
     host.attachShadow({ mode: "open" }).appendChild(anchor);
     main.appendChild(host);
     document.body.appendChild(main);
+
+    expect(scrollableAncestors(anchor)).toEqual([main]);
+  });
+
+  it("follows a slotted anchor into the shadow scroller that renders it", () => {
+    const host = document.createElement("x-panel");
+    const anchor = document.createElement("p");
+    anchor.slot = "content";
+    host.appendChild(anchor);
+    const shadow = host.attachShadow({ mode: "open" });
+    const main = scroller({ top: 0, height: 400, scrollHeight: 2000 });
+    const slot = document.createElement("slot");
+    slot.name = "content";
+    main.appendChild(slot);
+    shadow.appendChild(main);
+    document.body.appendChild(host);
 
     expect(scrollableAncestors(anchor)).toEqual([main]);
   });

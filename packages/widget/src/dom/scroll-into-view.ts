@@ -11,8 +11,12 @@
 
 const SCROLLABLE_OVERFLOW = new Set(["auto", "scroll", "overlay"]);
 
-/** Ancestor across shadow boundaries — anchors can sit in open shadow roots. */
+/**
+ * Flat-tree parent: a slotted element is laid out (and scrolled) by its slot,
+ * a shadow root's children by the host.
+ */
 function parentOf(el: Element): Element | null {
+  if (el.assignedSlot) return el.assignedSlot;
   if (el.parentElement) return el.parentElement;
   const root = el.getRootNode();
   return root instanceof ShadowRoot ? root.host : null;
@@ -25,26 +29,73 @@ function scrollsOn(el: Element, axis: "x" | "y"): boolean {
   return axis === "y" ? el.scrollHeight > el.clientHeight : el.scrollWidth > el.clientWidth;
 }
 
-/**
- * Scrollable ancestors of `el`, innermost first. The document's scroller is
- * excluded (the window step handles it), and so is `<body>` while its
- * overflow propagates to the viewport — i.e. unless `<html>` clips.
- */
-export function scrollableAncestors(el: Element): Element[] {
-  const root = document.scrollingElement ?? document.documentElement;
-  const bodyPropagates = getComputedStyle(document.documentElement).overflowY === "visible";
-  const out: Element[] = [];
-  for (let cur = parentOf(el); cur && cur !== root && cur !== document.documentElement; cur = parentOf(cur)) {
-    if (cur === document.body && bodyPropagates) continue;
-    if (scrollsOn(cur, "y") || scrollsOn(cur, "x")) out.push(cur);
-  }
-  return out;
+interface ScrollChain {
+  /** Scrollable ancestors, innermost first. */
+  scrollers: Element[];
+  /** Whether scrolling the window moves the target — false inside a `position: fixed` layer. */
+  movesWithWindow: boolean;
 }
 
-/** Delta that centres [start, start+size] in [viewStart, viewStart+viewSize], clamped to the scroll range. */
-function centreDelta(start: number, size: number, viewStart: number, viewSize: number, pos: number, max: number) {
-  const delta = start + size / 2 - (viewStart + viewSize / 2);
-  return Math.max(-pos, Math.min(max - pos, delta));
+/**
+ * The document's scroller is excluded (the window step handles it), and so is
+ * `<body>` while its overflow propagates to the viewport — i.e. unless
+ * `<html>` clips. The walk stops at a `position: fixed` element: nothing
+ * above it moves the target.
+ */
+function scrollChain(el: Element): ScrollChain {
+  const root = document.scrollingElement ?? document.documentElement;
+  const bodyPropagates = getComputedStyle(document.documentElement).overflowY === "visible";
+  const scrollers: Element[] = [];
+  if (getComputedStyle(el).position === "fixed") return { scrollers, movesWithWindow: false };
+  for (let cur = parentOf(el); cur && cur !== root && cur !== document.documentElement; cur = parentOf(cur)) {
+    if (cur === document.body && bodyPropagates) continue;
+    if (scrollsOn(cur, "y") || scrollsOn(cur, "x")) scrollers.push(cur);
+    if (getComputedStyle(cur).position === "fixed") return { scrollers, movesWithWindow: false };
+  }
+  return { scrollers, movesWithWindow: true };
+}
+
+/** Scrollable ancestors of `el`, innermost first (see `scrollChain`). */
+export function scrollableAncestors(el: Element): Element[] {
+  return scrollChain(el).scrollers;
+}
+
+const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+
+/**
+ * Scroll `el` so the rect (`top`/`left`/`h`/`w`, viewport coordinates) is
+ * centred in its client box, clamped to its scroll range, and return the
+ * applied `[dy, dx]`. `viewport`: `el` is the document's scroller — its box is
+ * the viewport and `window` does the scrolling.
+ *
+ * Only the axes an element itself scrolls move: `overflow-x: hidden` is still
+ * programmatically scrollable, and must stay put. RTL horizontal ranges are
+ * negative (`scrollLeft` runs from −(scrollWidth − clientWidth) to 0).
+ */
+function centreIn(el: Element, top: number, left: number, h: number, w: number, viewport: boolean): number[] {
+  const box = viewport ? new DOMRect() : el.getBoundingClientRect();
+  const viewTop = viewport ? 0 : box.top + el.clientTop;
+  const viewLeft = viewport ? 0 : box.left + el.clientLeft;
+  const overflowX = Math.max(0, el.scrollWidth - el.clientWidth);
+  const rtl = getComputedStyle(el).direction === "rtl";
+  const dy =
+    viewport || scrollsOn(el, "y")
+      ? clamp(
+          top + h / 2 - viewTop - el.clientHeight / 2,
+          -el.scrollTop,
+          el.scrollHeight - el.clientHeight - el.scrollTop,
+        )
+      : 0;
+  const dx =
+    viewport || scrollsOn(el, "x")
+      ? clamp(
+          left + w / 2 - viewLeft - el.clientWidth / 2,
+          (rtl ? -overflowX : 0) - el.scrollLeft,
+          (rtl ? 0 : overflowX) - el.scrollLeft,
+        )
+      : 0;
+  if (dy || dx) (viewport ? window : el).scrollBy({ top: dy, left: dx, behavior: "smooth" });
+  return [dy, dx];
 }
 
 /**
@@ -57,50 +108,18 @@ function centreDelta(start: number, size: number, viewStart: number, viewSize: n
  * by what each inner scroll will apply, so concurrent smooth scrolls compose.
  */
 export function scrollRectIntoView(anchor: Element, rect: DOMRect): boolean {
-  const scrollers = scrollableAncestors(anchor);
+  const { scrollers, movesWithWindow } = scrollChain(anchor);
   if (scrollers.length === 0) return false;
 
   let top = rect.top;
   let left = rect.left;
   for (const scroller of scrollers) {
-    const box = scroller.getBoundingClientRect();
-    // Only the axes the scroller itself scrolls: `overflow-x: hidden` is
-    // still programmatically scrollable, and must stay put.
-    const dy = !scrollsOn(scroller, "y")
-      ? 0
-      : centreDelta(
-          top,
-          rect.height,
-          box.top + scroller.clientTop,
-          scroller.clientHeight,
-          scroller.scrollTop,
-          scroller.scrollHeight - scroller.clientHeight,
-        );
-    const dx = !scrollsOn(scroller, "x")
-      ? 0
-      : centreDelta(
-          left,
-          rect.width,
-          box.left + scroller.clientLeft,
-          scroller.clientWidth,
-          scroller.scrollLeft,
-          scroller.scrollWidth - scroller.clientWidth,
-        );
-    if (dy !== 0 || dx !== 0) scroller.scrollBy({ top: dy, left: dx, behavior: "smooth" });
+    const [dy = 0, dx = 0] = centreIn(scroller, top, left, rect.height, rect.width, false);
     top -= dy;
     left -= dx;
   }
-
-  const doc = document.scrollingElement ?? document.documentElement;
-  const dy = centreDelta(
-    top,
-    rect.height,
-    0,
-    window.innerHeight,
-    window.scrollY,
-    doc.scrollHeight - window.innerHeight,
-  );
-  const dx = centreDelta(left, rect.width, 0, window.innerWidth, window.scrollX, doc.scrollWidth - window.innerWidth);
-  if (dy !== 0 || dx !== 0) window.scrollBy({ top: dy, left: dx, behavior: "smooth" });
+  if (movesWithWindow) {
+    centreIn(document.scrollingElement ?? document.documentElement, top, left, rect.height, rect.width, true);
+  }
   return true;
 }
