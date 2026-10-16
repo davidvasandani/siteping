@@ -881,6 +881,7 @@ export interface DetailCallbacks {
   onBack: () => void;
   onResolve: (feedback: FeedbackResponse) => Promise<void>;
   onDelete: (feedback: FeedbackResponse) => Promise<void>;
+  canGoToAnnotation?: (feedback: FeedbackResponse) => boolean;
   onGoToAnnotation: (feedback: FeedbackResponse) => void;
 }
 
@@ -1272,6 +1273,8 @@ export class DetailView {
     });
 
     wrapper.appendChild(info);
+    container.appendChild(wrapper);
+    if (this.callbacks.canGoToAnnotation?.(feedback) === false) return;
 
     // "Go to annotation" button
     const gotoBtn = document.createElement("button");
@@ -1288,7 +1291,6 @@ export class DetailView {
     });
 
     wrapper.appendChild(gotoBtn);
-    container.appendChild(wrapper);
   }
 
   /**
