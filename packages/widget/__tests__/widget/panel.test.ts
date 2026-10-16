@@ -1388,7 +1388,7 @@ describe("Panel", () => {
     });
 
     it("detail onGoToAnnotation follows the live pin when one is on screen", async () => {
-      const fb = makeFeedback({ id: "fb-1", annotations: [annotation] });
+      const fb = makeFeedback({ id: "fb-1", url: "/", annotations: [annotation] });
       apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [fb], total: 1 });
       markers.revealPin.mockReturnValue(true);
 
@@ -1406,8 +1406,78 @@ describe("Panel", () => {
       scrollSpy.mockRestore();
     });
 
+    it("hides 'Go to annotation' for a feedback from another page (scope: all pages)", async () => {
+      const elsewhere = makeFeedback({ id: "elsewhere", url: "/pricing", annotations: [annotation] });
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [elsewhere], total: 1 });
+      const scrollSpy = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+
+      await panel.open();
+      shadow.querySelector<HTMLButtonElement>('[data-scope-filter="all"]')!.click();
+      await vi.waitFor(() => expect(shadow.querySelector('[data-feedback-id="elsewhere"]')).not.toBeNull());
+      shadow.querySelector<HTMLElement>('[data-feedback-id="elsewhere"]')!.click();
+
+      // Its stored scroll offset and anchor belong to /pricing, not this page.
+      expect(shadow.querySelector(".sp-detail-btn-goto")).toBeNull();
+      scrollSpy.mockRestore();
+    });
+
+    it("keeps 'Go to annotation' for another page's feedback when markers are not scoped by URL", async () => {
+      panel.destroy();
+      panel = new Panel(shadow, colors, bus, apiClient as never, "test-project", markers as never, t, "fr", {
+        getScope: () => ({ url: "/", urlPattern: null }),
+        scopeAnnotationsByUrl: false,
+      });
+      const elsewhere = makeFeedback({ id: "elsewhere", url: "/pricing", annotations: [annotation] });
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [elsewhere], total: 1 });
+
+      await panel.open();
+      shadow.querySelector<HTMLButtonElement>('[data-scope-filter="all"]')!.click();
+      await vi.waitFor(() => expect(shadow.querySelector('[data-feedback-id="elsewhere"]')).not.toBeNull());
+      shadow.querySelector<HTMLElement>('[data-feedback-id="elsewhere"]')!.click();
+
+      // Markers render for every URL here, so the detail view keeps the jump.
+      expect(shadow.querySelector(".sp-detail-btn-goto")).not.toBeNull();
+    });
+
+    it("navigates to another page without revealing an anchor on this page", async () => {
+      panel.destroy();
+      panel = new Panel(shadow, colors, bus, apiClient as never, "test-project", markers as never, t, "fr", {
+        getScope: () => ({ url: "/admin/sandbox", urlPattern: null }),
+        scopeAnnotationsByUrl: true,
+        deepLinkParam: "focus",
+      });
+      const elsewhere = makeFeedback({
+        id: "elsewhere",
+        url: "/talent/person?tab=about#bio",
+        annotations: [annotation],
+      });
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [elsewhere], total: 1 });
+      await panel.open();
+      shadow.querySelector<HTMLButtonElement>('[data-scope-filter="all"]')!.click();
+      await vi.waitFor(() => expect(shadow.querySelector('[data-feedback-id="elsewhere"]')).not.toBeNull());
+      shadow.querySelector<HTMLElement>('[data-feedback-id="elsewhere"]')!.click();
+      const assign = vi.fn();
+      const scrollTo = vi.fn();
+      const realWindow = window;
+      vi.stubGlobal("window", {
+        location: { href: realWindow.location.href, origin: realWindow.location.origin, assign },
+        scrollTo,
+      });
+      try {
+        shadow.querySelector<HTMLButtonElement>(".sp-detail-btn-goto")!.click();
+        expect(assign).toHaveBeenCalledWith(
+          `${realWindow.location.origin}/talent/person?tab=about&focus=elsewhere#bio`,
+        );
+        expect(markers.revealPin).not.toHaveBeenCalled();
+        expect(markers.pinHighlight).not.toHaveBeenCalled();
+        expect(scrollTo).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
     it("detail onGoToAnnotation falls back to the stored offsets when no pin is on screen", async () => {
-      const fb = makeFeedback({ id: "fb-1", annotations: [annotation] });
+      const fb = makeFeedback({ id: "fb-1", url: "/", annotations: [annotation] });
       apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [fb], total: 1 });
 
       const scrollSpy = vi.spyOn(window, "scrollTo").mockImplementation(() => {});

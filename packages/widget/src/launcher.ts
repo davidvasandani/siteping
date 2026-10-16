@@ -360,6 +360,7 @@ export function launch(config: SitepingConfig): SitepingInstance {
         panelInstance = new mod.Panel(shadow, colors, bus, client, config.projectName, markers, t, locale, {
           getScope,
           scopeAnnotationsByUrl,
+          deepLinkParam: deepLinkOpts.enabled ? deepLinkOpts.param : undefined,
         });
         return panelInstance;
       });

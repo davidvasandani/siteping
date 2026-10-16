@@ -7,6 +7,7 @@ import {
   isClosedStatus,
   type PageScope,
 } from "@siteping/core";
+import { annotationDestination } from "./annotation-navigation.js";
 import type { GetFeedbacksOptions, WidgetClient } from "./api-client.js";
 import { SegmentedControl } from "./components/segmented-control.js";
 import { PAGE_SIZE } from "./constants.js";
@@ -99,7 +100,11 @@ export class Panel {
     private readonly markers: MarkerManager,
     private readonly t: TFunction,
     private readonly locale: string,
-    pageScopeOptions?: { getScope: () => PageScope; scopeAnnotationsByUrl: boolean },
+    pageScopeOptions?: {
+      getScope: () => PageScope;
+      scopeAnnotationsByUrl: boolean;
+      deepLinkParam?: string | undefined;
+    },
   ) {
     this.shadowRoot = shadowRoot;
     this.getScope = pageScopeOptions?.getScope ?? (() => ({ url: window.location.pathname, urlPattern: null }));
@@ -226,7 +231,18 @@ export class Panel {
             throw error;
           }
         },
+        // Same rule as the page markers: another page's scroll offset and
+        // anchor mean nothing here (reachable via the "all pages" scope).
+        canGoToAnnotation: (fb) =>
+          !this.scopeAnnotationsByUrl ||
+          fb.url === this.getScope().url ||
+          annotationDestination(fb.url, fb.id, pageScopeOptions?.deepLinkParam) !== null,
         onGoToAnnotation: (fb) => {
+          if (this.scopeAnnotationsByUrl && fb.url !== this.getScope().url) {
+            const destination = annotationDestination(fb.url, fb.id, pageScopeOptions?.deepLinkParam);
+            if (destination) window.location.assign(destination);
+            return;
+          }
           if (fb.annotations.length > 0) {
             const ann = fb.annotations[0];
             if (!ann) return;
