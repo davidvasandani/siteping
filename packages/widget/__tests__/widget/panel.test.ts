@@ -1541,6 +1541,43 @@ describe("Panel", () => {
       expect(shadow.querySelector(".sp-detail-btn-goto")).not.toBeNull();
     });
 
+    it("navigates to another page without revealing an anchor on this page", async () => {
+      panel.destroy();
+      panel = new Panel(shadow, colors, bus, apiClient as never, "test-project", markers as never, t, "fr", {
+        getScope: () => ({ url: "/admin/sandbox", urlPattern: null }),
+        scopeAnnotationsByUrl: true,
+        deepLinkParam: "focus",
+      });
+      const elsewhere = makeFeedback({
+        id: "elsewhere",
+        url: "/talent/person?tab=about#bio",
+        annotations: [annotation],
+      });
+      apiClient.getFeedbacks.mockResolvedValue({ feedbacks: [elsewhere], total: 1 });
+      await panel.open();
+      shadow.querySelector<HTMLButtonElement>('[data-scope-filter="all"]')!.click();
+      await vi.waitFor(() => expect(shadow.querySelector('[data-feedback-id="elsewhere"]')).not.toBeNull());
+      shadow.querySelector<HTMLElement>('[data-feedback-id="elsewhere"]')!.click();
+      const assign = vi.fn();
+      const scrollTo = vi.fn();
+      const realWindow = window;
+      vi.stubGlobal("window", {
+        location: { href: realWindow.location.href, origin: realWindow.location.origin, assign },
+        scrollTo,
+      });
+      try {
+        shadow.querySelector<HTMLButtonElement>(".sp-detail-btn-goto")!.click();
+        expect(assign).toHaveBeenCalledWith(
+          `${realWindow.location.origin}/talent/person?tab=about&focus=elsewhere#bio`,
+        );
+        expect(markers.revealPin).not.toHaveBeenCalled();
+        expect(markers.pinHighlight).not.toHaveBeenCalled();
+        expect(scrollTo).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
     it("detail onGoToAnnotation scrolls and pins the highlight", async () => {
       // url = the current page scope (pathname) — as the launcher stores it
       const fb = makeFeedback({ id: "fb-1", url: "/", annotations: [annotation] });
