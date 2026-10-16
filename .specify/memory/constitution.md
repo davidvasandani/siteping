@@ -60,3 +60,9 @@ This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
 **Version**: 0.5.0
+
+## Widget navigation amendment (2026-10-16)
+Annotation anchors and scroll offsets belong to the recorded page. Cross-page actions
+must navigate safely before resolving them. Preserve configured page identity,
+existing scroll-container handling, and consumer wire compatibility. Fork consumer
+updates use immutable release URLs and lockfile integrity.
