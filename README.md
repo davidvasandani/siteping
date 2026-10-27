@@ -50,7 +50,7 @@ Stop chasing client feedback across Slack threads, email chains, and Notion docs
 - **Instant right-click comments** — opt-in, and it never hijacks keyboard or modifier-key context menus
 - **Screenshots + diagnostics** — opt-in JPEG of the annotated area (with privacy masking) and console/network capture
 - **Panel actions** — your own buttons and links in the feedback detail view: create a ticket, hand a feedback to an agent, open it in your tracker
-- **Triage inbox** — `<SitepingInbox />` (`@siteping/dashboard`): Linear-style, keyboard-first, light/dark, 8 locales
+- **Triage inbox** — `<SitepingInbox />` (`@siteping/dashboard`): Linear-style, keyboard-first, light/dark, 9 locales
 - **Reliability built in** — retry with backoff plus a localStorage queue; a flaky network never loses a comment
 - **Shadow DOM isolation** — widget CSS never leaks into your site, and your site CSS never breaks the widget
 - **Dev-only by default** — auto-hides in production builds unless `forceShow: true`
@@ -138,6 +138,7 @@ This project follows the [all-contributors](https://allcontributors.org) specifi
     </tr>
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/imikemiller"><img src="https://avatars.githubusercontent.com/u/24856374?v=4?s=100" width="100px;" alt="Mike Miller"/><br /><sub><b>Mike Miller</b></sub></a><br /><a href="https://github.com/NeosiaNexus/SitePing/commits?author=imikemiller" title="Code">💻</a> <a href="https://github.com/NeosiaNexus/SitePing/commits?author=imikemiller" title="Documentation">📖</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/jinwoo0103"><img src="https://avatars.githubusercontent.com/u/48249867?v=4?s=100" width="100px;" alt="Jinwoo"/><br /><sub><b>Jinwoo</b></sub></a><br /><a href="#translation-jinwoo0103" title="Translation">🌍</a></td>
     </tr>
   </tbody>
 </table>
