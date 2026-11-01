@@ -1,7 +1,6 @@
 import { type FeedbackResponse, isClosedStatus } from "@siteping/core";
 import { el, setText } from "./dom-utils.js";
 import { type TFunction, tWithParams } from "./i18n/index.js";
-import type { ThemeColors } from "./styles/theme.js";
 
 // ---------------------------------------------------------------------------
 // CSS
@@ -98,26 +97,23 @@ export const STATS_CSS = /* css */ `
 
 /**
  * Compact statistics bar displayed between filters and the feedback list.
- * Shows open/resolved/bug counts and a resolved-percentage progress bar.
+ * Shows open/closed/bug counts and a closed-percentage progress bar.
  */
 export class PanelStats {
   readonly element: HTMLElement;
 
   private readonly valueOpen: HTMLElement;
-  private readonly valueResolved: HTMLElement;
+  private readonly valueClosed: HTMLElement;
   private readonly valueBugs: HTMLElement;
   private readonly progressFill: HTMLElement;
   private readonly progressLabel: HTMLElement;
   private readonly t: TFunction;
 
-  constructor(
-    private readonly colors: ThemeColors,
-    t: TFunction,
-  ) {
+  constructor(t: TFunction) {
     this.t = t;
     // Container
     this.element = el("div", { class: "sp-stats-bar" });
-    this.element.setAttribute("aria-label", "Feedback statistics");
+    this.element.setAttribute("aria-label", t("stats.aria"));
     this.element.hidden = true;
 
     // --- Stats row ---
@@ -135,22 +131,22 @@ export class PanelStats {
     itemOpen.appendChild(this.valueOpen);
     itemOpen.appendChild(labelOpen);
 
-    // Resolved
-    const itemResolved = el("div", { class: "sp-stats-item" });
-    const dotResolved = el("span", { class: "sp-stats-dot" });
-    dotResolved.style.background = "#9ca3af";
-    this.valueResolved = el("span", { class: "sp-stats-value" });
-    setText(this.valueResolved, "0");
-    const labelResolved = el("span", { class: "sp-stats-label" });
-    setText(labelResolved, this.t("stats.resolved"));
-    itemResolved.appendChild(dotResolved);
-    itemResolved.appendChild(this.valueResolved);
-    itemResolved.appendChild(labelResolved);
+    // Closed (resolved + wont_fix): never called "resolved" (#302)
+    const itemClosed = el("div", { class: "sp-stats-item" });
+    const dotClosed = el("span", { class: "sp-stats-dot" });
+    dotClosed.style.background = "#9ca3af";
+    this.valueClosed = el("span", { class: "sp-stats-value" });
+    setText(this.valueClosed, "0");
+    const labelClosed = el("span", { class: "sp-stats-label" });
+    setText(labelClosed, this.t("stats.closed"));
+    itemClosed.appendChild(dotClosed);
+    itemClosed.appendChild(this.valueClosed);
+    itemClosed.appendChild(labelClosed);
 
     // Bugs
     const itemBugs = el("div", { class: "sp-stats-item" });
     const dotBugs = el("span", { class: "sp-stats-dot" });
-    dotBugs.style.background = this.colors.typeBug;
+    dotBugs.style.background = "var(--sp-type-bug)";
     this.valueBugs = el("span", { class: "sp-stats-value" });
     setText(this.valueBugs, "0");
     const labelBugs = el("span", { class: "sp-stats-label" });
@@ -160,7 +156,7 @@ export class PanelStats {
     itemBugs.appendChild(labelBugs);
 
     row.appendChild(itemOpen);
-    row.appendChild(itemResolved);
+    row.appendChild(itemClosed);
     row.appendChild(itemBugs);
 
     // --- Progress bar ---
@@ -187,24 +183,24 @@ export class PanelStats {
     this.element.hidden = false;
 
     let openCount = 0;
-    let resolvedCount = 0;
+    let closedCount = 0;
     let bugCount = 0;
 
     for (const fb of feedbacks) {
       // Binary client-facing buckets: "open" = anything still actionable
-      // (open, in_progress), "resolved" = any closed status (resolved, wont_fix).
-      if (isClosedStatus(fb.status)) resolvedCount++;
+      // (open, in_progress), "closed" = resolved or wont_fix.
+      if (isClosedStatus(fb.status)) closedCount++;
       else openCount++;
       if (fb.type === "bug") bugCount++;
     }
 
     setText(this.valueOpen, String(openCount));
-    setText(this.valueResolved, String(resolvedCount));
+    setText(this.valueClosed, String(closedCount));
     setText(this.valueBugs, String(bugCount));
 
-    // Percentage resolved (relative to visible feedbacks, not total)
+    // Percentage closed (relative to visible feedbacks, not total)
     const visible = feedbacks.length;
-    const pct = visible > 0 ? Math.round((resolvedCount / visible) * 100) : 0;
+    const pct = visible > 0 ? Math.round((closedCount / visible) * 100) : 0;
 
     // Animate fill width via rAF so the transition kicks in after the DOM update
     requestAnimationFrame(() => {

@@ -16,6 +16,8 @@ export interface Translations {
   "panel.retry": string;
   "panel.empty": string;
   "panel.showMore": string;
+  /** A feedback of this page whose pin can't be placed (its element is gone or hidden). */
+  "panel.notOnPage": string;
   "panel.showLess": string;
   "panel.resolve": string;
   "panel.reopen": string;
@@ -30,6 +32,7 @@ export interface Translations {
   "panel.statusResolved": string;
   "panel.statusInProgress": string;
   "panel.statusWontFix": string;
+  "panel.statusClosed": string;
 
   // Feedback type labels (UI display only)
   "type.label": string;
@@ -93,13 +96,18 @@ export interface Translations {
   // Accessibility — screen reader announcements
   "feedback.sent.confirmation": string;
   "feedback.error.message": string;
+  /** A failed send saved on the device for the next page load. */
+  "feedback.queued": string;
   "feedback.deleted.confirmation": string;
 
   // Badge
   "badge.count": string;
 
   // Bulk actions toolbar
+  "bulk.aria": string;
   "bulk.selectAll": string;
+  /** A card's selection checkbox; `{label}` is the card's accessible name. */
+  "bulk.selectFeedback": string;
   "bulk.selected": string;
   "bulk.resolve": string;
   "bulk.delete": string;
@@ -115,13 +123,15 @@ export interface Translations {
   "group.feedbacks": string;
 
   // Stats bar
+  "stats.aria": string;
   "stats.open": string;
-  "stats.resolved": string;
+  "stats.closed": string;
   "stats.bugs": string;
   "stats.progress": string;
 
   // Detail view
   "detail.back": string;
+  "detail.aria": string;
   "detail.title": string;
   "detail.status": string;
   "detail.message": string;

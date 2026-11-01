@@ -17,6 +17,7 @@ export const ja: Translations = {
   "panel.retry": "再試行",
   "panel.empty": "フィードバックはまだありません",
   "panel.showMore": "もっと見る",
+  "panel.notOnPage": "このページでは表示されていません",
   "panel.showLess": "折りたたむ",
   "panel.resolve": "解決",
   "panel.reopen": "再オープン",
@@ -31,6 +32,7 @@ export const ja: Translations = {
   "panel.statusResolved": "解決済み",
   "panel.statusInProgress": "対応中",
   "panel.statusWontFix": "対応しない",
+  "panel.statusClosed": "クローズ済み",
 
   // Feedback type labels
   "type.label": "種類",
@@ -85,7 +87,7 @@ export const ja: Translations = {
 
   // Markers
   "marker.approximate": "おおよその位置（確度: {confidence}%）",
-  "marker.aria": "フィードバック #{number}: {type} — {message}",
+  "marker.aria": "フィードバック #{number}: {type}、{status} — {message}",
   "marker.count": "{count} 件のフィードバックマーカーを表示中",
 
   // FAB badge
@@ -94,13 +96,16 @@ export const ja: Translations = {
   // Accessibility — screen reader announcements
   "feedback.sent.confirmation": "フィードバックを送信しました",
   "feedback.error.message": "フィードバックの送信に失敗しました",
+  "feedback.queued": "この端末に保存しました。次回のアクセス時に送信されます。",
   "feedback.deleted.confirmation": "フィードバックを削除しました",
 
   // Badge
   "badge.count": "未解決のフィードバック {count} 件",
 
   // Bulk actions toolbar
+  "bulk.aria": "一括操作",
   "bulk.selectAll": "すべて選択",
+  "bulk.selectFeedback": "{label}を選択",
   "bulk.selected": "{count} 件選択中",
   "bulk.resolve": "解決",
   "bulk.delete": "削除",
@@ -116,13 +121,15 @@ export const ja: Translations = {
   "group.feedbacks": "フィードバック {count} 件",
 
   // Stats bar
+  "stats.aria": "フィードバックの統計",
   "stats.open": "未対応",
-  "stats.resolved": "解決済み",
+  "stats.closed": "クローズ済み",
   "stats.bugs": "不具合",
-  "stats.progress": "{percent}% 解決済み",
+  "stats.progress": "{percent}% クローズ済み",
 
   // Detail view
   "detail.back": "戻る",
+  "detail.aria": "フィードバックの詳細",
   "detail.title": "フィードバック #{number}",
   "detail.status": "ステータス",
   "detail.message": "メッセージ",

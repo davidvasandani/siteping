@@ -3,7 +3,7 @@ title: Quickstart
 description: From npm install to your first pinned feedback in about three minutes.
 ---
 
-Two paths: the **full setup** (Next.js + Prisma — the production shape) or the **zero-server** one (60 seconds, everything in the browser).
+Two paths: the **full setup** (Next.js + Prisma — the production shape) or the **zero-server** one (60 seconds, everything in the browser). On SvelteKit, Nuxt, Astro, a Vite SPA or a page without a bundler, follow [Frameworks](/docs/frameworks) instead — it also covers Drizzle on PostgreSQL and Turso.
 
 ## Full setup — Next.js + Prisma
 
@@ -53,6 +53,8 @@ export function Feedback() {
 Run your dev server and look bottom-right: the SitePing button is there. Draw a rectangle on anything, type a comment, hit Send.
 
 By default the widget shows in development but **never in production builds** — that's the point: clients review on dev/staging URLs. For a staging environment that builds in production mode, pass `forceShow: true`.
+
+**Before going live, set `SITEPING_API_KEY`**: the generated route refuses to start in production without it. With a key, only the widget's submissions stay public. Status changes and deletes need the key, and so does listing: a reviewer without it can send feedback but sees no pins, and the browser console says why. To let reviewers see pins and threads, uncomment `publicEndpoints: ["GET", "POST", "OPTIONS"]` in the route. Anyone with the URL and the project name can then read the feedback, with author emails redacted — see [the security model](/docs/server#the-security-model-honestly).
 
 ### 4. Triage what comes in
 

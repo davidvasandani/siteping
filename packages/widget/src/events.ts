@@ -63,6 +63,8 @@ export interface WidgetEvents {
   "feedback:error": [Error];
   /** Emitted whenever the marker set changes — payload is the open (unresolved) count for the current page. */
   "markers:changed": [number];
+  /** Internal-only: a pin was placed or lost on the page — see `MarkerManager.isLost`. */
+  "markers:placed": [];
   "annotation:start": [];
   "annotation:end": [];
   "annotation:complete": [AnnotationComplete];
@@ -73,6 +75,13 @@ export interface WidgetEvents {
    * part of `SitepingPublicEvents` — never exposed to consumers.
    */
   "submission:cancelled": [];
+  /**
+   * Internal-only: a send failed but its payload is saved for the next page
+   * load. Emitted before `feedback:error` so the annotator closes the popup:
+   * the feedback is accepted locally, and resending it would only replace the
+   * queued copy.
+   */
+  "feedback:queued": [];
   /**
    * Internal-only: a host `panelActions` callback threw or rejected. Kept off
    * `feedback:error` on purpose — the annotator settles its pending popup

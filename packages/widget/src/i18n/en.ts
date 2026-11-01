@@ -17,6 +17,7 @@ export const en: Translations = {
   "panel.retry": "Retry",
   "panel.empty": "No feedback yet",
   "panel.showMore": "Show more",
+  "panel.notOnPage": "Not visible on this page",
   "panel.showLess": "Show less",
   "panel.resolve": "Resolve",
   "panel.reopen": "Reopen",
@@ -31,6 +32,7 @@ export const en: Translations = {
   "panel.statusResolved": "Resolved",
   "panel.statusInProgress": "In progress",
   "panel.statusWontFix": "Won't fix",
+  "panel.statusClosed": "Closed",
 
   // Feedback type labels
   "type.label": "Type",
@@ -85,7 +87,7 @@ export const en: Translations = {
 
   // Markers
   "marker.approximate": "Approximate position (confidence: {confidence}%)",
-  "marker.aria": "Feedback #{number}: {type} — {message}",
+  "marker.aria": "Feedback #{number}: {type}, {status} — {message}",
   "marker.count": "{count} feedback markers displayed",
 
   // FAB badge
@@ -94,13 +96,16 @@ export const en: Translations = {
   // Accessibility — screen reader announcements
   "feedback.sent.confirmation": "Feedback sent successfully",
   "feedback.error.message": "Failed to send feedback",
+  "feedback.queued": "Saved on this device. It will be sent on your next visit.",
   "feedback.deleted.confirmation": "Feedback deleted",
 
   // Badge
   "badge.count": "{count} unresolved feedbacks",
 
   // Bulk actions toolbar
+  "bulk.aria": "Bulk actions",
   "bulk.selectAll": "Select all",
+  "bulk.selectFeedback": "Select {label}",
   "bulk.selected": "{count} selected",
   "bulk.resolve": "Resolve",
   "bulk.delete": "Delete",
@@ -116,13 +121,15 @@ export const en: Translations = {
   "group.feedbacks": "{count} feedbacks",
 
   // Stats bar
+  "stats.aria": "Feedback statistics",
   "stats.open": "Open",
-  "stats.resolved": "Resolved",
+  "stats.closed": "Closed",
   "stats.bugs": "Bugs",
-  "stats.progress": "{percent}% resolved",
+  "stats.progress": "{percent}% closed",
 
   // Detail view
   "detail.back": "Back",
+  "detail.aria": "Feedback detail",
   "detail.title": "Feedback #{number}",
   "detail.status": "Status",
   "detail.message": "Message",

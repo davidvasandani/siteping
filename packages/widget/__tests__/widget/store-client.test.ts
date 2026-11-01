@@ -5,6 +5,7 @@ import {
   type FeedbackCreateInput,
   type FeedbackPayload,
   type FeedbackRecord,
+  SitepingAuthError,
   SitepingError,
   type SitepingStore,
   StoreDuplicateError,
@@ -24,6 +25,7 @@ function mockStore(): SitepingStore {
     updateFeedback: vi.fn(),
     deleteFeedback: vi.fn(),
     deleteAllFeedbacks: vi.fn(),
+    verifyProjectOwnership: vi.fn(),
   };
 }
 
@@ -184,8 +186,8 @@ describe("StoreClient", () => {
   });
 
   // -----------------------------------------------------------------------
-  // sendFeedback — duplicate clientId: the contract lets createFeedback throw
-  // StoreDuplicateError instead of returning the existing record.
+  // sendFeedback — duplicate clientId: the contract has createFeedback throw
+  // StoreDuplicateError rather than return the existing record.
   // -----------------------------------------------------------------------
 
   describe("sendFeedback — duplicate clientId", () => {
@@ -213,6 +215,20 @@ describe("StoreClient", () => {
 
       expect(resent).toMatchObject({ id: "fb-1", message: "Broken layout" });
       expect(rows.size).toBe(1);
+    });
+
+    it("resolves a resend of a stored clientId with that record over a real store", async () => {
+      // MemoryStore follows the contract: its createFeedback throws on the
+      // repeated clientId, and the client answers with the stored record.
+      const memory = new MemoryStore();
+      const real = new StoreClient(memory, samplePayload.projectName);
+      const first = await real.sendFeedback(samplePayload);
+
+      await expect(real.sendFeedback({ ...samplePayload, message: "Edited" })).resolves.toMatchObject({
+        id: first.id,
+        message: samplePayload.message,
+      });
+      expect((await memory.getFeedbacks({ projectName: samplePayload.projectName })).total).toBe(1);
     });
 
     it("recognises the duplicate from a store bundled with its own copy of core", async () => {
@@ -434,6 +450,18 @@ describe("StoreClient", () => {
         status: undefined,
         search: undefined,
       });
+    });
+
+    // The HTTP client's publicEndpoints advice (#280) is about the endpoint's
+    // policy; a store's own refusal is surfaced as is, with no console note.
+    it("surfaces a store's auth refusal without the HTTP client's console advice", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const refusal = new SitepingAuthError("not allowed", 401);
+      vi.mocked(store.getFeedbacks).mockRejectedValue(refusal);
+
+      await expect(client.getFeedbacks("my-project")).rejects.toBe(refusal);
+      expect(warn).not.toHaveBeenCalled();
+      warn.mockRestore();
     });
 
     it("serializes dates in returned feedbacks", async () => {

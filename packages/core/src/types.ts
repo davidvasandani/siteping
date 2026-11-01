@@ -7,7 +7,10 @@ import { type AssertEqual, type DeepReadonly, hasOwn, type Prettify, type Serial
 /** FAB anchor — bottom-corner placement supported by the widget. */
 export type SitepingPosition = "bottom-right" | "bottom-left";
 
-/** Visual theme — `auto` resolves to `light` or `dark` via system preference. */
+/**
+ * Visual theme of the widget and the dashboard — `auto` follows the system
+ * preference, live: an OS switch mid-session re-themes the UI.
+ */
 export type SitepingTheme = "light" | "dark" | "auto";
 
 /** Built-in UI locales shipped with the widget. */
@@ -50,6 +53,16 @@ export interface SitepingIdentity {
  * it persists is never a 400 on every later submission.
  */
 export const IDENTITY_FIELD_MAX_LENGTH = 200;
+
+/**
+ * Max length of a `projectName` and of a feedback's or comment's `clientId`
+ * — the identifiers the stores index. 191 characters is the longest
+ * `VARCHAR` every MySQL version indexes under `utf8mb4` (767 bytes), which
+ * is why Prisma maps a plain `String` to `VARCHAR(191)` there: the HTTP
+ * schema caps them at that length, so their columns need no prefix index.
+ */
+export const PROJECT_NAME_MAX_LENGTH = 191;
+export const CLIENT_ID_MAX_LENGTH = 191;
 
 /** Deep-link configuration — controls how a feedback id is read from the URL. */
 export interface SitepingDeepLinkOptions {
@@ -207,7 +220,7 @@ export interface SitepingBaseConfig {
   minViewportWidth?: number | undefined;
   /** Enable debug logging of lifecycle events — defaults to false */
   debug?: boolean | undefined;
-  /** Color theme — defaults to 'light' */
+  /** Color theme — defaults to `light`; `auto` follows the system preference live. */
   theme?: SitepingTheme | undefined;
   /** UI locale — defaults to 'en'. Built-in: en, fr, de, es, it, pt (Brazilian), ru, ja, ko. Any other string falls back to English. */
   locale?: SitepingLocale | undefined;
@@ -227,7 +240,9 @@ export interface SitepingBaseConfig {
    * When true (default), the widget filters initial markers and panel results
    * by `feedback.url === scope.url`, so annotations created on one page never
    * leak to other pages — even if their CSS selector accidentally matches.
-   * Set to `false` to revert to the legacy project-wide behavior.
+   * Set to `false` for a project-wide view: the panel lists every feedback of
+   * the project, and a marker shows wherever its anchor resolves — for
+   * feedback on what every page shares, such as a header or a footer.
    */
   scopeAnnotationsByUrl?: boolean | undefined;
   /**
@@ -299,7 +314,7 @@ export interface SitepingBaseConfig {
    */
   captureDiagnostics?: boolean | DiagnosticsCaptureOptions | undefined;
   /** Called when the widget is skipped (production mode, viewport under `minViewportWidth`, SSR — no DOM) */
-  onSkip?: (reason: SitepingSkipReason) => void;
+  onSkip?: ((reason: SitepingSkipReason) => void) | undefined;
   /**
    * Auto-focus a specific annotation when its ID appears in the URL query
    * string. Lets hosts deeplink directly into a feedback from external
@@ -309,7 +324,8 @@ export interface SitepingBaseConfig {
    * `window.location.search` right after the initial markers load. If the
    * value matches a visible feedback ID, the widget scrolls the annotation
    * into view, pins its highlight, and pulses the marker — the same visual
-   * affordance a marker click produces.
+   * affordance a marker click produces — then opens the panel on that
+   * feedback's detail view, where its discussion thread is.
    *
    * - `false` / `undefined` (default): no URL parsing. Existing behavior
    *   unchanged, no host URL inspection.
@@ -350,6 +366,8 @@ export interface SitepingBaseConfig {
    * Pre-fill author identity from the host application — typically the
    * currently signed-in user. When set, the widget uses these values
    * directly and never shows the identity modal, even on first feedback.
+   * It names the reviewer who sends feedback — the dashboard's `author` is
+   * the team member who replies, a different person.
    *
    * Use case: SSO-integrated apps where the end user is already
    * authenticated by the host. Avoids the awkward "enter your name and
@@ -397,12 +415,13 @@ export interface SitepingBaseConfig {
    *
    * The widget always emits a `SitepingError` (or a subclass:
    * `SitepingNetworkError`, `SitepingValidationError`, `SitepingAuthError`)
-   * for HTTP-mode failures — host apps can `instanceof` to drive retry
-   * logic, or read `error.code` (`"NETWORK" | "VALIDATION" | "AUTH" |
-   * "SERVER"`) and `error.retryable` — and an `AUTH` error's `status`
-   * (`401` for missing or dead credentials, `403` for a refusal). The type
-   * is widened to `Error` so direct-store callers can still surface raw
-   * errors without breaking the contract.
+   * for a failed call — match it with `isSitepingError(error)` (not
+   * `instanceof`: the classes aren't exported), then read `error.code`
+   * (`"NETWORK" | "VALIDATION" | "AUTH" | "SERVER" | "TIMEOUT"`),
+   * `error.retryable` and an `AUTH` error's `status` (`401` for missing or
+   * dead credentials, `403` for a refusal). The type is widened to `Error`
+   * because a store in `store` mode may throw its own errors, which reach
+   * here unchanged.
    *
    * Also receives whatever a `panelActions` callback throws or rejects with
    * (non-`Error` values are wrapped). Those host failures are not API
@@ -479,14 +498,24 @@ export type SitepingConfig = SitepingHttpConfig | SitepingStoreConfig;
 
 /** Instance returned by initSiteping() with lifecycle methods. */
 export interface SitepingInstance {
-  /** Remove the widget from the DOM and clean up all listeners. */
+  /**
+   * Release this handle and detach the listeners added through its `on()`.
+   * Every `initSiteping()` call returns its own handle over the one widget,
+   * which leaves the DOM, all its listeners cleaned up, once the last handle
+   * is destroyed. A repeat call is a no-op, and the handle's other methods do
+   * nothing afterwards.
+   */
   destroy: () => void;
   /** Open the panel programmatically */
   open: () => void;
   /** Close the panel */
   close: () => void;
-  /** Reload feedbacks from server */
-  refresh: () => void;
+  /**
+   * Reload feedbacks from the server. Resolves once the pins (and the open
+   * panel) show the reloaded list; never rejects — like the dashboard's
+   * `refresh()`, a failed reload leaves the current view in place.
+   */
+  refresh: () => Promise<void>;
   /**
    * Scroll the matching annotation into view, pin its highlight, and
    * pulse its marker. Returns `true` when a visible feedback matched the
@@ -927,9 +956,10 @@ export class StoreLimitError extends Error {
 
 /**
  * Thrown when a value is longer than the store can hold, though the HTTP
- * validation accepts it — on MySQL, Prisma maps a plain `String` to
- * `VARCHAR(191)`. Handlers translate this to HTTP 422: the submission can
- * never be stored as it is, so a client must not retry it.
+ * validation accepts it — a MySQL schema that predates the columns `sync`
+ * now sizes from the HTTP caps keeps Prisma's `VARCHAR(191)` for a plain
+ * `String`. Handlers translate this to HTTP 422: the submission can never be
+ * stored as it is, so a client must not retry it.
  */
 export class StoreValueTooLongError extends Error {
   readonly code = "STORE_VALUE_TOO_LONG" as const;
@@ -1042,6 +1072,20 @@ export interface FeedbackCreateOutcome {
   created: boolean;
 }
 
+/**
+ * Outcome of `SitepingStore.addCommentIfAbsent` — the comment plus whether
+ * this very call inserted it.
+ */
+export interface CommentCreateOutcome {
+  comment: CommentRecord;
+  /**
+   * `true` when this call inserted the comment, `false` when a comment with
+   * the same `clientId` already existed and is returned instead (a replay, or
+   * a concurrent request that won the race).
+   */
+  created: boolean;
+}
+
 /** Paginated result returned by `SitepingStore.getFeedbacks`. */
 export interface FeedbackPage {
   feedbacks: FeedbackRecord[];
@@ -1059,19 +1103,17 @@ export interface FeedbackPage {
  *
  * - **`updateFeedback` / `deleteFeedback`**: throw `StoreNotFoundError` when
  *   the record does not exist.
- * - **`createFeedback`**: either return the existing record on duplicate
- *   `clientId` (idempotent) or throw `StoreDuplicateError`. The handler
- *   handles both patterns — but only a throw, or the optional
- *   `createFeedbackIfAbsent`, tells it the record was not inserted by this
- *   call; stores that return the existing record should implement
- *   `createFeedbackIfAbsent` so creation side effects never run twice.
+ * - **`createFeedback`**: throw `StoreDuplicateError` on a duplicate
+ *   `clientId` — never return the existing record, so a caller always knows
+ *   whether this call inserted. The optional `createFeedbackIfAbsent`
+ *   reports the existing record instead, as `{ created: false }`.
  * - **All mutations**: when a write is accepted but cannot be persisted
  *   (e.g. storage quota), throw `StorePersistenceError` instead of reporting
  *   a phantom success. Detect it with `isStorePersistence`.
  * - Other methods should not throw on empty results — return empty arrays or `null`.
  */
 export interface SitepingStore {
-  /** Create a feedback with its annotations. Idempotent on `clientId` — return existing record on duplicate, or throw `StoreDuplicateError`. Throws `StorePersistenceError` when the write cannot be persisted. */
+  /** Create a feedback with its annotations. Throws `StoreDuplicateError` when a feedback with the same `clientId` exists, `StorePersistenceError` when the write cannot be persisted. */
   createFeedback(data: FeedbackCreateInput): Promise<FeedbackRecord>;
   /** Paginated query with optional filters. Returns empty array (not error) when no results. */
   getFeedbacks(query: FeedbackQuery): Promise<FeedbackPage>;
@@ -1084,14 +1126,11 @@ export interface SitepingStore {
   /** Bulk delete all feedbacks for a project. No-op (not error) if none exist. Throws `StorePersistenceError` when the write cannot be persisted. */
   deleteAllFeedbacks(projectName: string): Promise<void>;
   /**
-   * Optional — return `true` when the record with `id` belongs to
-   * `projectName`, `false` otherwise (including when it does not exist).
-   *
-   * HTTP handlers use this to reject cross-project PATCH/DELETE requests.
-   * Implement it whenever your store serves multiple projects; when absent,
-   * handlers skip the ownership check and rely on `id` alone.
+   * Return `true` when the record with `id` belongs to `projectName`, `false`
+   * otherwise (including when it does not exist). HTTP handlers use it to
+   * reject cross-project PATCH/DELETE requests, which address records by id.
    */
-  verifyProjectOwnership?(id: string, projectName: string): Promise<boolean>;
+  verifyProjectOwnership(id: string, projectName: string): Promise<boolean>;
   /**
    * Optional — `createFeedback` that reports whether this call inserted the
    * record (`created: true`) or found an existing one with the same
@@ -1103,11 +1142,10 @@ export interface SitepingStore {
    * processes need an atomic backend primitive (unique constraint,
    * transaction, compare-and-set).
    *
-   * HTTP handlers prefer it over `createFeedback` to fire creation side
-   * effects (webhooks) exactly once when concurrent requests race on the
-   * same `clientId`. Stores whose `createFeedback` throws
-   * `StoreDuplicateError` on a duplicate already give that signal and may
-   * leave it out.
+   * HTTP handlers prefer it over `createFeedback`: a replayed or racing
+   * submission resolves to the stored record in one atomic call, without a
+   * `StoreDuplicateError` to catch and a lookup to follow it. Without it,
+   * they fall back to `createFeedback` and recover its duplicate error.
    */
   createFeedbackIfAbsent?(data: FeedbackCreateInput): Promise<FeedbackCreateOutcome>;
   /**
@@ -1129,6 +1167,19 @@ export interface SitepingStore {
    * HTTP handlers serve empty threads and answer comment writes with 501.
    */
   addComment?(feedbackId: string, data: CommentCreateInput): Promise<CommentRecord>;
+  /**
+   * Optional, alongside `addComment` — `addComment` that reports whether this
+   * call inserted the comment (`created: true`) or found one with the same
+   * `clientId` (`created: false`). Same errors as `addComment`, and the dedup
+   * check and the insert must be atomic like `createFeedbackIfAbsent`'s: of N
+   * concurrent calls with the same `clientId`, exactly one may report
+   * `created: true`, and all must return that same comment.
+   *
+   * HTTP handlers need it to fire the `comment.created` webhook and the
+   * `onCommentCreated` hook exactly once per reply — a retried post returns
+   * the stored comment, which `addComment` alone cannot tell from a new one.
+   */
+  addCommentIfAbsent?(feedbackId: string, data: CommentCreateInput): Promise<CommentCreateOutcome>;
   /**
    * Optional — delete comment `commentId` from the thread of `feedbackId`.
    * Scoped to that thread, which the caller was authorized for: throws
@@ -1348,6 +1399,17 @@ export interface FeedbackPermissions {
   canDeleteComment: boolean;
 }
 
+/**
+ * What a requester may do with one comment of a thread, as the server's
+ * access policy decides — finer than the feedback's `canDeleteComment`, which
+ * covers the whole thread: a policy that lets authors delete their own
+ * replies only grants it comment by comment.
+ */
+export interface CommentPermissions {
+  /** Delete it. */
+  canDelete: boolean;
+}
+
 /** What a requester may do with a whole project, sent with each list. */
 export interface FeedbackListPermissions {
   /** Delete every feedback of the project at once. */
@@ -1365,7 +1427,26 @@ export type AnnotationResponse = Prettify<Serialized<AnnotationRecord>>;
  * serialized and `clientId` omitted, like on `FeedbackResponse`. Its
  * `authorEmail` is redacted on the same terms as the feedback's.
  */
-export type CommentResponse = Prettify<Serialized<Omit<CommentRecord, "clientId">>>;
+export type CommentResponse = Prettify<
+  Serialized<Omit<CommentRecord, "clientId">> & {
+    /**
+     * What the requester may do with this comment — always sent by
+     * `@siteping/server`. Absent from servers that predate it, and in store
+     * mode: the feedback's `canDeleteComment` decides then.
+     */
+    permissions?: CommentPermissions | undefined;
+  }
+>;
+
+/**
+ * Version of the HTTP protocol `@siteping/server` speaks, sent as `protocol`
+ * on every list response. It rises with each addition a client may rely on —
+ * a route, a field, a status — so a client checks `protocol >= N` before
+ * using what protocol N added, instead of probing for fields. A server that
+ * predates it sends none: read that as 0. The OpenAPI document shipped as
+ * `@siteping/server/openapi.json` describes this version.
+ */
+export const SITEPING_PROTOCOL_VERSION = 1;
 
 /** What the store behind an endpoint supports — advertised on every list response. */
 export interface SitepingCapabilities {
@@ -1383,6 +1464,8 @@ export interface SitepingCapabilities {
 export interface FeedbackResponseList {
   feedbacks: FeedbackResponse[];
   total: number;
+  /** The server's {@link SITEPING_PROTOCOL_VERSION} — absent from servers that predate it: read that as 0. */
+  protocol?: number | undefined;
   /** Always sent by `@siteping/server` — absent from servers that predate it. */
   capabilities?: SitepingCapabilities | undefined;
   /** Always sent by `@siteping/server` — absent from servers that predate it. */

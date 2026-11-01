@@ -10,17 +10,28 @@
 //      BUILTIN_LOCALES;
 //   3. a non-private packages/* package is missing from the release-please
 //      config/manifest, or a manifest package is missing its release.yml
-//      wiring (output + publish job);
+//      wiring (output + publish job) or its line in the root CHANGELOG.md
+//      index;
 //   4. a published package's build script forgot the fix-dts chain its
 //      declarations need (cli is exempt: it ships no .d.ts);
 //   5. the root esbuild override drifted from the widget's esbuild spec;
 //   6. Node tooling (configs, scripts/, e2e/) takes a filesystem path from a
 //      file URL's .pathname instead of fileURLToPath();
 //   7. adapter-prisma's source imports @prisma/client, which it declares as
-//      an optional peer dependency;
+//      an optional peer dependency, or integration-issues' source imports
+//      @siteping/server, which it does not declare at all;
 //   8. a published package depends on another through `workspace:` without
 //      the release.yml step that pins the range before `npm publish`, or
-//      its publish job does not wait for the dependency's.
+//      its publish job does not wait for the dependency's;
+//   9. a workspace's `engines.node` differs from core's, or something that
+//      follows that floor did not move with it (adapter scaffold, oldest CI
+//      node-compat lane, publish jobs' Node, demo runtime image, docs and
+//      README "Node N+" claims);
+//  10. a published package's peer range admits versions without an upper
+//      bound (`>=18`, `*`) — majors CI never ran.
+//  11. a widget `keydown` listener that handles Tab is added with a plain
+//      addEventListener instead of addSurfaceKeydownListener, so a host
+//      modal's capture-phase focus trap would take the Tab first.
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -136,6 +147,7 @@ for (const file of [
 const manifest = JSON.parse(read(".release-please-manifest.json"));
 const releaseConfig = JSON.parse(read("release-please-config.json"));
 const releaseYml = read(".github/workflows/release.yml");
+const changelogIndex = read("CHANGELOG.md");
 
 for (const dir of readdirSync(join(root, "packages"))) {
   const pkgJsonPath = join(root, "packages", dir, "package.json");
@@ -160,6 +172,9 @@ for (const pkgPath of Object.keys(manifest)) {
   }
   if (!releaseYml.includes(`${pkgPath}/dist/`)) {
     errors.push(`${pkgPath}/dist/ is missing from the release.yml build artifact paths`);
+  }
+  if (!changelogIndex.includes(`(./${pkgPath}/CHANGELOG.md)`)) {
+    errors.push(`${pkgPath} is missing from the root CHANGELOG.md index`);
   }
 }
 
@@ -236,22 +251,28 @@ for (const dir of toolingDirs) {
   }
 }
 
-// --- 7. @prisma/client stays an optional peer --------------------------------
+// --- 7. Packages typed structurally never import what they mirror ----------
 
-// Stores other than Prisma mount through adapter-prisma too, so its
-// @prisma/client peer is optional (#306): npm, pnpm and Bun then leave it
-// out. That is only safe while the source never imports it — not even as a
-// type, which would leave an import the consumer may not resolve in the
-// published declarations. The client shape is structural on purpose
-// (SitepingPrismaClient).
-const PRISMA_CLIENT_IMPORT = /(?:\bfrom|\bimport|\brequire)\s*\(?\s*["']@prisma\/client(?:\/[^"']*)?["']/;
-const prismaSourceFiles = (dir) =>
+// A source import — even a type, which would leave an import in the
+// published declarations — of a package the consumer may not have:
+// - Stores other than Prisma mount through adapter-prisma too, so its
+//   @prisma/client peer is optional (#306): npm, pnpm and Bun then leave it
+//   out. The client shape is structural on purpose (SitepingPrismaClient).
+// - integration-issues declares no @siteping/server dependency, so one 0.x
+//   release installs next to any server: the hook types are restated, and a
+//   type test keeps them identical to the server's.
+const STRUCTURAL_ONLY = [
+  ["packages/adapter-prisma/src", "@prisma/client", "adapter-prisma declares it as an optional peer (#306)"],
+  ["packages/integration-issues/src", "@siteping/server", "integration-issues mirrors the server's hook types"],
+];
+const sourceFiles = (dir) =>
   readdirSync(join(root, dir), { withFileTypes: true }).flatMap((e) =>
-    e.isDirectory() ? prismaSourceFiles(`${dir}/${e.name}`) : /\.[cm]?tsx?$/.test(e.name) ? [`${dir}/${e.name}`] : [],
+    e.isDirectory() ? sourceFiles(`${dir}/${e.name}`) : /\.[cm]?tsx?$/.test(e.name) ? [`${dir}/${e.name}`] : [],
   );
-for (const file of prismaSourceFiles("packages/adapter-prisma/src")) {
-  if (PRISMA_CLIENT_IMPORT.test(read(file))) {
-    errors.push(`${file} imports @prisma/client — adapter-prisma declares it as an optional peer (#306)`);
+for (const [dir, name, why] of STRUCTURAL_ONLY) {
+  const importOf = new RegExp(`(?:\\bfrom|\\bimport|\\brequire)\\s*\\(?\\s*["']${name}(?:/[^"']*)?["']`);
+  for (const file of sourceFiles(dir)) {
+    if (importOf.test(read(file))) errors.push(`${file} imports ${name} — ${why}`);
   }
 }
 
@@ -286,6 +307,130 @@ for (const pkgPath of Object.keys(manifest)) {
       const dependencyJob = pkgPathByName.has(name) && publishJobOf(pkgPathByName.get(name));
       if (dependencyJob && !needsOf(publishJobOf(pkgPath)).includes(dependencyJob.name)) {
         errors.push(`${pkgPath}'s publish job does not wait for ${dependencyJob.name} (${name}) in release.yml`);
+      }
+    }
+  }
+}
+
+// --- 9. One Node.js floor ----------------------------------------------------
+
+// The packages' `engines.node` is the oldest Node SitePing supports. Raising
+// it (Node 20 → 22, #421) touches places package.json can't see: the scaffold
+// new adapters copy, the oldest lane CI tests, the Node the publish jobs run,
+// the demo's runtime image, and every "Node N+" a reader trusts.
+const nodeFloor = JSON.parse(read("packages/core/package.json")).engines?.node;
+const floorMajor = /^>=(\d+)$/.exec(nodeFloor ?? "")?.[1];
+if (!floorMajor) {
+  errors.push(`packages/core engines.node must read ">=<major>" (found ${JSON.stringify(nodeFloor)})`);
+} else {
+  for (const dir of workspaceDirs) {
+    if (!existsSync(join(root, dir, "package.json"))) continue;
+    const floor = JSON.parse(read(`${dir}/package.json`)).engines?.node;
+    if (floor !== nodeFloor) {
+      errors.push(`${dir} declares engines.node ${JSON.stringify(floor)} but packages/core declares "${nodeFloor}"`);
+    }
+  }
+  if (!read("scripts/new-adapter.mjs").includes(`engines: { node: "${nodeFloor}" }`)) {
+    errors.push(`scripts/new-adapter.mjs does not scaffold engines.node "${nodeFloor}"`);
+  }
+  const oldestLane = /^ +node-version: \[(\d+)/m.exec(read(".github/workflows/ci.yml"))?.[1];
+  if (oldestLane !== floorMajor) {
+    errors.push(`ci.yml's node-compat matrix starts at Node ${oldestLane} but the floor is Node ${floorMajor}`);
+  }
+  for (const m of releaseYml.matchAll(/node-version: (\S+)/g)) {
+    if (m[1] !== floorMajor) errors.push(`release.yml publishes on Node ${m[1]} but the floor is Node ${floorMajor}`);
+  }
+  const runnerImage = /^FROM node:(\d+)-/m.exec(read("apps/demo/Dockerfile"))?.[1];
+  if (runnerImage !== floorMajor) {
+    errors.push(`apps/demo/Dockerfile runs on node:${runnerImage} but the floor is Node ${floorMajor}`);
+  }
+  // "Node 22+", "Node ≥ 22", "Node 22 or newer", "Node 22 ou plus récent".
+  const NODE_CLAIM = /\bNode(?:\.js)? (?:≥ ?(\d+)|(\d+)(?:\+| or newer| ou plus récent))/g;
+  const claimFiles = [
+    "README.md",
+    ...readdirSync(join(root, "packages")).map((d) => `packages/${d}/README.md`),
+    ...walk("apps/demo/content/docs", ".mdx"),
+  ].filter((file) => existsSync(join(root, file)));
+  for (const file of claimFiles) {
+    const content = read(file);
+    for (const m of content.matchAll(NODE_CLAIM)) {
+      const major = m[1] ?? m[2];
+      if (major !== floorMajor) {
+        const line = content.slice(0, m.index).split("\n").length;
+        errors.push(`${file}:${line} says "${m[0]}" but the floor is Node ${floorMajor}`);
+      }
+    }
+  }
+}
+
+// --- 10. Peer ranges stop at the last major CI exercises ----------------------
+
+// A peer range is a promise that every version it admits works. Without an
+// upper bound (`>=18`, `*`) it covers majors nobody has run, and widening one
+// later is a minor while narrowing it is a major (the versioning policy):
+// each `||` alternative must be capped — `^x`, `~x`, `x.y.z`, `x.x`, or a
+// range with `<`. Raise the cap when CI runs the next major.
+const UNBOUNDED_ALTERNATIVE = /^(?:\*|x|latest|>=?\s*[\d.x*]+(?:-[\w.]+)?)$/i;
+for (const pkgPath of Object.keys(manifest)) {
+  const pkg = JSON.parse(read(`${pkgPath}/package.json`));
+  for (const [name, spec] of Object.entries(pkg.peerDependencies ?? {})) {
+    if (spec.startsWith("workspace:")) continue;
+    const unbounded = spec
+      .split("||")
+      .map((alternative) => alternative.trim())
+      .filter((alt) => UNBOUNDED_ALTERNATIVE.test(alt));
+    if (unbounded.length > 0) {
+      errors.push(`${pkgPath} peerDependencies "${name}": "${spec}" has no upper bound (${unbounded.join(", ")})`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+// --- 11. Widget Tab traps go through addSurfaceKeydownListener -------------
+// A `keydown` listener that handles Tab must be added with
+// `addSurfaceKeydownListener` (host-isolation.ts): the guard then runs it
+// ahead of a host modal's capture-phase focus trap. A plain
+// `addEventListener("keydown", …)` runs after that trap, which moves the
+// Tab's focus back into the host dialog (#387).
+{
+  /** The text from `open` (an opening bracket's index) to its matching closing bracket. */
+  const balanced = (src, open) => {
+    const pairs = { "(": ")", "{": "}" };
+    const closer = pairs[src[open]];
+    let depth = 0;
+    for (let i = open; i < src.length; i++) {
+      if (src[i] === src[open]) depth++;
+      else if (src[i] === closer && --depth === 0) return src.slice(open, i + 1);
+    }
+    return src.slice(open);
+  };
+  /** `text` matched literally inside a RegExp. */
+  const literal = (text) => text.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+  /** The body of a listener referenced by name: its assignment's function, one call deep. */
+  const namedBody = (src, name) => {
+    const at = src.search(new RegExp(`(?:const |let )?${literal(name)}\\s*=\\s*`));
+    if (at < 0) return "";
+    const brace = src.indexOf("{", at);
+    const lineEnd = src.indexOf(";", at);
+    if (brace >= 0 && (lineEnd < 0 || brace < lineEnd)) return balanced(src, brace);
+    // An arrow that only calls a method (`(e) => this.handleKeydown(e)`): read that method.
+    const method = /this\.([\w$]+)\(/.exec(src.slice(at, lineEnd))?.[1];
+    const definition = method ? src.search(new RegExp(`\\n\\s*(?:private |public |protected )?${method}\\(`)) : -1;
+    return definition < 0 ? "" : balanced(src, src.indexOf("{", definition));
+  };
+  for (const file of walk("packages/widget/src", ".ts")) {
+    if (file.endsWith("/host-isolation.ts")) continue;
+    const src = read(file);
+    for (const m of src.matchAll(/\.addEventListener\(\s*["']keydown["']\s*,\s*/g)) {
+      const start = m.index + m[0].length;
+      const name = /^(?:this\.)?[\w$]+(?=\s*(?:as\b|[,)]))/.exec(src.slice(start))?.[0];
+      const body = name ? namedBody(src, name) : balanced(src, src.indexOf("(", m.index));
+      if (/["']Tab["']/.test(body)) {
+        const line = src.slice(0, m.index).split("\n").length;
+        errors.push(
+          `${file}:${line} adds a keydown listener that handles Tab with addEventListener — use addSurfaceKeydownListener (host-isolation.ts), or a host modal's capture-phase focus trap takes the Tab first`,
+        );
       }
     }
   }

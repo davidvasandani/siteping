@@ -146,6 +146,42 @@ export function buildStyles(colors: ThemeColors): string {
       line-height: 1;
     }
 
+    /* ---- Submission outcome toast ---- */
+
+    .sp-toast {
+      position: fixed;
+      left: 50%;
+      bottom: 92px;
+      transform: translateX(-50%);
+      max-width: min(360px, calc(100vw - 32px));
+      padding: 10px 14px;
+      border-radius: var(--sp-radius-lg);
+      background: var(--sp-text);
+      color: var(--sp-bg);
+      font: 500 13px/1.4 var(--sp-font);
+      box-shadow: var(--sp-shadow-lg);
+      cursor: pointer;
+      animation: sp-toast-in 0.2s ease-out;
+    }
+
+    .sp-toast[hidden] {
+      display: none;
+    }
+
+    .sp-toast--error {
+      border-left: 4px solid var(--sp-type-bug);
+    }
+
+    @keyframes sp-toast-in {
+      from { opacity: 0; transform: translate(-50%, 8px); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .sp-toast {
+        animation: none;
+      }
+    }
+
     /* ============================
        Radial Menu
        ============================ */
@@ -192,7 +228,7 @@ export function buildStyles(colors: ThemeColors): string {
     .sp-radial-item:focus-visible {
       background: rgba(255, 255, 255, 0.95);
       border-color: var(--sp-accent);
-      color: var(--sp-accent);
+      color: var(--sp-accent-text);
       box-shadow:
         var(--sp-shadow-md),
         0 0 0 3px var(--sp-accent-light);
@@ -365,7 +401,7 @@ export function buildStyles(colors: ThemeColors): string {
 
     .sp-search:focus ~ .sp-search-icon,
     .sp-search-wrap:focus-within .sp-search-icon {
-      color: var(--sp-accent);
+      color: var(--sp-accent-text);
     }
 
     /* ============================
@@ -769,6 +805,12 @@ export function buildStyles(colors: ThemeColors): string {
       margin-left: auto;
     }
 
+    .sp-lost {
+      font-size: 11px;
+      color: var(--sp-text-tertiary);
+      margin-top: 4px;
+    }
+
     .sp-card-message {
       font-size: 13px;
       line-height: 1.5;
@@ -786,7 +828,7 @@ export function buildStyles(colors: ThemeColors): string {
     .sp-card-expand {
       font-size: 12px;
       font-weight: 500;
-      color: var(--sp-accent);
+      color: var(--sp-accent-text);
       cursor: pointer;
       background: none;
       border: none;
@@ -830,15 +872,17 @@ export function buildStyles(colors: ThemeColors): string {
       height: 14px;
     }
 
+    /* Hovered text in the theme's own green and red: green-500 and red-500
+       read 2.2:1 and 3.8:1 on this tint in the light theme. */
     .sp-btn-resolve:hover {
-      border-color: #22c55e;
-      color: #22c55e;
+      border-color: var(--sp-status-open);
+      color: var(--sp-status-open);
       background: rgba(34, 197, 94, 0.06);
     }
 
     .sp-btn-delete:hover {
-      border-color: #ef4444;
-      color: #ef4444;
+      border-color: var(--sp-type-bug);
+      color: var(--sp-type-bug);
       background: rgba(239, 68, 68, 0.06);
     }
 
@@ -1132,7 +1176,7 @@ export function buildStyles(colors: ThemeColors): string {
 
     .sp-btn-ghost:hover {
       border-color: var(--sp-accent);
-      color: var(--sp-accent);
+      color: var(--sp-accent-text);
       background: var(--sp-accent-light);
     }
 

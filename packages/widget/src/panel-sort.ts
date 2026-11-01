@@ -13,7 +13,6 @@
 import { type FeedbackResponse, type FeedbackType, isClosedStatus } from "@siteping/core";
 import { el, onClickOutside, parseSvg, setText } from "./dom-utils.js";
 import type { TFunction } from "./i18n/index.js";
-import type { ThemeColors } from "./styles/theme.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -137,12 +136,12 @@ export function groupFeedbacksByPage(feedbacks: FeedbackResponse[]): Map<string,
  * Create a collapsible page group header element.
  * Click toggles the associated `.sp-group-content` sibling.
  */
-export function createPageGroupHeader(pagePath: string, count: number, colors: ThemeColors): HTMLElement {
+export function createPageGroupHeader(pagePath: string, count: number): HTMLElement {
   const header = el("div", { class: "sp-group-header" });
   header.setAttribute("role", "button");
   header.setAttribute("tabindex", "0");
   header.setAttribute("aria-expanded", "true");
-  header.style.borderBottomColor = colors.border;
+  header.style.borderBottomColor = "var(--sp-border)";
 
   // Chevron
   const chevronWrap = el("span", { class: "sp-group-header-chevron" });
@@ -165,8 +164,8 @@ export function createPageGroupHeader(pagePath: string, count: number, colors: T
 
   // Count badge
   const countEl = el("span", { class: "sp-group-header-count" });
-  countEl.style.background = colors.accentLight;
-  countEl.style.color = colors.accent;
+  countEl.style.background = "var(--sp-accent-light)";
+  countEl.style.color = "var(--sp-accent)";
   setText(countEl, String(count));
   header.appendChild(countEl);
 
@@ -207,12 +206,10 @@ export class PanelSortControls {
   private readonly sortDropdown: HTMLElement;
   private groupToggle: HTMLButtonElement;
   private readonly t: TFunction;
-  private readonly colors: ThemeColors;
   private readonly onChange: () => void;
   private removeOutsideClick: (() => void) | null = null;
 
-  constructor(colors: ThemeColors, onChange: () => void, t: TFunction) {
-    this.colors = colors;
+  constructor(onChange: () => void, t: TFunction) {
     this.onChange = onChange;
     this.t = t;
 
@@ -223,14 +220,12 @@ export class PanelSortControls {
     this.sortBtn.className = "sp-sort-btn";
     this.sortBtn.setAttribute("aria-haspopup", "listbox");
     this.sortBtn.setAttribute("aria-expanded", "false");
-    this.sortBtn.setAttribute("aria-label", this.t("sort.label"));
 
     const sortIcon = parseSvg(ICON_SORT);
     this.sortBtn.appendChild(sortIcon);
 
-    const sortLabel = el("span", { class: "sp-sort-btn-label" });
-    setText(sortLabel, this.t("sort.newest"));
-    this.sortBtn.appendChild(sortLabel);
+    this.sortBtn.appendChild(el("span", { class: "sp-sort-btn-label" }));
+    this.updateSortLabel();
 
     this.sortBtn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -309,8 +304,8 @@ export class PanelSortControls {
       item.setAttribute("aria-selected", String(opt.mode === this._sortMode));
 
       if (opt.mode === this._sortMode) {
-        item.style.background = this.colors.accentLight;
-        item.style.color = this.colors.accent;
+        item.style.background = "var(--sp-accent-light)";
+        item.style.color = "var(--sp-accent-text)";
       }
 
       setText(item, opt.label);
@@ -352,8 +347,11 @@ export class PanelSortControls {
       "by-type": this.t("sort.byType"),
       "open-first": this.t("sort.openFirst"),
     };
+    const text = labelMap[this._sortMode];
     const label = this.sortBtn.querySelector(".sp-sort-btn-label");
-    if (label) setText(label as HTMLElement, labelMap[this._sortMode]);
+    if (label) setText(label as HTMLElement, text);
+    // The name holds the visible mode, which speech users read off the button (WCAG 2.5.3).
+    this.sortBtn.setAttribute("aria-label", `${this.t("sort.label")}: ${text}`);
   }
 
   destroy(): void {
@@ -415,13 +413,13 @@ export const SORT_CSS = /* css */ `
 
   .sp-sort-btn:hover {
     border-color: var(--sp-accent);
-    color: var(--sp-accent);
+    color: var(--sp-accent-text);
     background: var(--sp-accent-light);
   }
 
   .sp-sort-btn[aria-expanded="true"] {
     border-color: var(--sp-accent);
-    color: var(--sp-accent);
+    color: var(--sp-accent-text);
     background: var(--sp-accent-light);
   }
 
@@ -487,7 +485,7 @@ export const SORT_CSS = /* css */ `
 
   .sp-sort-option--active:hover {
     background: var(--sp-accent-light);
-    color: var(--sp-accent);
+    color: var(--sp-accent-text);
   }
 
   /* ============================
@@ -522,7 +520,7 @@ export const SORT_CSS = /* css */ `
   .sp-group-toggle:hover,
   .sp-mine-toggle:hover {
     border-color: var(--sp-accent);
-    color: var(--sp-accent);
+    color: var(--sp-accent-text);
     background: var(--sp-accent-light);
   }
 

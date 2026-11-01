@@ -1,6 +1,6 @@
 {
   "name": "@siteping/adapter-kit",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Everything needed to build and conformance-test a custom Siteping store adapter",
   "type": "module",
   "sideEffects": false,
@@ -61,10 +61,10 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "peerDependencies": {
-    "vitest": ">=3"
+    "vitest": ">=3 <6"
   },
   "peerDependenciesMeta": {
     "vitest": {

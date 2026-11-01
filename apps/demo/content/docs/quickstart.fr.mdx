@@ -3,7 +3,7 @@ title: Démarrage rapide
 description: Du npm install au premier feedback épinglé en trois minutes environ.
 ---
 
-Deux chemins : l'**installation complète** (Next.js + Prisma — la forme de production) ou la version **sans serveur** (60 secondes, tout dans le navigateur).
+Deux chemins : l'**installation complète** (Next.js + Prisma — la forme de production) ou la version **sans serveur** (60 secondes, tout dans le navigateur). Sur SvelteKit, Nuxt, Astro, une SPA Vite ou une page sans bundler, suivez plutôt [Frameworks](/fr/docs/frameworks) — la page couvre aussi Drizzle sur PostgreSQL et Turso.
 
 ## Installation complète — Next.js + Prisma
 
@@ -53,6 +53,8 @@ export function Feedback() {
 Lancez votre serveur de dev et regardez en bas à droite : le bouton SitePing est là. Dessinez un rectangle sur n'importe quoi, tapez un commentaire, envoyez.
 
 Par défaut le widget apparaît en développement mais **jamais dans un build de production** — c'est voulu : les clients relisent sur des URLs de dev/staging. Pour un staging construit en mode production, passez `forceShow: true`.
+
+**Avant la mise en ligne, définissez `SITEPING_API_KEY`** : la route générée refuse de démarrer en production sans elle. Avec une clé, seuls les envois du widget restent publics. Les changements de statut et les suppressions demandent la clé, la liste aussi : un relecteur sans clé peut envoyer un feedback mais ne voit aucun pin, et la console du navigateur dit pourquoi. Pour que les relecteurs voient les pins et les fils, décommentez `publicEndpoints: ["GET", "POST", "OPTIONS"]` dans la route. Quiconque connaît l'URL et le nom du projet peut alors lire les feedbacks, e-mails des auteurs masqués — voir [le modèle de sécurité](/fr/docs/server#le-modèle-de-sécurité-franchement).
 
 ### 4. Trier ce qui arrive
 

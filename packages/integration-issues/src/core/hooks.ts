@@ -1,5 +1,4 @@
 import { type FeedbackRecord, isClosedStatus, parseHttpUrl } from "@siteping/core";
-import type { SitepingDeletionTarget } from "@siteping/server";
 import {
   DEFAULT_DEEP_LINK_PARAM,
   DELETED_FEEDBACK_COMMENT_TEMPLATE,
@@ -25,13 +24,13 @@ export interface IssueTrackerHooksOptions {
   /** Where issues live — `createGitHubTracker`, `createGitLabTracker` or your own. */
   tracker: IssueTracker;
   /** Extra labels on trackers that support them (the `siteping` label is always added). */
-  labels?: readonly string[];
+  labels?: readonly string[] | undefined;
   /**
    * Redact secrets from free text before it leaves your server. The
    * built-in format applies it; a custom `formatIssue` gets it in its
    * `options`, and the feedback unredacted. Defaults to no redaction.
    */
-  redact?: (text: string) => string;
+  redact?: ((text: string) => string) | undefined;
   /**
    * Origin of the site the widget runs on, e.g. `https://acme.com`. Page
    * URLs resolve against it (the widget records `location.pathname` by
@@ -40,15 +39,15 @@ export interface IssueTrackerHooksOptions {
    */
   siteUrl?: string | undefined;
   /** Query parameter of the widget's deep link (`SitepingConfig.deepLink`), or `false` to omit it. */
-  deepLinkParam?: string | false;
+  deepLinkParam?: string | false | undefined;
   /** Include reviewer emails in issues. Defaults to `false` — issues are often public. */
-  includeAuthorEmail?: boolean;
+  includeAuthorEmail?: boolean | undefined;
   /**
    * Replace the default Markdown. `options` are what the exported
    * `formatIssue` takes: call it to extend the default issue. The linking
    * marker is prepended to whatever you return, as its first line.
    */
-  formatIssue?: (feedback: FeedbackRecord, options: IssueFormatOptions) => IssueContent;
+  formatIssue?: ((feedback: FeedbackRecord, options: IssueFormatOptions) => IssueContent) | undefined;
   /**
    * Name of this deployment when several share one repository (staging and
    * production, say). It goes into each issue's marker, and the hooks only
@@ -62,25 +61,34 @@ export interface IssueTrackerHooksOptions {
    * waits for it, and so do the feedback's later status changes and deletes
    * and its project's next delete: it must not wait for one in turn.
    */
-  onIssueCreated?: (feedback: FeedbackRecord, issue: IssueReference) => void | Promise<void>;
+  onIssueCreated?: ((feedback: FeedbackRecord, issue: IssueReference) => void | Promise<void>) | undefined;
   /** Close / reopen the issue when the feedback status changes. Defaults to `true`. */
-  syncStatus?: boolean;
+  syncStatus?: boolean | undefined;
   /**
    * Comment left on issues whose feedback is deleted. A hidden marker goes
    * above it, and a retried delete looks for that: the text may vary.
    */
-  deletedCommentText?: (feedbackId: string) => string;
+  deletedCommentText?: ((feedbackId: string) => string) | undefined;
 }
 
 /**
- * The hooks `createIssueTrackerHooks` returns. They never read the request
+ * What a delete removes: one feedback, or every feedback of a project —
+ * `@siteping/server`'s `SitepingDeletionTarget`, restated so this package
+ * depends on no server version: one 0.x release installs next to any
+ * server. A type test keeps the two identical.
+ */
+type DeletionTarget = { kind: "single"; id: string; projectName: string } | { kind: "project"; projectName: string };
+
+/**
+ * The hooks `createIssueTrackerHooks` returns, typed structurally against
+ * `@siteping/server`'s `SitepingLifecycleHooks`. They never read the request
  * context: they fit either access policy without widening the principal
  * the handler infers, and a hook of your own can call the one it replaces.
  */
 export interface IssueTrackerHooks {
   onCreated(feedback: FeedbackRecord): Promise<void>;
   onUpdated(feedback: FeedbackRecord): Promise<void>;
-  onDeleting(target: SitepingDeletionTarget): Promise<void>;
+  onDeleting(target: DeletionTarget): Promise<void>;
 }
 
 const noRedaction = (text: string): string => text;

@@ -47,7 +47,7 @@ export const EXPORT_CSS = /* css */ `
 
   .sp-export-btn:hover {
     border-color: var(--sp-accent);
-    color: var(--sp-accent);
+    color: var(--sp-accent-text);
     background: var(--sp-accent-light);
   }
 
@@ -103,7 +103,7 @@ export const EXPORT_CSS = /* css */ `
   .sp-export-option:hover,
   .sp-export-option:focus-visible {
     background: var(--sp-accent-light);
-    color: var(--sp-accent);
+    color: var(--sp-accent-text);
   }
 
   .sp-export-option-icon {
@@ -331,7 +331,11 @@ export class ExportButton {
     const safeName = projectName.replace(/[^a-zA-Z0-9_-]/g, "_");
 
     if (format === "csv") {
-      const content = feedbacksToCsv(feedbacks);
+      // A leading byte-order mark is how Excel tells a UTF-8 file from its
+      // legacy code page (Windows-1252 in Western Europe): without it, every
+      // accented character opens garbled. The MIME charset isn't stored in
+      // the downloaded file.
+      const content = `\uFEFF${feedbacksToCsv(feedbacks)}`;
       downloadFile(content, `feedbacks-${safeName}-${date}.csv`, "text/csv;charset=utf-8");
     } else {
       const content = feedbacksToJson(feedbacks);
