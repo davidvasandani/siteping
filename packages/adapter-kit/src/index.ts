@@ -13,7 +13,8 @@
  * 2. **Query backends** (SQL, ORMs): implement {@link SitepingStore}
  *    directly; {@link buildFeedbackRecord} / {@link buildAnnotationRecord} /
  *    {@link buildCommentRecord} handle input→record construction, and the
- *    JSDoc on `SitepingStore` documents the exact error contract.
+ *    JSDoc on `SitepingStore` documents the exact error contract — a
+ *    repeated `clientId` makes `createFeedback` throw `StoreDuplicateError`.
  *
  * Either way, verify with the conformance suite from
  * `@siteping/adapter-kit/testing`:
@@ -41,6 +42,7 @@ export type {
   CollectionStoreBackend,
   CommentAuthorRole,
   CommentCreateInput,
+  CommentCreateOutcome,
   CommentRecord,
   CommentResponse,
   ConsoleDiagnosticEntry,
@@ -48,8 +50,10 @@ export type {
   DiagnosticsSnapshot,
   FeedbackCreateInput,
   FeedbackCreateOutcome,
+  FeedbackListPermissions,
   FeedbackPage,
   FeedbackPayload,
+  FeedbackPermissions,
   FeedbackQuery,
   FeedbackRecord,
   FeedbackResponse,
@@ -65,10 +69,12 @@ export type {
   ScreenshotRegion,
   ScreenshotStorage,
   Serialized,
+  SitepingCapabilities,
   SitepingStore,
 } from "@siteping/core";
 // Status/type constants + helpers
 // Store errors — throw these from adapter implementations
+// Text normalization — for SQL backends that refuse NUL or an unpaired surrogate
 export {
   applyFeedbackFilters,
   buildAnnotationRecord,
@@ -99,4 +105,6 @@ export {
   StorePersistenceError,
   StoreValueTooLongError,
   toFeedbackUpdate,
+  toStorableText,
+  toStorableValue,
 } from "@siteping/core";

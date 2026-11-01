@@ -1,5 +1,5 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.5.14/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.6.2/schema.json",
   "vcs": {
     "enabled": true,
     "clientKind": "git",
@@ -43,6 +43,16 @@
       "enabled": true
     }
   },
+  "markdown": {
+    "formatter": {
+      "enabled": false
+    }
+  },
+  "yaml": {
+    "formatter": {
+      "enabled": false
+    }
+  },
   "javascript": {
     "formatter": {
       "quoteStyle": "double",
@@ -51,7 +61,15 @@
     }
   },
   "files": {
-    "includes": ["**", "!**/dist/", "!**/node_modules/", "!**/bun.lock", "!**/e2e/server.mjs"]
+    "includes": [
+      "**",
+      "!**/dist/",
+      "!**/node_modules/",
+      "!**/bun.lock",
+      "!**/e2e/server.mjs",
+      "!packages/server/openapi.json",
+      "!examples"
+    ]
   },
   "overrides": [
     {

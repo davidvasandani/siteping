@@ -1,10 +1,10 @@
 import {
   type CommentCreateInput,
+  type CommentCreateOutcome,
   type CommentRecord,
   clampPagination,
   type FeedbackCreateInput,
   type FeedbackPage,
-  type FeedbackPayload,
   type FeedbackQuery,
   type FeedbackRecord,
   type FeedbackStatus,
@@ -17,13 +17,19 @@ import {
   MAX_COMMENTS_PER_FEEDBACK,
   SCREENSHOT_DELETE_CONCURRENCY,
   type ScreenshotStorage,
+  SitepingConfigError,
+  type SitepingLogger,
   type SitepingStore,
+  type SitepingWarnLogger,
   StoreDuplicateError,
   StoreLimitError,
   StoreNotFoundError,
   StoreValueTooLongError,
   screenshotMimeType,
   settleWithConcurrencyLimit,
+  toStorableText,
+  toStorableValue,
+  warnSafely,
 } from "@siteping/core";
 import {
   createSitepingHandler as createServerHandler,
@@ -35,36 +41,44 @@ import {
 
 export type {
   CommentCreateInput,
+  CommentCreateOutcome,
   CommentPayload,
   FeedbackCreateInput,
+  FeedbackPayload,
   FeedbackRecord,
   ScreenshotStorage,
   SitepingStore,
+  SitepingWarnLogger,
 } from "@siteping/core";
 export {
   flattenAnnotation,
+  isStoreDuplicate,
+  isStoreLimit,
+  isStoreNotFound,
   isStorePersistence,
+  isStoreValueTooLong,
   StoreDuplicateError,
   StoreLimitError,
   StoreNotFoundError,
   StorePersistenceError,
   StoreValueTooLongError,
 } from "@siteping/core";
-export type { FeedbackDeleteInput, FeedbackPatchInput, GetQueryInput } from "@siteping/server";
-
-/**
- * @deprecated The create wire shape is core's `FeedbackPayload` — import
- * that instead. This alias is kept for one release cycle.
- */
-export type FeedbackCreateSchemaInput = FeedbackPayload;
-// The server's option types, so a strict linker (pnpm, Bun's isolated
+// The server's option and request types, so a strict linker (pnpm, Bun's isolated
 // installs) never needs @siteping/server as a direct dependency to type them.
 export type {
   DiscordWebhookPayload,
+  FeedbackDeleteInput,
+  FeedbackPatchInput,
+  GenericWebhookCommentPayload,
+  GenericWebhookDeletionPayload,
+  GenericWebhookEventMap,
   GenericWebhookPayload,
+  GetQueryInput,
   SitepingAccessControl,
   SitepingAction,
   SitepingAuthorizationContext,
+  SitepingConfigErrorCode,
+  SitepingCreatedComment,
   SitepingDeletionTarget,
   SitepingHandler,
   SitepingHandlerBaseOptions,
@@ -72,13 +86,16 @@ export type {
   SitepingLifecycleHooks,
   SitepingLogger,
   SitepingPrincipal,
+  SitepingProjectContext,
   SitepingRequestContext,
   SlackWebhookPayload,
   WebhookConfig,
+  WebhookDeliveryInfo,
+  WebhookEvent,
   WebhookPayloadMap,
   WebhookType,
 } from "@siteping/server";
-export { dispatchWebhook, dispatchWebhooks } from "@siteping/server";
+export { dispatchWebhook, dispatchWebhooks, isSitepingConfigError, WEBHOOK_EVENTS } from "@siteping/server";
 
 // ---------------------------------------------------------------------------
 // Minimal PrismaClient shape expected by this adapter
@@ -237,6 +254,12 @@ export interface PrismaStoreOptions {
    * persisted inline on `Feedback.screenshotUrl` with a one-time warn.
    */
   screenshotStorage?: ScreenshotStorage | undefined;
+  /**
+   * Where degraded-but-handled situations are reported — a failed screenshot
+   * upload or cleanup, screenshots stored inline. Defaults to `console`; a
+   * logger that throws or rejects never fails the store.
+   */
+  logger?: SitepingWarnLogger | undefined;
 }
 
 /** `where` filter shape passed to `findMany` / `count`. Each field maps to a typed Prisma filter. */
@@ -259,7 +282,8 @@ function toStoreError(error: unknown): unknown {
   if (error instanceof StoreNotFoundError || error instanceof StoreDuplicateError) return error;
   if (isStoreNotFound(error)) return new StoreNotFoundError(undefined, { cause: error });
   if (isStoreDuplicate(error)) return new StoreDuplicateError(undefined, { cause: error });
-  // P2000: longer than its column — a plain `String` is `VARCHAR(191)` on MySQL.
+  // P2000: longer than its column — on a MySQL schema `sync` has not widened
+  // yet, a plain `String` is still Prisma's `VARCHAR(191)`.
   if (hasOwn(error, "code") && error.code === "P2000") return new StoreValueTooLongError(undefined, { cause: error });
   return error;
 }
@@ -281,11 +305,17 @@ function isStoredScreenshotUrl(url: unknown): url is string {
  * widget's data URL is uploaded and only the returned URL is persisted, so
  * the database stays small. Without `screenshotStorage`, the data URL is
  * persisted inline (logged once on first use as a heads-up).
+ *
+ * Text a database may refuse — NUL, an unpaired surrogate — is replaced by
+ * U+FFFD in everything the store writes or looks up (`toStorableText`), as
+ * PostgreSQL rejects it: such a submission is stored instead of failing, and
+ * a lookup holding the same characters finds it.
  */
 export class PrismaStore implements SitepingStore {
   /** @internal */
   private prisma: SitepingPrismaClient;
   private readonly screenshotStorage: ScreenshotStorage | undefined;
+  private readonly logger: SitepingWarnLogger;
   /** Module-level flag would leak across PrismaStore instances in tests; use per-instance. */
   private inlineFallbackWarned = false;
   /** @internal */
@@ -301,16 +331,29 @@ export class PrismaStore implements SitepingStore {
    * field: a field would set it on every instance, hiding a subclass's method.
    */
   declare readonly addComment?: (feedbackId: string, data: CommentCreateInput) => Promise<CommentRecord>;
+  /**
+   * {@link addComment} reporting whether this call inserted the comment —
+   * defined under the same condition, unless a subclass overrides
+   * `addComment` alone. The `clientId` unique constraint arbitrates races: a
+   * concurrent insert that loses reports `created: false`.
+   */
+  declare readonly addCommentIfAbsent?: (feedbackId: string, data: CommentCreateInput) => Promise<CommentCreateOutcome>;
   /** Delete one comment from a feedback's thread — defined under the same condition as {@link addComment}. */
   declare readonly deleteComment?: (feedbackId: string, commentId: string) => Promise<void>;
 
   constructor(prisma: SitepingPrismaClient, options: PrismaStoreOptions = {}) {
     this.prisma = prisma;
     this.screenshotStorage = options.screenshotStorage;
+    this.logger = options.logger ?? console;
     const comments = prisma.sitepingComment;
     this.include = comments ? INCLUDE_ANNOTATIONS_AND_COMMENTS : INCLUDE_ANNOTATIONS;
     if (comments) {
-      this.addComment ??= (feedbackId, data) => this.insertComment(comments, feedbackId, data);
+      // A subclass that overrides `addComment` alone keeps it as the write
+      // path: an `addCommentIfAbsent` derived beside it would bypass it. One
+      // that overrides `addCommentIfAbsent` gets an `addComment` built on it.
+      if (!this.addComment) this.addCommentIfAbsent ??= (id, data) => this.insertComment(comments, id, data);
+      const addCommentIfAbsent = this.addCommentIfAbsent;
+      if (addCommentIfAbsent) this.addComment ??= async (id, data) => (await addCommentIfAbsent(id, data)).comment;
       this.deleteComment ??= (feedbackId, commentId) => this.removeComment(comments, feedbackId, commentId);
     }
     if (typeof options.caseInsensitiveSearch === "boolean") {
@@ -326,40 +369,49 @@ export class PrismaStore implements SitepingStore {
     }
   }
 
+  /**
+   * With a `screenshotStorage`, the row is inserted first and the screenshot
+   * attached once uploaded: the storage then receives the id the record is
+   * stored under (see `ScreenshotStorage.upload`) — the database draws it,
+   * so the `id` tie-break of `getFeedbacks` keeps following creation order —
+   * and a replay of a stored `clientId`, refused by the insert, uploads
+   * nothing. Without one, the data URL is stored inline in the same insert.
+   */
   async createFeedback(data: FeedbackCreateInput): Promise<FeedbackRecord> {
-    const screenshotUrl = await this.persistScreenshot(data.screenshotDataUrl, data.clientId);
-
+    const storable = toStorableValue(data);
+    const dataUrl = storable.screenshotDataUrl || null;
+    const storage = this.screenshotStorage;
+    let record: FeedbackRecord;
     try {
-      return await this.insertFeedback(data, screenshotUrl);
+      record = await this.insertFeedback(storable, storage ? null : this.inlineScreenshot(dataUrl));
     } catch (error) {
-      if (isStoreDuplicate(error)) await this.discardUnreferencedUpload(screenshotUrl, data.clientId);
       throw toStoreError(error);
     }
-  }
+    if (!storage || !dataUrl) return record;
 
-  /**
-   * Drop the screenshot uploaded by a replay of a stored clientId — unless the
-   * stored row references it. Uploads are keyed on clientId, so with a
-   * deterministic key (`feedback/${feedbackId}.jpg`) the replay wrote to the
-   * very object the existing row points at: deleting it would strip the
-   * surviving feedback of its screenshot. If the lookup itself fails the
-   * object is kept — an orphan beats data loss. Other insert failures never
-   * get here: with such a key, a retry on another instance may have rewritten
-   * the object and not yet inserted the row that will point at it.
-   */
-  private async discardUnreferencedUpload(url: string | null, clientId: string): Promise<void> {
-    if (!isStoredScreenshotUrl(url) || !this.screenshotStorage?.delete) return;
-    let existing: { screenshotUrl: string | null } | null;
+    const context = { clientId: storable.clientId, feedbackId: record.id };
+    const url = await this.uploadScreenshot(storage, dataUrl, context);
+    if (url === null) return record;
     try {
-      existing = (await this.prisma.sitepingFeedback.findUnique({
-        where: { clientId },
-        select: { screenshotUrl: true },
-      })) as { screenshotUrl: string | null } | null;
-    } catch {
-      return;
+      return (await this.prisma.sitepingFeedback.update({
+        where: { id: record.id },
+        data: { screenshotUrl: url },
+        include: this.include,
+      })) as FeedbackRecord;
+    } catch (error) {
+      // As after a failed upload, the feedback stays without its screenshot;
+      // the object was uploaded for this row alone, so nothing else loses it.
+      warnSafely(
+        this.logger,
+        "[siteping] PrismaStore: could not attach the uploaded screenshot — feedback saved without it",
+        {
+          ...context,
+          error,
+        },
+      );
+      await this.discardScreenshots([url]);
+      return record;
     }
-    if (existing?.screenshotUrl === url) return;
-    await this.discardScreenshots([url]);
   }
 
   private async insertFeedback(data: FeedbackCreateInput, screenshotUrl: string | null): Promise<FeedbackRecord> {
@@ -415,48 +467,43 @@ export class PrismaStore implements SitepingStore {
   }
 
   /**
-   * Resolve the value to persist on `Feedback.screenshotUrl`.
-   *
-   * - No data URL → null
-   * - Storage configured → upload, return remote URL. Upload failures
-   *   persist `null` (drop the screenshot) rather than silently inlining
-   *   the data URL — an inline fallback would bloat Postgres unnoticed
-   *   during a multi-minute storage outage. The feedback message itself is
-   *   preserved; only the screenshot is missing, and the warn surfaces it.
-   * - No storage → inline base64, with a one-time warn so prod operators
-   *   notice the footgun.
-   *
-   * Operators who prefer the legacy inline-on-failure behaviour can wrap
-   * their `ScreenshotStorage.upload` with their own catch + return the
-   * data URL — the adapter treats whatever the storage returns as final.
+   * The screenshot URL to attach to a stored feedback: the storage's, or
+   * `null` when the upload fails — the screenshot is dropped rather than
+   * silently inlined, since an inline fallback would bloat the database
+   * unnoticed during a multi-minute storage outage. The feedback itself is
+   * kept; the warning surfaces the missing screenshot. Operators who prefer
+   * inlining on failure can wrap their `upload` and return the data URL: the
+   * store treats whatever it returns as final.
    */
-  private async persistScreenshot(dataUrl: string | null | undefined, clientId: string): Promise<string | null> {
-    if (!dataUrl) return null;
-
-    if (this.screenshotStorage) {
-      try {
-        // Use clientId as the upload-time identifier — the feedback row's
-        // own id isn't created yet and clientId is unique + stable.
-        // NOTE: clientId is client-supplied; storage implementations that
-        // map it to a filesystem path MUST sanitize against path traversal.
-        const { url } = await this.screenshotStorage.upload(dataUrl, {
-          feedbackId: clientId,
-          mimeType: screenshotMimeType(dataUrl),
-        });
-        return url;
-      } catch (err) {
-        console.warn(
-          "[siteping] screenshotStorage.upload failed — feedback will be saved without a screenshot. Wrap your storage's upload to handle this differently:",
-          err,
-        );
-        return null;
-      }
+  private async uploadScreenshot(
+    storage: ScreenshotStorage,
+    dataUrl: string,
+    context: { clientId: string; feedbackId: string },
+  ): Promise<string | null> {
+    try {
+      const { url } = await storage.upload(dataUrl, {
+        feedbackId: context.feedbackId,
+        mimeType: screenshotMimeType(dataUrl),
+      });
+      return url;
+    } catch (error) {
+      warnSafely(
+        this.logger,
+        "[siteping] PrismaStore: screenshotStorage.upload failed — feedback saved without a screenshot. Wrap your storage's upload to handle this differently.",
+        { ...context, error },
+      );
+      return null;
     }
+  }
 
-    if (!this.inlineFallbackWarned) {
+  /** The data URL itself, without a storage — with a one-time warning so production operators notice. */
+  private inlineScreenshot(dataUrl: string | null): string | null {
+    if (dataUrl && !this.inlineFallbackWarned) {
       this.inlineFallbackWarned = true;
-      console.warn(
-        "[siteping] enableScreenshot is on but no `screenshotStorage` is configured — base64 data URLs will be persisted inline on Feedback.screenshotUrl. Configure a ScreenshotStorage (S3/R2/…) for production.",
+      warnSafely(
+        this.logger,
+        "[siteping] PrismaStore: no `screenshotStorage` configured — base64 data URLs are persisted inline on Feedback.screenshotUrl. Configure a ScreenshotStorage (S3/R2/…) for production.",
+        {},
       );
     }
     return dataUrl;
@@ -483,10 +530,10 @@ export class PrismaStore implements SitepingStore {
     const results = await settleWithConcurrencyLimit(stored, SCREENSHOT_DELETE_CONCURRENCY, async (url) => remove(url));
     results.forEach((result, index) => {
       if (result.status === "rejected") {
-        console.warn(
-          `[siteping] screenshotStorage.delete failed for ${stored[index]} — object left in place:`,
-          result.reason,
-        );
+        warnSafely(this.logger, "[siteping] PrismaStore: screenshotStorage.delete failed — object left in place", {
+          url: stored[index],
+          error: result.reason,
+        });
       }
     });
   }
@@ -503,16 +550,17 @@ export class PrismaStore implements SitepingStore {
 
   async findByClientId(clientId: string): Promise<FeedbackRecord | null> {
     return (await this.prisma.sitepingFeedback.findUnique({
-      where: { clientId },
+      where: { clientId: toStorableText(clientId) },
       include: this.include,
     })) as FeedbackRecord | null;
   }
 
   async getFeedbacks(query: FeedbackQuery): Promise<FeedbackPage> {
-    const { projectName, type, status, statuses, search, url, urlPattern } = query;
+    const storable = toStorableValue(query);
+    const { projectName, type, status, statuses, search, url, urlPattern } = storable;
     // Same clamp as the in-memory pipeline: the HTTP schema already bounds
     // page/limit, but direct callers reach the store without it.
-    const { limit, skip } = clampPagination(query);
+    const { limit, skip } = clampPagination(storable);
 
     const where: FeedbackWhereInput = { projectName };
     if (type) where.type = type;
@@ -555,7 +603,7 @@ export class PrismaStore implements SitepingStore {
   async updateFeedback(id: string, data: FeedbackUpdateInput): Promise<FeedbackRecord> {
     try {
       return (await this.prisma.sitepingFeedback.update({
-        where: { id },
+        where: { id: toStorableText(id) },
         data: {
           status: data.status,
           resolvedAt: data.resolvedAt,
@@ -578,11 +626,13 @@ export class PrismaStore implements SitepingStore {
    */
   private async insertComment(
     comments: PrismaModelDelegate,
-    feedbackId: string,
-    data: CommentCreateInput,
-  ): Promise<CommentRecord> {
+    submittedFeedbackId: string,
+    submitted: CommentCreateInput,
+  ): Promise<CommentCreateOutcome> {
+    const feedbackId = toStorableText(submittedFeedbackId);
+    const data = toStorableValue(submitted);
     const replayed = await this.findComment(comments, data.clientId);
-    if (replayed) return replayed;
+    if (replayed) return { comment: replayed, created: false };
     if (
       data.authorRole === "client" &&
       (await comments.count({ where: { feedbackId, authorRole: "client" } })) >= MAX_COMMENTS_PER_FEEDBACK
@@ -591,7 +641,7 @@ export class PrismaStore implements SitepingStore {
     }
 
     try {
-      return (await comments.create({
+      const comment = (await comments.create({
         data: {
           feedback: { connect: { id: feedbackId } },
           body: data.body,
@@ -601,9 +651,10 @@ export class PrismaStore implements SitepingStore {
           clientId: data.clientId,
         },
       })) as CommentRecord;
+      return { comment, created: true };
     } catch (error) {
       const winner = isStoreDuplicate(error) ? await this.findComment(comments, data.clientId) : null;
-      if (winner) return winner;
+      if (winner) return { comment: winner, created: false };
       throw toStoreError(error);
     }
   }
@@ -617,7 +668,8 @@ export class PrismaStore implements SitepingStore {
    * another thread and an unknown one are the same zero-row miss.
    */
   private async removeComment(comments: PrismaModelDelegate, feedbackId: string, commentId: string): Promise<void> {
-    const { count } = (await comments.deleteMany({ where: { id: commentId, feedbackId } })) as { count: number };
+    const where = { id: toStorableText(commentId), feedbackId: toStorableText(feedbackId) };
+    const { count } = (await comments.deleteMany({ where })) as { count: number };
     if (count === 0) throw new StoreNotFoundError();
   }
 
@@ -626,7 +678,7 @@ export class PrismaStore implements SitepingStore {
     try {
       // Prisma returns the deleted row — the only chance to learn which
       // screenshot object the feedback owned.
-      deleted = (await this.prisma.sitepingFeedback.delete({ where: { id } })) as {
+      deleted = (await this.prisma.sitepingFeedback.delete({ where: { id: toStorableText(id) } })) as {
         screenshotUrl?: string | null;
       } | null;
     } catch (error) {
@@ -636,11 +688,12 @@ export class PrismaStore implements SitepingStore {
   }
 
   async deleteAllFeedbacks(projectName: string): Promise<void> {
+    const storableName = toStorableText(projectName);
     // Rows first, storage second: a failed storage cleanup leaves orphaned
     // objects (acceptable), the reverse would leave rows pointing at deleted
     // screenshots.
-    const screenshotUrls = await this.storedScreenshotUrls(projectName);
-    await this.prisma.sitepingFeedback.deleteMany({ where: { projectName } });
+    const screenshotUrls = await this.storedScreenshotUrls(storableName);
+    await this.prisma.sitepingFeedback.deleteMany({ where: { projectName: storableName } });
     await this.discardScreenshots(screenshotUrls);
   }
 
@@ -650,12 +703,12 @@ export class PrismaStore implements SitepingStore {
    */
   async verifyProjectOwnership(id: string, projectName: string): Promise<boolean> {
     const record = (await this.prisma.sitepingFeedback.findUnique({
-      where: { id },
+      where: { id: toStorableText(id) },
       // Only need projectName for the check — not the annotations, nor an
       // inline screenshot data URL or the diagnostics JSON
       select: { projectName: true },
     })) as { projectName: string } | null;
-    return record !== null && record.projectName === projectName;
+    return record !== null && record.projectName === toStorableText(projectName);
   }
 }
 
@@ -663,36 +716,59 @@ export class PrismaStore implements SitepingStore {
 // Handler — @siteping/server behind the Prisma store
 // ---------------------------------------------------------------------------
 
-/** How the handler reaches its data: a Prisma client, or any store. */
-interface PrismaHandlerStoreOptions {
-  /** Prisma client — used when `store` is not provided. Wrapped in a `PrismaStore` internally. */
-  prisma?: SitepingPrismaClient;
-  /** Abstract store — when provided, takes precedence over `prisma`. */
-  store?: SitepingStore;
+/** The handler's data from your Prisma client, through a built-in `PrismaStore`. */
+export interface PrismaHandlerPrismaSource {
+  /** Prisma client, wrapped in a `PrismaStore` internally. */
+  prisma: SitepingPrismaClient;
   /**
-   * Optional storage backend for screenshots. Used only with `prisma`
-   * (ignored when a custom `store` is passed — that store is responsible
-   * for its own screenshot strategy). Without a storage, the data URL is
+   * Optional storage backend for screenshots. Without one, the data URL is
    * persisted inline on `Feedback.screenshotUrl` with a one-time warn.
    */
   screenshotStorage?: ScreenshotStorage;
   /**
    * Override case-insensitive search behaviour for the built-in `PrismaStore`.
-   *
-   * Only applied when `prisma` is provided (not when a custom `store` is
-   * passed). See `PrismaStoreOptions.caseInsensitiveSearch` for details on
+   * See `PrismaStoreOptions.caseInsensitiveSearch` for details on
    * auto-detection and per-provider semantics.
    */
   caseInsensitiveSearch?: boolean;
+  /** Pass either `prisma` or `store`, never both. */
+  store?: never;
 }
 
+/** The handler's data from any store — which owns its screenshot strategy and search semantics. */
+export interface PrismaHandlerStoreSource {
+  /** Abstract store, used as is. */
+  store: SitepingStore;
+  /** Pass either `prisma` or `store`, never both. */
+  prisma?: never;
+  /** `prisma` only: a custom store handles its own screenshots. */
+  screenshotStorage?: never;
+  /** `prisma` only: a custom store owns its search semantics. */
+  caseInsensitiveSearch?: never;
+}
+
+/**
+ * How the handler reaches its data: a Prisma client XOR any store. Options
+ * of the built-in `PrismaStore` exist on the `prisma` side only, so a store
+ * passed with them — or with no source at all — is a type error rather than
+ * options silently ignored.
+ */
+export type PrismaHandlerSource = PrismaHandlerPrismaSource | PrismaHandlerStoreSource;
+
 /** Options of `createSitepingHandler` under the `apiKey` policy — every `@siteping/server` option. */
-export interface HandlerOptions extends Omit<SitepingApiKeyHandlerOptions, "store">, PrismaHandlerStoreOptions {}
+export type HandlerOptions = Omit<SitepingApiKeyHandlerOptions, "store"> & PrismaHandlerSource;
 
 /** Options of `createSitepingHandler` under a custom `access` policy (see `@siteping/server`). */
-export interface PrismaAccessHandlerOptions<Principal extends SitepingPrincipal>
-  extends Omit<SitepingAccessHandlerOptions<Principal>, "store">,
-    PrismaHandlerStoreOptions {}
+export type PrismaAccessHandlerOptions<Principal extends SitepingPrincipal> = Omit<
+  SitepingAccessHandlerOptions<Principal>,
+  "store"
+> &
+  PrismaHandlerSource;
+
+/** Whether a logger handed to the handler also takes warnings, for the `PrismaStore` it builds. */
+function takesWarnings(logger: unknown): logger is SitepingWarnLogger {
+  return typeof (logger as Partial<SitepingLogger> | undefined)?.warn === "function";
+}
 
 /**
  * Setup hint for Prisma's "table does not exist" error (P2021) — any SitePing
@@ -709,8 +785,8 @@ function describePrismaError(error: unknown): string | undefined {
  * Create request handlers for the Siteping API endpoint — `@siteping/server`'s
  * `createSitepingHandler` over a Prisma-backed store, with every server option.
  *
- * Accepts either a `store` (abstract) or a `prisma` client (backwards compatible).
- * When `prisma` is provided without `store`, it is wrapped in a `PrismaStore`.
+ * Takes either a `prisma` client, wrapped in a `PrismaStore`, or any `store` —
+ * never both, and never neither (see `PrismaHandlerSource`).
  *
  * **Rate limiting** is not handled by this library. Apply rate limiting at the
  * framework or reverse-proxy level (e.g. Next.js middleware, Nginx, Cloudflare).
@@ -750,8 +826,14 @@ export function createSitepingHandler<Principal extends SitepingPrincipal>({
   describeError,
   ...serverOptions
 }: HandlerOptions | PrismaAccessHandlerOptions<Principal>): SitepingHandler {
+  // The types rule out a missing source; a JavaScript caller still gets a
+  // clear error rather than a store that fails on the first request. One
+  // passing both keeps the historical precedence: `store` wins.
   if (!providedStore && !prisma) {
-    throw new Error("[siteping] createSitepingHandler requires either `store` or `prisma`.");
+    throw new SitepingConfigError(
+      "CONFIG_STORE_MISSING",
+      "[siteping] createSitepingHandler requires either `store` or `prisma`.",
+    );
   }
 
   // Safe: the throw above guarantees at least one is defined
@@ -760,6 +842,8 @@ export function createSitepingHandler<Principal extends SitepingPrincipal>({
     new PrismaStore(prisma as NonNullable<typeof prisma>, {
       screenshotStorage,
       ...(typeof caseInsensitiveSearch === "boolean" ? { caseInsensitiveSearch } : {}),
+      // The handler's logger reports the store's warnings too, when it takes them (console, winston…).
+      ...(takesWarnings(serverOptions.logger) ? { logger: serverOptions.logger } : {}),
     });
 
   return createServerHandler({

@@ -1,6 +1,6 @@
 {
   "name": "@siteping/widget",
-  "version": "0.11.1",
+  "version": "0.12.0",
   "description": "Feedback widget for client review during development — annotations, bugs, questions directly on the site",
   "type": "module",
   "sideEffects": false,
@@ -30,6 +30,8 @@
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "jsdelivr": "./dist/index.global.js",
+  "unpkg": "./dist/index.global.js",
   "files": [
     "dist"
   ],
@@ -69,27 +71,27 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "dependencies": {
     "@medv/finder": "^4.0.2",
-    "html2canvas-pro": "^2.4.3"
+    "html2canvas-pro": "^2.5.2"
   },
   "devDependencies": {
     "@siteping/adapter-localstorage": "workspace:*",
     "@siteping/adapter-memory": "workspace:*",
     "@siteping/core": "workspace:*",
-    "@size-limit/file": "^14.2.0",
+    "@size-limit/file": "^14.3.0",
     "@testing-library/react": "^16.3.3",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "esbuild": "^0.28.2",
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0",
-    "size-limit": "^14.2.0"
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "size-limit": "^14.3.0"
   },
   "peerDependencies": {
-    "react": ">=18"
+    "react": "^18.0.0 || ^19.0.0"
   },
   "peerDependenciesMeta": {
     "react": {

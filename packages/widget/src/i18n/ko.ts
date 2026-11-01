@@ -17,6 +17,7 @@ export const ko: Translations = {
   "panel.retry": "다시 시도",
   "panel.empty": "아직 피드백이 없습니다",
   "panel.showMore": "더 보기",
+  "panel.notOnPage": "이 페이지에서 보이지 않음",
   "panel.showLess": "접기",
   "panel.resolve": "해결",
   "panel.reopen": "다시 열기",
@@ -31,6 +32,7 @@ export const ko: Translations = {
   "panel.statusResolved": "해결됨",
   "panel.statusInProgress": "진행 중",
   "panel.statusWontFix": "처리 안 함",
+  "panel.statusClosed": "종료됨",
 
   // Feedback type labels
   "type.label": "유형",
@@ -85,7 +87,7 @@ export const ko: Translations = {
 
   // Markers
   "marker.approximate": "대략적인 위치 (신뢰도: {confidence}%)",
-  "marker.aria": "피드백 #{number}: {type} — {message}",
+  "marker.aria": "피드백 #{number}: {type}, {status} — {message}",
   "marker.count": "피드백 마커 {count}개 표시 중",
 
   // FAB badge
@@ -94,13 +96,16 @@ export const ko: Translations = {
   // Accessibility — screen reader announcements
   "feedback.sent.confirmation": "피드백을 보냈습니다",
   "feedback.error.message": "피드백을 보내지 못했습니다",
+  "feedback.queued": "이 기기에 저장했습니다. 다음 방문 시 전송됩니다.",
   "feedback.deleted.confirmation": "피드백을 삭제했습니다",
 
   // Badge
   "badge.count": "해결되지 않은 피드백 {count}건",
 
   // Bulk actions toolbar
+  "bulk.aria": "일괄 작업",
   "bulk.selectAll": "모두 선택",
+  "bulk.selectFeedback": "{label} 선택",
   "bulk.selected": "{count}건 선택됨",
   "bulk.resolve": "해결",
   "bulk.delete": "삭제",
@@ -116,13 +121,15 @@ export const ko: Translations = {
   "group.feedbacks": "피드백 {count}건",
 
   // Stats bar
+  "stats.aria": "피드백 통계",
   "stats.open": "열림",
-  "stats.resolved": "해결됨",
+  "stats.closed": "종료됨",
   "stats.bugs": "버그",
-  "stats.progress": "{percent}% 해결",
+  "stats.progress": "{percent}% 종료",
 
   // Detail view
   "detail.back": "뒤로",
+  "detail.aria": "피드백 상세",
   "detail.title": "피드백 #{number}",
   "detail.status": "상태",
   "detail.message": "내용",

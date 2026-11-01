@@ -2,6 +2,7 @@
   "pages": [
     "index",
     "quickstart",
+    "frameworks",
     "widget",
     "dashboard",
     "server",
@@ -9,6 +10,9 @@
     "issue-trackers",
     "adapters",
     "cli",
+    "known-limitations",
+    "versioning",
+    "upgrade",
     "faq"
   ]
 }

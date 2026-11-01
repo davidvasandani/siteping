@@ -40,6 +40,7 @@ vi.mock(new URL("../../src/api-client.js", import.meta.url).pathname, () => ({
     };
   }),
   flushRetryQueue: flushRetryQueueMock,
+  queueOutcome: vi.fn(),
 }));
 
 // Mock heavy dependencies to keep tests fast and focused on launcher logic
@@ -446,30 +447,88 @@ describe("launch", () => {
       expect(() => instance.destroy()).not.toThrow();
     });
 
-    it("a stale destroy() of an earlier instance does not release the current singleton", () => {
+    it("a stale destroy() of an earlier widget's handle does not release the current one", () => {
       const w1 = launch(defaultConfig());
       w1.destroy();
       const w2 = launch(defaultConfig());
       w1.destroy(); // stale handle — must be a no-op
-      const w3 = launch(defaultConfig());
 
-      expect(w3).toBe(w2);
       expect(document.querySelectorAll("siteping-widget")).toHaveLength(1);
       w2.destroy();
+      expect(document.querySelector("siteping-widget")).toBeNull();
     });
 
-    it("keeps a remounted widget alive when another consumer destroys its stale handle (useSiteping x2)", () => {
-      // Two components share the singleton; A unmounts (destroys it), A
-      // remounts (new widget), then B unmounts and destroys its old handle.
-      const shared = launch(defaultConfig());
-      const sameForB = launch(defaultConfig());
-      shared.destroy();
-      const remounted = launch(defaultConfig());
-      sameForB.destroy();
-
+    it("keeps the widget while another handle is live, and tears it down with the last one (#366)", () => {
+      // Two `useSiteping` consumers (a layout and a page) share one widget.
+      const a = launch(defaultConfig());
+      const b = launch(defaultConfig());
+      expect(b).not.toBe(a);
       expect(document.querySelectorAll("siteping-widget")).toHaveLength(1);
-      expect(launch(defaultConfig())).toBe(remounted);
+
+      a.destroy();
+      expect(document.querySelectorAll("siteping-widget")).toHaveLength(1);
+
+      // A remount takes a new handle over the same widget.
+      const remounted = launch(defaultConfig());
+      b.destroy();
+      expect(document.querySelectorAll("siteping-widget")).toHaveLength(1);
+
       remounted.destroy();
+      expect(document.querySelector("siteping-widget")).toBeNull();
+    });
+
+    it("releases one reference per handle, however many times its destroy() runs", () => {
+      const a = launch(defaultConfig());
+      const b = launch(defaultConfig());
+
+      a.destroy();
+      a.destroy(); // must not release b's reference too
+      expect(document.querySelectorAll("siteping-widget")).toHaveLength(1);
+
+      b.destroy();
+      expect(document.querySelector("siteping-widget")).toBeNull();
+    });
+
+    it("detaches a destroyed handle's listeners and leaves the other handles' in place", () => {
+      const a = launch(defaultConfig());
+      const b = launch(defaultConfig());
+      const shared = vi.fn();
+      const onlyA = vi.fn();
+      const onlyB = vi.fn();
+      // The same function through both handles: two independent subscriptions.
+      a.on("feedback:deleted", shared);
+      b.on("feedback:deleted", shared);
+      a.on("feedback:deleted", onlyA);
+      b.on("feedback:deleted", onlyB);
+
+      a.destroy();
+      annotatorCapture.bus!.emit("feedback:deleted", "fb-1");
+
+      expect(onlyA).not.toHaveBeenCalled();
+      expect(onlyB).toHaveBeenCalledOnce();
+      expect(shared).toHaveBeenCalledOnce();
+      b.destroy();
+    });
+
+    it("makes a destroyed handle inert while the widget lives on", () => {
+      const a = launch(defaultConfig());
+      const b = launch(defaultConfig());
+      const onOpen = vi.fn();
+      b.on("panel:open", onOpen);
+      a.destroy();
+
+      const late = vi.fn();
+      const dispose = a.on("feedback:deleted", late);
+      annotatorCapture.bus!.emit("feedback:deleted", "fb-1");
+      a.open();
+      a.close();
+      a.refresh();
+
+      expect(late).not.toHaveBeenCalled();
+      expect(onOpen).not.toHaveBeenCalled();
+      expect(a.focusFeedback("fb-1")).toBe(false);
+      expect(dispose).not.toThrow();
+      b.destroy();
     });
   });
 
@@ -723,7 +782,7 @@ describe("launch", () => {
       try {
         const first = launch(defaultConfig({ debug: true }));
         const second = launch(defaultConfig({ debug: true }));
-        expect(first).toBe(second);
+        expect(document.querySelectorAll("siteping-widget")).toHaveLength(1);
 
         // The second call should have triggered a debug log about "called more than once"
         const dupCalls = debugSpy.mock.calls.filter(
@@ -732,6 +791,7 @@ describe("launch", () => {
         expect(dupCalls.length).toBeGreaterThan(0);
 
         first.destroy();
+        second.destroy();
       } finally {
         debugSpy.mockRestore();
       }
@@ -743,24 +803,77 @@ describe("launch", () => {
   // -------------------------------------------------------------------------
 
   describe("production guard with process undefined", () => {
-    it("does not skip when process is undefined (browser context)", () => {
+    // A `<script>` embed has no `process` and no bundler to inline NODE_ENV:
+    // the page's host stands in for it (#313). vitest's jsdom URL is
+    // localhost; `jsdom.reconfigure` moves the page to a public host.
+    const dom = (globalThis as unknown as { jsdom: { reconfigure(options: { url: string }): void } }).jsdom;
+
+    function withoutProcess(run: () => void): void {
       const origProcess = (globalThis as unknown as { process?: unknown }).process;
-      // Simulate browser environment with no process global
       delete (globalThis as unknown as { process?: unknown }).process;
-
       try {
-        const instance = launch({ endpoint: "/api", projectName: "test" });
-
-        // Without process.env, the production guard's typeof check returns "undefined"
-        // and the guard short-circuits — widget should mount
-        const widget = document.querySelector("siteping-widget");
-        expect(widget).not.toBeNull();
-
-        instance.destroy();
+        run();
       } finally {
         if (origProcess) {
           (globalThis as unknown as { process: unknown }).process = origProcess;
         }
+      }
+    }
+
+    function onHost(url: string, run: () => void): void {
+      const original = location.href;
+      dom.reconfigure({ url });
+      try {
+        run();
+      } finally {
+        dom.reconfigure({ url: original });
+      }
+    }
+
+    /** Whether `launch(config)` mounts a widget — destroyed either way, so no state leaks. */
+    function mounts(config: Partial<SitepingHttpConfig> = {}): boolean {
+      const instance = launch({ endpoint: "/api", projectName: "test", ...config });
+      try {
+        return document.querySelector("siteping-widget") !== null;
+      } finally {
+        instance.destroy();
+      }
+    }
+
+    it("mounts on a local page when process is undefined (browser context)", () => {
+      withoutProcess(() => expect(mounts()).toBe(true));
+    });
+
+    it.each(["http://127.0.0.1:5173/", "http://app.localhost/", "http://[::1]:8080/"])(
+      "treats %s as a local page",
+      (url) => {
+        onHost(url, () => withoutProcess(() => expect(mounts()).toBe(true)));
+      },
+    );
+
+    it("stays hidden on a public host, like a production build", () => {
+      onHost("https://client-site.example/", () =>
+        withoutProcess(() => {
+          const onSkip = vi.fn();
+          expect(mounts({ onSkip })).toBe(false);
+          expect(onSkip).toHaveBeenCalledWith("production");
+        }),
+      );
+    });
+
+    it("mounts on a public host with forceShow", () => {
+      onHost("https://staging.client-site.example/", () =>
+        withoutProcess(() => expect(mounts({ forceShow: true })).toBe(true)),
+      );
+    });
+
+    it("lets a NODE_ENV signal win over the host", () => {
+      const original = process.env.NODE_ENV;
+      process.env.NODE_ENV = "development";
+      try {
+        onHost("https://client-site.example/", () => expect(mounts()).toBe(true));
+      } finally {
+        process.env.NODE_ENV = original;
       }
     });
   });

@@ -17,6 +17,7 @@ export const ru: Translations = {
   "panel.retry": "Повторить",
   "panel.empty": "Пока нет отзывов",
   "panel.showMore": "Показать больше",
+  "panel.notOnPage": "Не видно на этой странице",
   "panel.showLess": "Показать меньше",
   "panel.resolve": "Решено",
   "panel.reopen": "Открыть заново",
@@ -31,6 +32,7 @@ export const ru: Translations = {
   "panel.statusResolved": "Решён",
   "panel.statusInProgress": "В работе",
   "panel.statusWontFix": "Не будет исправлено",
+  "panel.statusClosed": "Закрыт",
 
   // Feedback type labels
   "type.label": "Тип",
@@ -85,7 +87,7 @@ export const ru: Translations = {
 
   // Markers
   "marker.approximate": "Приблизительная позиция (точность: {confidence}%)",
-  "marker.aria": "Отзыв #{number}: {type} — {message}",
+  "marker.aria": "Отзыв #{number}: {type}, {status} — {message}",
   "marker.count": "Отображено маркеров отзывов: {count}",
 
   // FAB badge
@@ -94,13 +96,16 @@ export const ru: Translations = {
   // Accessibility — screen reader announcements
   "feedback.sent.confirmation": "Отзыв успешно отправлен",
   "feedback.error.message": "Не удалось отправить отзыв",
+  "feedback.queued": "Сохранено на этом устройстве. Отправится при следующем посещении.",
   "feedback.deleted.confirmation": "Отзыв удалён",
 
   // Badge
   "badge.count": "Нерешённых отзывов: {count}",
 
   // Bulk actions toolbar
+  "bulk.aria": "Массовые действия",
   "bulk.selectAll": "Выбрать все",
+  "bulk.selectFeedback": "Выбрать: {label}",
   "bulk.selected": "Выбрано: {count}",
   "bulk.resolve": "Решить",
   "bulk.delete": "Удалить",
@@ -116,13 +121,15 @@ export const ru: Translations = {
   "group.feedbacks": "Отзывов: {count}",
 
   // Stats bar
+  "stats.aria": "Статистика отзывов",
   "stats.open": "Открытые",
-  "stats.resolved": "Решённые",
+  "stats.closed": "Закрытые",
   "stats.bugs": "Баги",
-  "stats.progress": "Решено: {percent}%",
+  "stats.progress": "Закрыто: {percent}%",
 
   // Detail view
   "detail.back": "Назад",
+  "detail.aria": "Подробности отзыва",
   "detail.title": "Отзыв #{number}",
   "detail.status": "Статус",
   "detail.message": "Сообщение",

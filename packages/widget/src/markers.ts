@@ -1,15 +1,21 @@
-import { type AnchorData, type FeedbackResponse, isClosedStatus, type RectData } from "@siteping/core";
+import {
+  type AnchorData,
+  type FeedbackResponse,
+  type FeedbackStatus,
+  isClosedStatus,
+  type RectData,
+} from "@siteping/core";
 import { Z_INDEX_MAX } from "./constants.js";
-import { resolveAnnotation } from "./dom/resolver.js";
+import { type ResolvedAnnotation, resolveAnnotation } from "./dom/resolver.js";
 import { scrollRectIntoView } from "./dom/scroll-into-view.js";
 import { classifyVisibility } from "./dom/visibility.js";
 import { el, setText } from "./dom-utils.js";
 import type { EventBus, WidgetEvents } from "./events.js";
 import { isolateFromHost } from "./host-isolation.js";
-import { getTypeLabel, type TFunction, tWithParams } from "./i18n/index.js";
+import { getStatusLabel, getTypeLabel, type TFunction, tWithParams } from "./i18n/index.js";
 import { getTypeColor, type ThemeColors } from "./styles/theme.js";
 import type { Tooltip } from "./tooltip.js";
-import { isCoarsePointer, isCompactViewport } from "./viewport.js";
+import { isCoarsePointer, isCompactViewport, prefersReducedMotion } from "./viewport.js";
 
 type Annotation = FeedbackResponse["annotations"][number];
 
@@ -34,6 +40,43 @@ function toRectData(a: Annotation): RectData {
 
 /** Half of the 26px marker diameter — used for centering on anchor corner. */
 const MARKER_OFFSET = 13;
+
+interface PinLook {
+  bg: string;
+  /** `border-color` — one value, or four for a partial ring. */
+  ring: string;
+  color: string;
+  shadow: string;
+  hoverShadow: string;
+}
+
+/** Closed pins (resolved, wont_fix) are muted; their glyph tells them apart. */
+const CLOSED_PIN: PinLook = {
+  bg: "rgba(241,245,249,0.9)",
+  ring: "#cbd5e1",
+  color: "#94a3b8",
+  shadow: "0 2px 8px rgba(0,0,0,0.06)",
+  hoverShadow: "0 4px 16px rgba(0,0,0,0.1)",
+};
+
+/**
+ * A pin's look per status, in the dashboard's status language: the shape, not
+ * colour alone, tells the four apart (#302). Open and in-progress pins keep
+ * their number and type colour — they are still actionable — and an
+ * in-progress pin fades half its ring, the dashboard's half-filled ◐. Closed
+ * pins are muted: a check for `resolved`, a slash (⊘) for `wont_fix`, never a
+ * check, since a declined request isn't a fix.
+ */
+function pinLook(status: FeedbackStatus, typeColor: string): PinLook {
+  if (isClosedStatus(status)) return CLOSED_PIN;
+  return {
+    bg: "rgba(255,255,255,0.92)",
+    ring: status === "in_progress" ? `${typeColor} ${typeColor} ${typeColor}40 ${typeColor}40` : typeColor,
+    color: typeColor,
+    shadow: `0 2px 12px ${typeColor}25, 0 2px 6px rgba(0,0,0,0.06)`,
+    hoverShadow: `0 4px 20px ${typeColor}35, 0 4px 12px rgba(0,0,0,0.08)`,
+  };
+}
 
 interface MarkerPos {
   top: number;
@@ -80,6 +123,21 @@ function clusterBase(cluster: Cluster): MarkerPos | undefined {
   return elIdx === undefined ? undefined : cluster.entries[0]?.positions[elIdx];
 }
 
+/** Whether a marker is on the page — an unresolved anchor's marker stays `display:none`. */
+const isShown = (marker: HTMLElement): boolean => marker.style.display !== "none";
+
+/**
+ * Play a marker animation through the Web Animations API. Markers live in the
+ * page's DOM, outside the Shadow root whose stylesheet defines the widget's
+ * `@keyframes` (and `--sp-*` variables), so a CSS `animation` naming them never
+ * played; keyframes passed to `animate()` need no stylesheet, which a strict
+ * CSP would block anyway. Skipped under `prefers-reduced-motion`, and where
+ * `animate` is missing (jsdom).
+ */
+function play(element: HTMLElement, keyframes: Keyframe[], options: KeyframeAnimationOptions): void {
+  if (!prefersReducedMotion() && typeof element.animate === "function") element.animate(keyframes, options);
+}
+
 const HIGHLIGHT_FADE = 300;
 const REPOSITION_DEBOUNCE = 200;
 /** Back-off between full re-resolutions of an anchor that resolved hidden or
@@ -105,7 +163,13 @@ export class MarkerManager {
   private mutationObserver: MutationObserver | null = null;
   private scrollHandler: (() => void) | null = null;
   private resizeHandler: (() => void) | null = null;
-  private anchorCache = new Map<string, WeakRef<Element>>();
+  /**
+   * The element each annotation last resolved to, with that resolution's
+   * confidence and strategy: the fast path recomputes the rect from the live
+   * element and keeps the verdict, so a low-confidence pin keeps its
+   * "approximate position" warning past the first cache hit (#304).
+   */
+  private anchorCache = new Map<string, Omit<ResolvedAnnotation, "element" | "rect"> & { ref: WeakRef<Element> }>();
   /** Whether a resize/mutation happened since the last reposition pass —
    * the only triggers that can flip an anchor's visibility (responsive
    * breakpoint, SPA re-render). Pure scroll ticks keep the fast path. */
@@ -253,15 +317,15 @@ export class MarkerManager {
         validKeys.add(cacheKey);
 
         // Try cached element first to avoid full resolution chain.
-        const cachedRef = this.anchorCache.get(cacheKey);
-        const cachedEl = cachedRef?.deref();
+        const cached = this.anchorCache.get(cacheKey);
+        const cachedEl = cached?.ref.deref();
         let resolved: ReturnType<typeof resolveAnnotation>;
 
         const backedOff = (this.hiddenRecheckAt.get(cacheKey) ?? 0) > now;
         const cacheUsable =
           cachedEl?.isConnected && (backedOff || !(recheckVisibility && classifyVisibility(cachedEl) === "hidden"));
 
-        if (cachedEl && cacheUsable) {
+        if (cached && cachedEl && cacheUsable) {
           const anchorRect = cachedEl.getBoundingClientRect();
           const r = toRectData(annotation);
           resolved = {
@@ -272,8 +336,8 @@ export class MarkerManager {
               r.wPct * anchorRect.width,
               r.hPct * anchorRect.height,
             ),
-            confidence: 1,
-            strategy: "css",
+            confidence: cached.confidence,
+            strategy: cached.strategy,
           };
         } else if (backedOff) {
           // A recent full resolution concluded hidden/orphaned and the anchor
@@ -287,7 +351,8 @@ export class MarkerManager {
             // than what the sweep would find; never cache it, retry next tick.
           } else {
             if (resolved?.element) {
-              this.anchorCache.set(cacheKey, new WeakRef(resolved.element));
+              const { confidence, strategy } = resolved;
+              this.anchorCache.set(cacheKey, { ref: new WeakRef(resolved.element), confidence, strategy });
             }
             if (!resolved || classifyVisibility(resolved.element) === "hidden") {
               this.hiddenRecheckAt.set(cacheKey, now + HIDDEN_RECHECK_MS);
@@ -319,7 +384,10 @@ export class MarkerManager {
       if (!validKeys.has(key)) this.hiddenRecheckAt.delete(key);
     }
 
-    if (visibilityChanged) this.buildClusters();
+    if (visibilityChanged) {
+      this.buildClusters();
+      this.bus.emit("markers:placed");
+    }
     this.applyClusterPositions();
 
     // Re-render the pinned highlight rectangle so it tracks the layout after
@@ -364,24 +432,32 @@ export class MarkerManager {
       this.entries.push(entry);
     });
     this.buildClusters();
-    // Announce the number of visible markers to assistive tech (WCAG 4.1.3).
+    // Announce the number of visible markers to assistive tech (WCAG 4.1.3):
+    // a feedback whose anchor isn't on the page has none to point at (#304).
     // Skip the announcement when the host page has not provided a live
     // region (tests, embedded use cases) and when no marker is visible to
     // avoid noisy "0 markers" updates on every navigation.
-    if (this.liveRegion && this.entries.length > 0) {
-      this.liveRegion.textContent = tWithParams(this.t, "marker.count", { count: this.entries.length });
+    const visible = this.entries.filter((entry) => entry.elements.some(isShown)).length;
+    if (this.liveRegion && visible > 0) {
+      this.liveRegion.textContent = tWithParams(this.t, "marker.count", { count: visible });
     }
     this.emitMarkersChanged();
+    this.bus.emit("markers:placed");
   }
 
   addFeedback(feedback: FeedbackResponse, index: number): void {
     const entry = this.buildEntry(feedback, index);
     for (const m of entry.elements) {
-      m.style.animation = "sp-marker-in 0.35s cubic-bezier(0.34,1.56,0.64,1) both";
+      // `scale`, not `transform`: the marker's position and hover zoom own transform.
+      play(m, [{ scale: 0, opacity: 0 }, { scale: 1.2, opacity: 1, offset: 0.6 }, { scale: 1 }], {
+        duration: 350,
+        easing: "cubic-bezier(0.34,1.56,0.64,1)",
+      });
     }
     this.entries.push(entry);
     this.buildClusters();
     this.emitMarkersChanged();
+    this.bus.emit("markers:placed");
   }
 
   private buildEntry(feedback: FeedbackResponse, index: number): MarkerEntry {
@@ -563,9 +639,8 @@ export class MarkerManager {
   }
 
   private createMarker(number: number, feedback: FeedbackResponse, pos: { top: number; left: number }): HTMLElement {
-    const typeColor = getTypeColor(feedback.type, this.colors);
-    // Closed feedbacks (resolved, wont_fix) render as muted checkmark markers.
-    const isResolved = isClosedStatus(feedback.status);
+    const { status } = feedback;
+    const look = pinLook(status, getTypeColor(feedback.type, this.colors));
 
     const marker = el("div", {
       style: /* css */ `
@@ -574,14 +649,15 @@ export class MarkerManager {
         left:${pos.left}px;
         width:26px;height:26px;
         border-radius:50%;
-        background:${isResolved ? "rgba(241,245,249,0.9)" : "rgba(255,255,255,0.92)"};
-        border:2px solid ${isResolved ? "#cbd5e1" : typeColor};
+        background:${look.bg};
+        border:2px solid;
+        border-color:${look.ring};
         display:flex;align-items:center;justify-content:center;
         font-family:"Inter",system-ui,-apple-system,sans-serif;
         font-size:11px;font-weight:700;
-        color:${isResolved ? "#94a3b8" : typeColor};
+        color:${look.color};
         cursor:pointer;pointer-events:auto;
-        box-shadow:${isResolved ? "0 2px 8px rgba(0,0,0,0.06)" : `0 2px 12px ${typeColor}25, 0 2px 6px rgba(0,0,0,0.06)`};
+        box-shadow:${look.shadow};
         transition:top 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), left 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), transform 0.15s ease, box-shadow 0.15s ease;
         user-select:none;
         -webkit-font-smoothing:antialiased;
@@ -594,28 +670,33 @@ export class MarkerManager {
     const ariaLabel = tWithParams(this.t, "marker.aria", {
       number,
       type: getTypeLabel(feedback.type, this.t),
+      status: getStatusLabel(status, this.t),
       message: truncatedMessage,
     });
     marker.setAttribute("aria-label", ariaLabel);
     marker.setAttribute("aria-describedby", this.tooltip.tooltipId);
-    setText(marker, isResolved ? "\u2713" : String(number));
+    if (status === "wont_fix") {
+      marker.appendChild(
+        el("span", {
+          style: "width:2px;height:16px;border-radius:1px;background:currentColor;transform:rotate(45deg);",
+        }),
+      );
+    } else {
+      setText(marker, status === "resolved" ? "\u2713" : String(number));
+    }
     // Fingers need ~44px: widen the hit area, not the 26px pin.
     if (isCoarsePointer()) marker.appendChild(el("span", { style: "position:absolute;inset:-9px;border-radius:50%;" }));
 
     marker.addEventListener("mouseenter", () => {
       marker.style.transform = "scale(1.2)";
-      marker.style.boxShadow = isResolved
-        ? "0 4px 16px rgba(0,0,0,0.1)"
-        : `0 4px 20px ${typeColor}35, 0 4px 12px rgba(0,0,0,0.08)`;
+      marker.style.boxShadow = look.hoverShadow;
       this.tooltip.show(feedback, marker.getBoundingClientRect());
       if (!this.pinnedFeedback) this.showHighlight(feedback);
     });
 
     marker.addEventListener("mouseleave", () => {
       marker.style.transform = "scale(1)";
-      marker.style.boxShadow = isResolved
-        ? "0 2px 8px rgba(0,0,0,0.06)"
-        : `0 2px 12px ${typeColor}25, 0 2px 6px rgba(0,0,0,0.06)`;
+      marker.style.boxShadow = look.shadow;
       this.tooltip.scheduleHide();
       if (!this.pinnedFeedback) this.clearHighlight();
     });
@@ -663,8 +744,10 @@ export class MarkerManager {
    * Scroll the annotation into view, pin its highlight, and pulse its marker.
    *
    * Powers the `deepLink` config option and the public
-   * `instance.focusFeedback(id)` method. Returns `false` when no entry
-   * matches — caller logs that case, the manager stays silent.
+   * `instance.focusFeedback(id)` method. Returns `false` when no marker of
+   * that feedback is on the page — none matches, or its anchor doesn't
+   * resolve here (#304), as the public contract says — and then does
+   * nothing; the caller logs that case, the manager stays silent.
    *
    * Scrolling uses the marker element's current document position via
    * `scrollIntoView`, not the original `scrollX/scrollY` captured at
@@ -678,10 +761,10 @@ export class MarkerManager {
    */
   focusFeedback(feedbackId: string): boolean {
     const entry = this.entries.find((e) => e.feedback.id === feedbackId);
-    if (!entry) return false;
-    const index = entry.elements.findIndex((m) => m.style.display !== "none");
-    const markerEl = entry.elements[index];
-    if (markerEl && !this.scrollAnchorIntoView(entry, index)) {
+    const index = entry ? entry.elements.findIndex(isShown) : -1;
+    const markerEl = entry?.elements[index];
+    if (!entry || !markerEl) return false;
+    if (!this.scrollAnchorIntoView(entry, index)) {
       markerEl.scrollIntoView({ behavior: "smooth", block: "center" });
     }
     this.pinHighlight(entry.feedback);
@@ -705,24 +788,32 @@ export class MarkerManager {
    * scroll offsets.
    */
   revealPin(feedbackId: string): boolean {
-    return (
-      this.container.style.display !== "none" &&
-      this.entries.some((e) => e.feedback.id === feedbackId && e.elements.some((m) => m.style.display !== "none")) &&
-      this.focusFeedback(feedbackId)
-    );
+    return this.container.style.display !== "none" && this.focusFeedback(feedbackId);
+  }
+
+  /**
+   * Whether a feedback rendered on this page has no pin on it: every anchor
+   * failed to resolve, or resolved to a hidden element. Independent of the
+   * eye toggle, which hides pins the page still holds. `markers:placed`
+   * announces when the answer may have changed.
+   */
+  isLost(feedbackId: string): boolean {
+    const entries = this.entries.filter((e) => e.feedback.id === feedbackId);
+    return entries.length > 0 && entries.every((e) => e.elements.every((m) => m.style.display === "none"));
   }
 
   highlight(feedbackId: string): void {
     for (const entry of this.entries) {
       if (entry.feedback.id === feedbackId) {
         for (const markerEl of entry.elements) {
-          markerEl.style.animation = "sp-pulse-ring 0.7s ease-out";
-          markerEl.addEventListener(
-            "animationend",
-            () => {
-              markerEl.style.animation = "";
-            },
-            { once: true },
+          play(
+            markerEl,
+            [
+              { boxShadow: `0 0 0 0 ${this.colors.accentGlow}` },
+              { boxShadow: "0 0 0 8px transparent", offset: 0.7 },
+              { boxShadow: "0 0 0 0 transparent" },
+            ],
+            { duration: 700, easing: "ease-out" },
           );
         }
       }

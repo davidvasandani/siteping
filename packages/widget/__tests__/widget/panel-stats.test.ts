@@ -6,7 +6,6 @@ import { en as STATS_I18N_EN } from "../../src/i18n/en.js";
 import { fr as STATS_I18N_FR } from "../../src/i18n/fr.js";
 import { createT } from "../../src/i18n/index.js";
 import { PanelStats, STATS_CSS } from "../../src/panel-stats.js";
-import { buildThemeColors } from "../../src/styles/theme.js";
 
 function makeFeedback(overrides: Partial<FeedbackResponse> = {}): FeedbackResponse {
   return {
@@ -45,16 +44,16 @@ describe("PanelStats", () => {
 
   it("exposes English i18n constants and CSS", () => {
     expect(STATS_I18N_EN["stats.open"]).toBe("Open");
-    expect(STATS_I18N_EN["stats.resolved"]).toBe("Resolved");
+    expect(STATS_I18N_EN["stats.closed"]).toBe("Closed");
     expect(STATS_I18N_EN["stats.bugs"]).toBe("Bugs");
-    expect(STATS_I18N_EN["stats.progress"]).toBe("{percent}% resolved");
+    expect(STATS_I18N_EN["stats.progress"]).toBe("{percent}% closed");
     expect(STATS_I18N_FR["stats.open"]).toBe("Ouverts");
-    expect(STATS_I18N_FR["stats.progress"]).toBe("{percent}% résolus");
+    expect(STATS_I18N_FR["stats.progress"]).toBe("{percent}% clôturés");
     expect(STATS_CSS).toContain(".sp-stats-bar");
   });
 
   it("creates a hidden stats element by default with English labels", () => {
-    const stats = new PanelStats(buildThemeColors(), createT("en"));
+    const stats = new PanelStats(createT("en"));
     document.body.appendChild(stats.element);
 
     expect(stats.element.classList.contains("sp-stats-bar")).toBe(true);
@@ -65,26 +64,27 @@ describe("PanelStats", () => {
     const labelTexts = Array.from(labels).map((el) => el.textContent);
     expect(labelTexts).toEqual([
       STATS_I18N_EN["stats.open"],
-      STATS_I18N_EN["stats.resolved"],
+      STATS_I18N_EN["stats.closed"],
       STATS_I18N_EN["stats.bugs"],
     ]);
   });
 
   it("renders French labels when locale='fr'", () => {
-    const stats = new PanelStats(buildThemeColors(), createT("fr"));
+    const stats = new PanelStats(createT("fr"));
     document.body.appendChild(stats.element);
 
+    expect(stats.element.getAttribute("aria-label")).toBe(STATS_I18N_FR["stats.aria"]);
     const labels = stats.element.querySelectorAll<HTMLElement>(".sp-stats-label");
     const labelTexts = Array.from(labels).map((el) => el.textContent);
     expect(labelTexts).toEqual([
       STATS_I18N_FR["stats.open"],
-      STATS_I18N_FR["stats.resolved"],
+      STATS_I18N_FR["stats.closed"],
       STATS_I18N_FR["stats.bugs"],
     ]);
   });
 
   it("falls back to English when locale is unknown", () => {
-    const stats = new PanelStats(buildThemeColors(), createT("zz"));
+    const stats = new PanelStats(createT("zz"));
     document.body.appendChild(stats.element);
 
     const labels = stats.element.querySelectorAll<HTMLElement>(".sp-stats-label");
@@ -92,7 +92,7 @@ describe("PanelStats", () => {
   });
 
   it("hides the bar when total === 0", () => {
-    const stats = new PanelStats(buildThemeColors(), createT("en"));
+    const stats = new PanelStats(createT("en"));
     document.body.appendChild(stats.element);
 
     // Force-show first, then call with total=0 to verify hiding
@@ -103,7 +103,7 @@ describe("PanelStats", () => {
   });
 
   it("shows the bar and updates open/resolved/bug counts", () => {
-    const stats = new PanelStats(buildThemeColors(), createT("en"));
+    const stats = new PanelStats(createT("en"));
     document.body.appendChild(stats.element);
 
     stats.update(
@@ -125,8 +125,8 @@ describe("PanelStats", () => {
     expect(values[2]!.textContent).toBe("2");
   });
 
-  it("buckets in_progress as open and wont_fix as resolved (binary client view)", () => {
-    const stats = new PanelStats(buildThemeColors(), createT("en"));
+  it("buckets in_progress as open and wont_fix as closed, never as resolved (#302)", () => {
+    const stats = new PanelStats(createT("en"));
     document.body.appendChild(stats.element);
 
     stats.update(
@@ -140,7 +140,7 @@ describe("PanelStats", () => {
     );
 
     const values = stats.element.querySelectorAll<HTMLElement>(".sp-stats-value");
-    // open bucket = open + in_progress, resolved bucket = resolved + wont_fix
+    // open bucket = open + in_progress, closed bucket = resolved + wont_fix
     expect(values[0]!.textContent).toBe("2");
     expect(values[1]!.textContent).toBe("2");
 
@@ -149,8 +149,21 @@ describe("PanelStats", () => {
     expect(fill.style.width).toBe("50%");
   });
 
-  it("computes the percentage resolved relative to visible feedbacks", () => {
-    const stats = new PanelStats(buildThemeColors(), createT("en"));
+  it("never reports declined requests as resolved (#302)", () => {
+    const stats = new PanelStats(createT("fr"));
+    document.body.appendChild(stats.element);
+
+    stats.update([makeFeedback({ id: "1", status: "wont_fix" }), makeFeedback({ id: "2", status: "wont_fix" })], 2);
+
+    const labels = Array.from(stats.element.querySelectorAll(".sp-stats-label"), (el) => el.textContent);
+    expect(labels[1]).toBe("Clôturés");
+    const label = stats.element.querySelector<HTMLElement>(".sp-stats-progress-label")!;
+    expect(label.textContent).toBe("100% clôturés");
+    expect(stats.element.textContent).not.toMatch(/[Rr]ésolu/);
+  });
+
+  it("computes the percentage closed relative to visible feedbacks", () => {
+    const stats = new PanelStats(createT("en"));
     document.body.appendChild(stats.element);
 
     stats.update(
@@ -168,11 +181,11 @@ describe("PanelStats", () => {
 
     const label = stats.element.querySelector<HTMLElement>(".sp-stats-progress-label")!;
     expect(label.textContent).toContain("50%");
-    expect(label.textContent).toContain("resolved");
+    expect(label.textContent).toContain("closed");
   });
 
   it("renders 0% when feedbacks is empty but total > 0 (filtered out)", () => {
-    const stats = new PanelStats(buildThemeColors(), createT("en"));
+    const stats = new PanelStats(createT("en"));
     document.body.appendChild(stats.element);
 
     stats.update([], 5);
@@ -190,18 +203,18 @@ describe("PanelStats", () => {
   });
 
   it("uses the French progress text when locale='fr'", () => {
-    const stats = new PanelStats(buildThemeColors(), createT("fr"));
+    const stats = new PanelStats(createT("fr"));
     document.body.appendChild(stats.element);
 
     stats.update([makeFeedback({ status: "resolved" })], 1);
 
     const label = stats.element.querySelector<HTMLElement>(".sp-stats-progress-label")!;
     expect(label.textContent).toContain("100%");
-    expect(label.textContent).toContain("résolus");
+    expect(label.textContent).toContain("clôturés");
   });
 
   it("rounds percentages (e.g., 1/3 -> 33%)", () => {
-    const stats = new PanelStats(buildThemeColors(), createT("en"));
+    const stats = new PanelStats(createT("en"));
     document.body.appendChild(stats.element);
 
     stats.update(

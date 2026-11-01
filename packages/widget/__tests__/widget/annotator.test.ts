@@ -132,8 +132,9 @@ vi.mock(new URL("../../src/screenshot.js", import.meta.url).pathname, () => ({
 
 // Mock anchor helpers to avoid @medv/finder dependency in jsdom
 vi.mock(new URL("../../src/dom/anchor.js", import.meta.url).pathname, () => ({
-  // No shadow roots here: the hit test is the document's own
-  deepElementFromPoint: vi.fn((x: number, y: number) => document.elementFromPoint(x, y)),
+  // No shadow roots here: the hit test is the document's own. jsdom has no
+  // elementFromPoint: the suites that need a hit stub it, the others get none.
+  deepElementFromPoint: vi.fn((x: number, y: number) => document.elementFromPoint?.(x, y) ?? null),
   findAnchorElement: vi.fn().mockReturnValue(document.body),
   generateAnchor: vi.fn().mockReturnValue({
     cssSelector: "body",
@@ -151,6 +152,7 @@ vi.mock(new URL("../../src/dom/anchor.js", import.meta.url).pathname, () => ({
 
 import { Annotator } from "../../src/annotator.js";
 import { deepElementFromPoint, generateAnchor } from "../../src/dom/anchor.js";
+import { Popup } from "../../src/popup.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -433,7 +435,9 @@ describe("Annotator", () => {
       window.requestAnimationFrame = origRAF;
     });
 
-    it("rejects mouse drag smaller than 10px in width", async () => {
+    // A drag under 10px on either axis points at the element under the pointer
+    // ("click on an element" tests below); with nothing there, no form opens.
+    it("draws no rectangle from a drag narrower than 10px, with nothing under the pointer", async () => {
       bus.emit("annotation:start");
 
       const listener = vi.fn();
@@ -450,7 +454,7 @@ describe("Annotator", () => {
       });
     });
 
-    it("rejects mouse drag smaller than 10px in height", async () => {
+    it("draws no rectangle from a drag shorter than 10px, with nothing under the pointer", async () => {
       bus.emit("annotation:start");
 
       const listener = vi.fn();
@@ -1315,6 +1319,59 @@ describe("Annotator", () => {
       expect(completeListener).toHaveBeenCalledOnce();
     });
 
+    it("freezes the toolbar Cancel while a submission is in flight, then restores it (#397)", async () => {
+      popupMocks.keepShowPending = true;
+      const completeListener = vi.fn();
+      bus.on("annotation:complete", completeListener);
+
+      bus.emit("annotation:start");
+      const overlay = findOverlay()!;
+      const cancelBtn = Array.from(document.body.querySelectorAll("button")).find(
+        (btn) => btn.textContent === t("annotator.cancel"),
+      )!;
+      const restingBorder = cancelBtn.style.borderColor;
+      expect(cancelBtn.hasAttribute("aria-disabled")).toBe(false);
+
+      overlay.dispatchEvent(new MouseEvent("mousedown", { clientX: 50, clientY: 50, bubbles: true }));
+      overlay.dispatchEvent(new MouseEvent("mouseup", { clientX: 200, clientY: 150, bubbles: true }));
+      await vi.waitFor(() => {
+        expect(completeListener).toHaveBeenCalledOnce();
+      });
+
+      // In flight: dimmed, marked disabled, and no red hover.
+      expect(cancelBtn.getAttribute("aria-disabled")).toBe("true");
+      expect(cancelBtn.style.opacity).toBe("0.5");
+      cancelBtn.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+      expect(cancelBtn.style.borderColor).toBe(restingBorder);
+
+      // Settled: back to an active button.
+      bus.emit("feedback:error", new Error("offline"));
+      await popupMocks.lastSubmitPromise?.catch(() => {});
+      expect(cancelBtn.hasAttribute("aria-disabled")).toBe(false);
+      expect(cancelBtn.style.opacity).toBe("1");
+      cancelBtn.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+      expect(cancelBtn.style.borderColor).not.toBe(restingBorder);
+    });
+
+    it("settles a submission whose failed send was queued as accepted, so the popup closes (#308)", async () => {
+      popupMocks.keepShowPending = true;
+      const completeListener = vi.fn();
+      bus.on("annotation:complete", completeListener);
+
+      bus.emit("annotation:start");
+      const overlay = findOverlay()!;
+      overlay.dispatchEvent(new MouseEvent("mousedown", { clientX: 50, clientY: 50, bubbles: true }));
+      overlay.dispatchEvent(new MouseEvent("mouseup", { clientX: 200, clientY: 150, bubbles: true }));
+      await vi.waitFor(() => {
+        expect(completeListener).toHaveBeenCalledOnce();
+      });
+
+      // The launcher's order: saved for the next page load, then the error for the host.
+      bus.emit("feedback:queued");
+      bus.emit("feedback:error", new Error("offline"));
+      await expect(popupMocks.lastSubmitPromise).resolves.toBeUndefined();
+    });
+
     it("ignores keyboard Enter annotation while a submission is in flight", async () => {
       popupMocks.keepShowPending = true;
 
@@ -1853,6 +1910,38 @@ describe("Annotator on touch screens", () => {
     expect(popupMocks.lastRect).toMatchObject({ x: 10, y: 600, width: 200, height: 40 });
   });
 
+  it("a mouse click on an element comments on it, like a tap (#305)", async () => {
+    const target = pageElement();
+    document.elementFromPoint = vi.fn(() => target);
+    const complete = vi.fn();
+    bus.on("annotation:complete", complete);
+
+    bus.emit("annotation:start");
+    const overlay = findOverlay()!;
+    overlay.dispatchEvent(new MouseEvent("mousedown", { clientX: 60, clientY: 620, bubbles: true }));
+    overlay.dispatchEvent(new MouseEvent("mouseup", { clientX: 62, clientY: 621, bubbles: true }));
+
+    await vi.waitFor(() => expect(complete).toHaveBeenCalledOnce());
+    expect(document.elementFromPoint).toHaveBeenCalledWith(62, 621);
+    expect(generateAnchor).toHaveBeenCalledWith(target);
+    expect(complete.mock.calls[0]![0].annotation.rect).toEqual({ xPct: 0, yPct: 0, wPct: 1, hPct: 1 });
+    expect(popupMocks.lastRect).toMatchObject({ x: 10, y: 600, width: 200, height: 40 });
+  });
+
+  it("a mouse drag too thin to frame an area comments on the element under the pointer (#305)", async () => {
+    const target = pageElement();
+    document.elementFromPoint = vi.fn(() => target);
+
+    bus.emit("annotation:start");
+    const overlay = findOverlay()!;
+    // 200×6 px along a line of text
+    overlay.dispatchEvent(new MouseEvent("mousedown", { clientX: 20, clientY: 620, bubbles: true }));
+    overlay.dispatchEvent(new MouseEvent("mouseup", { clientX: 220, clientY: 626, bubbles: true }));
+
+    await vi.waitFor(() => expect(popupMocks.showCount).toBe(1));
+    expect(generateAnchor).toHaveBeenCalledWith(target);
+  });
+
   it("a second tap while the form is open does not open another one (#163)", async () => {
     popupMocks.keepShowPending = true;
     const target = pageElement();
@@ -2001,5 +2090,38 @@ describe("Annotator on touch screens", () => {
       await vi.waitFor(() => expect(screenshotMocks.captureAnnotatedScreenshot).toHaveBeenCalledOnce());
       expect(screenshotMocks.captureAnnotatedScreenshot.mock.calls[0]![0]).toMatchObject({ x: 10, y: 444 });
     });
+  });
+});
+
+describe("Annotator.restyle (an auto theme following the OS)", () => {
+  let annotator: Annotator;
+  let bus: EventBus<WidgetEvents>;
+
+  beforeEach(() => {
+    popupMocks.isOpenState = false;
+    popupMocks.destroyCount = 0;
+    vi.mocked(Popup).mockClear();
+    ({ annotator, bus } = createAnnotator());
+  });
+
+  afterEach(() => {
+    annotator.destroy();
+  });
+
+  it("rebuilds the popup from the palette right away when no session runs", () => {
+    annotator.restyle();
+    expect(popupMocks.destroyCount).toBe(1);
+    expect(Popup).toHaveBeenCalledTimes(2);
+  });
+
+  it("waits for the session to end before rebuilding it", () => {
+    bus.emit("annotation:start");
+    annotator.restyle();
+    expect(popupMocks.destroyCount).toBe(0);
+    expect(Popup).toHaveBeenCalledTimes(1);
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(popupMocks.destroyCount).toBe(1);
+    expect(Popup).toHaveBeenCalledTimes(2);
   });
 });

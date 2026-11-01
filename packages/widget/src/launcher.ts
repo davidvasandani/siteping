@@ -6,32 +6,41 @@ import {
   isValidEmail,
   type PageScope,
   type SitepingConfig,
+  type SitepingIdentity,
   type SitepingInstance,
   type SitepingPublicEventListener,
   type SitepingPublicEvents,
 } from "@siteping/core";
 import { Annotator } from "./annotator.js";
-import { ApiClient, flushRetryQueue, type WidgetClient } from "./api-client.js";
+import { ApiClient, flushRetryQueue, queueOutcome, type WidgetClient } from "./api-client.js";
 import { DEFAULT_MIN_VIEWPORT_WIDTH, PAGE_SIZE, Z_INDEX_MAX } from "./constants.js";
 import { ConsoleBuffer } from "./diagnostics/console-buffer.js";
 import { NetworkBuffer } from "./diagnostics/network-buffer.js";
 import { EventBus, type WidgetEvents } from "./events.js";
 import { Fab } from "./fab.js";
 import { createFocusTracker } from "./focus-tracker.js";
-import { installHostIsolationGuard, isolateFromHost, registerEscapeLayer } from "./host-isolation.js";
+import {
+  addSurfaceKeydownListener,
+  installHostIsolationGuard,
+  isolateFromHost,
+  registerEscapeLayer,
+} from "./host-isolation.js";
 import { createT, loadLocale, type TFunction } from "./i18n/index.js";
-import { getIdentity, type Identity, saveIdentity } from "./identity.js";
+import { getIdentity, saveIdentity } from "./identity.js";
 import { MarkerManager } from "./markers.js";
 import { ownFeedback } from "./own-feedback.js";
 import type { Panel as PanelType } from "./panel.js";
 import { StoreClient } from "./store-client.js";
 import { buildStyles } from "./styles/base.js";
-import { buildThemeColors } from "./styles/theme.js";
+import { buildThemeColors, watchColorScheme } from "./styles/theme.js";
 import { Tooltip } from "./tooltip.js";
 import { trackKeyboardInset } from "./viewport.js";
 
-/** Singleton guard — prevents duplicate widgets from overlapping */
-let instance: SitepingInstance | null = null;
+/**
+ * Singleton guard — prevents duplicate widgets from overlapping. Set while a
+ * widget is live: hands a duplicate `launch()` a new handle over it.
+ */
+let acquire: (() => SitepingInstance) | null = null;
 
 interface NormalisedDiagnostics {
   console: boolean;
@@ -72,7 +81,7 @@ function skippedInstance(): SitepingInstance {
     destroy: noop,
     open: noop,
     close: noop,
-    refresh: noop,
+    refresh: () => Promise.resolve(),
     focusFeedback: () => false,
     on: () => noop,
     off: noop,
@@ -93,7 +102,8 @@ function skippedInstance(): SitepingInstance {
  *   inlining — do not reintroduce them.
  * - No `typeof process` gate: it would return before a consumer-inlined
  *   constant is reached. Plain browsers without `process` (script-tag usage)
- *   land in the catch instead. Runtime environments with a real `process`
+ *   land in the catch instead, and `isLocalPage()` decides. Runtime
+ *   environments with a real `process`
  *   (Node/SSR, E2E's `globalThis.process = { env: { NODE_ENV: 'test' } }`)
  *   read it live.
  *
@@ -107,6 +117,17 @@ function readNodeEnv(): string | undefined {
     // No `process` global (plain browser) or restricted access — no signal
     return undefined;
   }
+}
+
+/**
+ * Whether the page runs on the developer's own machine: what "development"
+ * means when there is no NODE_ENV signal — a `<script>` embed, or a bundler
+ * that defines none (#313). Localhost and its subdomains, the loopback
+ * addresses, and a page opened from a file (empty hostname).
+ */
+function isLocalPage(): boolean {
+  const host = location.hostname;
+  return host === "" || host === "localhost" || host.endsWith(".localhost") || host === "127.0.0.1" || host === "[::1]";
 }
 
 interface NormalisedDeepLink {
@@ -152,18 +173,23 @@ export function launch(config: SitepingConfig): SitepingInstance {
     : () => {};
 
   // Guard: prevent duplicate initSiteping() calls
-  if (instance) {
+  if (acquire) {
     log("initSiteping() called more than once — returning existing instance");
-    return instance;
+    return acquire();
   }
 
   // Guard: only show in development (forceShow bypasses). Uses readNodeEnv()
   // instead of the literal `process.env.NODE_ENV` — avoids both bundler
   // constant-folding (#104) and "Critical dependency" import.meta warnings
-  // in Next.js webpack builds.
-  if (!config.forceShow && readNodeEnv() === "production") {
+  // in Next.js webpack builds. Without any NODE_ENV signal, the page's host
+  // decides: a `<script>` embed on a public site stays hidden, like a
+  // production build, instead of showing to every visitor (#313).
+  const nodeEnv = readNodeEnv();
+  if (!config.forceShow && (nodeEnv === "production" || (nodeEnv === undefined && !isLocalPage()))) {
     const reason = "production";
-    console.info("[siteping] Widget not loaded: production mode detected. Use forceShow: true to override.");
+    console.info(
+      "[siteping] Widget not loaded: production build, or a public page without NODE_ENV. Use forceShow: true to override.",
+    );
     config.onSkip?.(reason);
     return skippedInstance();
   }
@@ -249,7 +275,13 @@ export function launch(config: SitepingConfig): SitepingInstance {
 
   const colors = buildThemeColors(config.accentColor, config.theme);
   const bus = new EventBus<WidgetEvents>();
-  const publicBus = new EventBus<SitepingPublicEvents>();
+  // One public bus per handle (see `handle()` below): destroying a handle
+  // drops the listeners subscribed through it, and the same function
+  // subscribed through two handles stays two independent subscriptions.
+  const publicBuses = new Set<EventBus<SitepingPublicEvents>>();
+  const publish = <K extends keyof SitepingPublicEvents>(event: K, ...args: SitepingPublicEvents[K]): void => {
+    for (const publicBus of publicBuses) publicBus.emit(event, ...args);
+  };
 
   // Client-side mode (store) vs HTTP mode (endpoint).
   // The earlier guard guarantees one of `store` / `endpoint` is set; we
@@ -288,14 +320,14 @@ export function launch(config: SitepingConfig): SitepingInstance {
   // without bridging it here is a compile error, so `instance.on` can never
   // silently miss an event.
   const publicBridges: { [K in keyof SitepingPublicEvents]: () => void } = {
-    "feedback:sent": () => bus.on("feedback:sent", (fb) => publicBus.emit("feedback:sent", fb)),
-    "feedback:deleted": () => bus.on("feedback:deleted", (id) => publicBus.emit("feedback:deleted", id)),
-    "comment:added": () => bus.on("comment:added", (comment) => publicBus.emit("comment:added", comment)),
-    "feedback:error": () => bus.on("feedback:error", (err) => publicBus.emit("feedback:error", err)),
-    "panel:open": () => bus.on("open", () => publicBus.emit("panel:open")),
-    "panel:close": () => bus.on("close", () => publicBus.emit("panel:close")),
-    "annotation:start": () => bus.on("annotation:start", () => publicBus.emit("annotation:start")),
-    "annotation:end": () => bus.on("annotation:end", () => publicBus.emit("annotation:end")),
+    "feedback:sent": () => bus.on("feedback:sent", (fb) => publish("feedback:sent", fb)),
+    "feedback:deleted": () => bus.on("feedback:deleted", (id) => publish("feedback:deleted", id)),
+    "comment:added": () => bus.on("comment:added", (comment) => publish("comment:added", comment)),
+    "feedback:error": () => bus.on("feedback:error", (err) => publish("feedback:error", err)),
+    "panel:open": () => bus.on("open", () => publish("panel:open")),
+    "panel:close": () => bus.on("close", () => publish("panel:close")),
+    "annotation:start": () => bus.on("annotation:start", () => publish("annotation:start")),
+    "annotation:end": () => bus.on("annotation:end", () => publish("annotation:end")),
   };
   for (const wire of Object.values(publicBridges)) wire();
 
@@ -317,17 +349,21 @@ export function launch(config: SitepingConfig): SitepingInstance {
   const shadowMode = readNodeEnv() === "test" ? ("open" as const) : ("closed" as const);
   const shadow = host.attachShadow({ mode: shadowMode });
 
-  // Inject styles into Shadow DOM — adoptedStyleSheets with fallback for Safari < 16.4
-  const supportsAdoptedStyleSheets = "adoptedStyleSheets" in ShadowRoot.prototype;
-  if (supportsAdoptedStyleSheets) {
+  // Inject styles into Shadow DOM — adoptedStyleSheets with fallback for Safari < 16.4.
+  // `paint()` writes them from `colors`, again whenever an `auto` theme flips.
+  let paint: () => void;
+  if ("adoptedStyleSheets" in ShadowRoot.prototype) {
     const sheet = new CSSStyleSheet();
-    sheet.replaceSync(buildStyles(colors));
     shadow.adoptedStyleSheets = [sheet];
+    paint = () => sheet.replaceSync(buildStyles(colors));
   } else {
     const style = document.createElement("style");
-    style.textContent = buildStyles(colors);
     shadow.appendChild(style);
+    paint = () => {
+      style.textContent = buildStyles(colors);
+    };
   }
+  paint();
 
   isolateFromHost(host, shadow);
   const removeHostIsolationGuard = installHostIsolationGuard();
@@ -352,6 +388,28 @@ export function launch(config: SitepingConfig): SitepingInstance {
   // A host modal's `aria-hidden` / `inert` would silence the announcements.
   isolateFromHost(liveRegion);
   document.body.appendChild(liveRegion);
+
+  // A submission's outcome, visible too (#308): the live region announces it
+  // and this toast shows it, `aria-hidden` so it is read once. A tap hides it.
+  const toast = document.createElement("div");
+  toast.className = "sp-toast";
+  toast.setAttribute("aria-hidden", "true");
+  toast.hidden = true;
+  let toastTimer: ReturnType<typeof setTimeout> | undefined;
+  const hideToast = () => {
+    clearTimeout(toastTimer);
+    toast.hidden = true;
+  };
+  toast.addEventListener("click", hideToast);
+  shadow.appendChild(toast);
+  const notify = (text: string, failed: boolean) => {
+    liveRegion.textContent = text;
+    toast.textContent = text;
+    toast.classList.toggle("sp-toast--error", failed);
+    toast.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(hideToast, failed ? 8000 : 4000);
+  };
 
   // Components outside Shadow DOM
   const tooltip = new Tooltip(colors, locale);
@@ -389,7 +447,7 @@ export function launch(config: SitepingConfig): SitepingInstance {
    * stays the source of truth on every render. `overPopup`: the feedback
    * popup is on screen (see `promptIdentity`).
    */
-  async function resolveIdentity(overPopup = false): Promise<Identity | null> {
+  async function resolveIdentity(overPopup = false): Promise<SitepingIdentity | null> {
     const known = config.identity ?? getIdentity();
     if (known) return known;
     const entered = await promptIdentity(shadow, t, overPopup);
@@ -584,14 +642,20 @@ export function launch(config: SitepingConfig): SitepingInstance {
         if (!scopeAnnotationsByUrl || response.url === scope.url) {
           markers.addFeedback(response, markers.count + 1);
         }
-        liveRegion.textContent = t("feedback.sent.confirmation");
+        notify(t("feedback.sent.confirmation"), false);
         // Only refresh the panel if it has been loaded — `refresh()` is a
         // no-op when the panel is closed, so skipping the dynamic import here
         // avoids loading 14 KB of code that would otherwise do nothing.
         if (panelInstance) await panelInstance.refresh();
       } catch (error) {
+        // Saved for the next page load: the popup closes as on success (the
+        // queued event first, so the annotator settles before the error),
+        // and the host still hears about the failure. Otherwise — refused,
+        // or not even saved — the form stays for a retry.
+        const queued = queueOutcome(error);
+        if (queued) bus.emit("feedback:queued");
         bus.emit("feedback:error", error instanceof Error ? error : new Error(String(error)));
-        liveRegion.textContent = t("feedback.error.message");
+        notify(t(queued ? "feedback.queued" : "feedback.error.message"), !queued);
       }
     } finally {
       submitting = false;
@@ -630,6 +694,17 @@ export function launch(config: SitepingConfig): SitepingInstance {
             log(
               `deepLink ?${deepLinkOpts.param}=${focusId} ${matched ? "focused" : "did not match a visible feedback"}`,
             );
+            // A link to a feedback — "Open on page", a reply notification —
+            // opens its detail view too, where its thread is (#381).
+            if (matched) {
+              loadPanel()
+                .then(async (panel) => {
+                  if (!panel || destroyed) return;
+                  await panel.open();
+                  panel.showFeedback(focusId);
+                })
+                .catch((err) => log("deepLink could not open the feedback:", err));
+            }
           }
         } catch (e) {
           log("deepLink parsing failed:", e);
@@ -680,6 +755,21 @@ export function launch(config: SitepingConfig): SitepingInstance {
       markers.render(visible);
     });
   };
+
+  // `auto` follows the OS color scheme live, as the dashboard's does: the
+  // palette is re-derived in place (every component holds this one object),
+  // then the shadow styles, the tooltip and the comment popup are repainted,
+  // and a refresh re-renders pins and the open panel from it.
+  const stopFollowingScheme =
+    config.theme === "auto"
+      ? watchColorScheme(() => {
+          Object.assign(colors, buildThemeColors(config.accentColor, "auto"));
+          paint();
+          tooltip.restyle();
+          annotator.restyle();
+          void doRefresh().catch(() => {});
+        })
+      : undefined;
 
   // SPA route-change watcher. The widget is normally mounted once (singleton)
   // inside a persistent layout — e.g. a Next.js App Router `layout.tsx`, which
@@ -740,12 +830,9 @@ export function launch(config: SitepingConfig): SitepingInstance {
     };
   }
 
-  const self: SitepingInstance = {
+  const self: Omit<SitepingInstance, "on" | "off"> = {
+    // Runs once, when the last live handle is destroyed (see `handle()`).
     destroy: () => {
-      // Idempotent: hosts can hold stale handles (two `useSiteping` consumers
-      // share the singleton), and a repeat call must not tear anything down
-      // again — least of all a newer widget's singleton slot below.
-      if (destroyed) return;
       log("Destroying widget");
       if (onContextMenu) {
         document.removeEventListener("contextmenu", onContextMenu);
@@ -753,6 +840,7 @@ export function launch(config: SitepingConfig): SitepingInstance {
       destroyed = true;
       pendingOpen = false;
       teardownNavigation?.();
+      stopFollowingScheme?.();
       focusTracker.destroy();
       unsubAnnotation();
       unsubToggle();
@@ -766,13 +854,13 @@ export function launch(config: SitepingConfig): SitepingInstance {
       consoleBuffer?.dispose();
       networkBuffer?.dispose();
       bus.removeAll();
-      publicBus.removeAll();
+      clearTimeout(toastTimer);
       liveRegion.remove();
       host.remove();
       // Last: the teardown above moves focus out of the widget (popup focus
       // restore), which a host modal's focus trap must not see either.
       removeHostIsolationGuard();
-      if (instance === self) instance = null;
+      acquire = null;
     },
     open: () => {
       // Emit synchronously so consumers wired through `onOpen` / `panel:open`
@@ -797,18 +885,48 @@ export function launch(config: SitepingConfig): SitepingInstance {
       return markers.focusFeedback(feedbackId);
     },
     // Public API must never reject onto the host — swallow the promise.
-    refresh: () => {
-      void doRefresh().catch(() => {});
-    },
-    on: <K extends keyof SitepingPublicEvents>(event: K, listener: SitepingPublicEventListener<K>) =>
-      publicBus.on(event, listener),
-    off: <K extends keyof SitepingPublicEvents>(event: K, listener: SitepingPublicEventListener<K>) => {
-      publicBus.off(event, listener);
-    },
+    refresh: () => doRefresh().catch(() => {}),
   };
 
-  instance = self;
-  return self;
+  // Reference counting (#366): every launch() returns its own handle over the
+  // one widget (two `useSiteping` consumers, a layout and a page), and the
+  // widget tears down when the last handle is destroyed, so unmounting one
+  // component can't remove a widget another one still uses. A destroyed
+  // handle goes inert and drops its listeners; destroying it again is a
+  // no-op, never a second release, so a stale handle can't reach a newer
+  // widget either.
+  let refs = 0;
+  const handle = (): SitepingInstance => {
+    const publicBus = new EventBus<SitepingPublicEvents>();
+    let live = true;
+    refs++;
+    publicBuses.add(publicBus);
+    return {
+      destroy: () => {
+        if (!live) return;
+        live = false;
+        publicBuses.delete(publicBus);
+        if (--refs === 0) self.destroy();
+      },
+      open: () => {
+        if (live) self.open();
+      },
+      close: () => {
+        if (live) self.close();
+      },
+      refresh: () => (live ? self.refresh() : Promise.resolve()),
+      focusFeedback: (feedbackId: string) => live && self.focusFeedback(feedbackId),
+      // Once released, the handle's bus no longer receives events.
+      on: <K extends keyof SitepingPublicEvents>(event: K, listener: SitepingPublicEventListener<K>) =>
+        publicBus.on(event, listener),
+      off: <K extends keyof SitepingPublicEvents>(event: K, listener: SitepingPublicEventListener<K>) => {
+        publicBus.off(event, listener);
+      },
+    };
+  };
+
+  acquire = handle;
+  return handle();
 }
 
 /**
@@ -817,7 +935,7 @@ export function launch(config: SitepingConfig): SitepingInstance {
  * on phones (`styles/mobile.ts`), lifted above the on-screen keyboard.
  * Returns null if the user cancels.
  */
-function promptIdentity(shadowRoot: ShadowRoot, t: TFunction, overPopup: boolean): Promise<Identity | null> {
+function promptIdentity(shadowRoot: ShadowRoot, t: TFunction, overPopup: boolean): Promise<SitepingIdentity | null> {
   return new Promise((resolve) => {
     // Save the currently focused element to restore on close
     const previouslyFocused = (shadowRoot.activeElement ?? document.activeElement) as HTMLElement | null;
@@ -882,8 +1000,8 @@ function promptIdentity(shadowRoot: ShadowRoot, t: TFunction, overPopup: boolean
     // The phone sheet sits at the bottom edge — keep it above the keyboard.
     const stopKeyboardTracking = trackKeyboardInset((inset) => modal.style.setProperty("--sp-kb", `${inset}px`));
 
-    const closeModal = (result: Identity | null) => {
-      backdrop.removeEventListener("keydown", onKeydown);
+    const closeModal = (result: SitepingIdentity | null) => {
+      removeKeydown();
       unregisterEscapeLayer();
       stopKeyboardTracking();
       backdrop.classList.remove("sp-identity--open");
@@ -926,8 +1044,7 @@ function promptIdentity(shadowRoot: ShadowRoot, t: TFunction, overPopup: boolean
 
     // Focus trap: cycle Tab/Shift+Tab within the modal
     const focusableSelectors = 'input, button, [tabindex]:not([tabindex="-1"])';
-    const onKeydown = (e: Event) => {
-      const ke = e as KeyboardEvent;
+    const onKeydown = (ke: KeyboardEvent) => {
       if (ke.key === "Escape") {
         // Cancel the prompt only — opened from a thread, the panel's detail view stays.
         ke.stopPropagation();
@@ -954,7 +1071,7 @@ function promptIdentity(shadowRoot: ShadowRoot, t: TFunction, overPopup: boolean
         }
       }
     };
-    backdrop.addEventListener("keydown", onKeydown);
+    const removeKeydown = addSurfaceKeydownListener(backdrop, onKeydown);
     const unregisterEscapeLayer = registerEscapeLayer(backdrop, () => true);
 
     // Close on backdrop click

@@ -1,6 +1,6 @@
 {
   "name": "@siteping/server",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Store- and framework-agnostic HTTP handler for Siteping — any SitepingStore behind one Fetch API endpoint",
   "type": "module",
   "sideEffects": false,
@@ -14,13 +14,15 @@
         "types": "./dist/index.d.cts",
         "default": "./dist/index.cjs"
       }
-    }
+    },
+    "./openapi.json": "./openapi.json"
   },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "files": [
-    "dist"
+    "dist",
+    "openapi.json"
   ],
   "scripts": {
     "build": "tsup && node ../../scripts/fix-dts.mjs dist",
@@ -52,15 +54,15 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "dependencies": {
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@siteping/adapter-memory": "workspace:*",
     "@siteping/core": "workspace:*",
-    "better-auth": "^1.7.9",
-    "jose": "^6.2.12"
+    "better-auth": "^1.7.12",
+    "jose": "^6.2.13"
   }
 }

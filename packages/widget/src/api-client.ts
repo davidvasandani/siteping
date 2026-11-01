@@ -12,12 +12,13 @@ import {
   mergeRequestHeaders,
   networkErrorFromException,
   type Prettify,
+  SitepingAuthError,
   SitepingError,
   type SitepingHeadersOption,
+  type SitepingIdentity,
   SitepingNetworkError,
   withSearchParams,
 } from "@siteping/core";
-import type { Identity } from "./identity.js";
 import { ownFeedback } from "./own-feedback.js";
 
 /**
@@ -54,6 +55,19 @@ export interface ApiClientAuth {
 
 const MAX_RETRIES = 3;
 const TIMEOUT_MS = 10_000;
+/**
+ * Longest `Retry-After` waited out while a call is in flight (the popup holds
+ * the visitor meanwhile). A longer one ends the retries at once: a send is
+ * queued for the next page load, a read or a reply reports its error.
+ */
+const MAX_RETRY_AFTER_MS = 10_000;
+/**
+ * A project delete can legitimately run long — an issue tracker closing each
+ * issue, a screenshot store emptying its objects (#413) — so it gets its own
+ * window, and is never sent again after it: the server may still be running
+ * the first request.
+ */
+const DELETE_ALL_TIMEOUT_MS = 60_000;
 const RETRY_QUEUE_KEY = "siteping_retry_queue";
 const MAX_QUEUE_SIZE = 20;
 
@@ -101,15 +115,21 @@ export async function buildRequestHeaders(auth: ApiClientAuth, json: boolean): P
 
 /**
  * One HTTP call with retry + exponential backoff + jitter: each attempt is
- * aborted if its headers take more than TIMEOUT_MS. Network failures and 5xx
- * retry; the final response is read through `errorFromResponse` for a non-OK
- * status, `read` for a 2xx.
+ * aborted if its headers take more than TIMEOUT_MS. Network failures and
+ * transient statuses (5xx, 408, 429) retry, after the response's
+ * `Retry-After` when it sets one; the final response is read through
+ * `errorFromResponse` for a non-OK status, `read` for a 2xx.
  *
  * With `boundBody` (the send path, #342), the body gets its own TIMEOUT_MS
  * window under the same abort, so one that stalls after the headers errors
  * instead of holding the popup forever — a non-OK status still maps to its
  * typed error, just without the server's detail. Reads leave it unbounded:
  * a page of inline screenshots can legitimately take longer on a slow link.
+ *
+ * `timeoutMs` widens each attempt's window, and `resendOnTimeout: false`
+ * stops at an attempt that timed out instead of sending it again: a request
+ * the server may still be running must not start twice. Network failures
+ * before an answer and transient statuses keep their retries.
  *
  * Failures come out typed: a non-OK status as `errorFromResponse` maps it,
  * anything else (fetch, abort, body read or parse) as a `SitepingNetworkError`.
@@ -119,18 +139,23 @@ async function resilientFetch<T>(
   init: RequestInit,
   label: string,
   read: (response: Response) => Promise<T>,
-  { boundBody = false } = {},
+  { boundBody = false, timeoutMs = TIMEOUT_MS, resendOnTimeout = true } = {},
 ): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     const controller = new AbortController();
-    let timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    let timeout = setTimeout(() => controller.abort(), timeoutMs);
+    let delay: number;
     try {
       const response = await fetch(url, { ...init, signal: controller.signal }).catch((error: unknown) => {
-        if (attempt === MAX_RETRIES) throw networkErrorFromException(error, label);
+        if (attempt === MAX_RETRIES || (!resendOnTimeout && controller.signal.aborted)) {
+          throw networkErrorFromException(error, label);
+        }
         return null;
       });
-      // Don't retry client errors (4xx) — only server errors (5xx)
-      if (response && (response.ok || (response.status >= 400 && response.status < 500) || attempt === MAX_RETRIES)) {
+      delay = retryDelay(response, attempt);
+      // A non-transient status is the server's answer (a 2xx, or a verdict
+      // like a 400) — final, like the last attempt or a wait too long to hold.
+      if (response && (!isTransientStatus(response.status) || attempt === MAX_RETRIES || delay > MAX_RETRY_AFTER_MS)) {
         clearTimeout(timeout);
         if (boundBody) timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
         if (!response.ok) throw await errorFromResponse(response, label);
@@ -141,12 +166,19 @@ async function resilientFetch<T>(
     } finally {
       clearTimeout(timeout);
     }
-
-    // Exponential backoff with jitter: 1s, 2s, 4s + random ±500ms
-    const baseDelay = 1000 * 2 ** attempt;
-    const jitter = Math.random() * 1000 - 500;
-    await new Promise((r) => setTimeout(r, baseDelay + jitter));
+    await new Promise((r) => setTimeout(r, delay));
   }
+}
+
+/**
+ * Wait before retrying a failed attempt: the response's `Retry-After`
+ * (delta-seconds or an HTTP date) when it holds a valid one, otherwise
+ * exponential backoff with jitter — 1 s, 2 s, 4 s, ±500 ms.
+ */
+function retryDelay(response: Response | null, attempt: number): number {
+  const header = response?.headers.get("Retry-After");
+  const wait = header ? (/^\d+$/.test(header) ? Number(header) * 1000 : Date.parse(header) - Date.now()) : Number.NaN;
+  return Number.isNaN(wait) ? 1000 * 2 ** attempt + Math.random() * 1000 - 500 : Math.max(0, wait);
 }
 
 // ---------------------------------------------------------------------------
@@ -159,20 +191,21 @@ interface RetryEntry {
 }
 
 /**
- * Whether a failed submission is worth replaying later. Network failures and
- * server errors (5xx) are transient — the same payload can succeed once the
- * server is back. A 4xx is the server's verdict on the payload itself
- * (validation, auth, size…): replaying it verbatim fails identically every
- * time, so it is surfaced to the host through `onError` and never queued —
- * a queued rejection used to be replayed, and rejected, on every page load.
+ * Whether a failed submission is worth replaying later. Network failures,
+ * server errors (5xx), timeouts (408) and rate limits (429) are transient —
+ * the same payload can succeed once the server is back or has waited. Any
+ * other 4xx is the server's verdict on the payload itself (validation, auth,
+ * size…): replaying it verbatim fails identically every time, so it is
+ * surfaced to the host through `onError` and never queued — a queued
+ * rejection used to be replayed, and rejected, on every page load.
  */
-function isTransientFailure(error: unknown): boolean {
+function isTransientFailure(error: unknown): error is SitepingError {
   return error instanceof SitepingNetworkError || (error instanceof SitepingError && error.code === "SERVER");
 }
 
-/** Same verdict for a replayed request: keep 5xx for the next flush, drop 4xx for good. */
+/** Same verdict from a status: retried in flight, kept queued for the next flush — the rest is final. */
 function isTransientStatus(status: number): boolean {
-  return status >= 500;
+  return status >= 500 || status === 408 || status === 429;
 }
 
 const LOCK_NAME = "siteping_retry_queue";
@@ -223,9 +256,21 @@ function readQueue(): RetryEntry[] {
   return Array.isArray(parsed) ? parsed.filter(isRetryEntry) : [];
 }
 
-function queueForRetry(endpoint: string, payload: FeedbackPayload): void {
-  // Fire-and-forget — we don't want to block the caller on the lock
-  void withRetryLock(() => {
+/**
+ * Whether a failed send was saved for a replay on a later page load: `true`
+ * queued, `false` worth queueing but the write failed, absent when the failure
+ * is final (a 4xx) or did not come from `sendFeedback`. The widget tells the
+ * visitor which one happened.
+ */
+const queueOutcomes = new WeakMap<object, boolean>();
+
+export function queueOutcome(error: unknown): boolean | undefined {
+  return typeof error === "object" && error !== null ? queueOutcomes.get(error) : undefined;
+}
+
+/** Resolves whether the entry was persisted. */
+function queueForRetry(endpoint: string, payload: FeedbackPayload): Promise<boolean> {
+  return withRetryLock(() => {
     try {
       // A resend from the same popup reuses its clientId: replace the earlier
       // attempt so the replay carries the latest edit (the server's clientId
@@ -238,7 +283,7 @@ function queueForRetry(endpoint: string, payload: FeedbackPayload): void {
       }
 
       queue.push({ endpoint, payload });
-      if (tryWriteQueue(queue)) return;
+      if (tryWriteQueue(queue)) return true;
 
       // Quota exceeded: screenshots (base64 JPEG data URLs) dominate each
       // entry, and up to MAX_QUEUE_SIZE entries share the origin's ~5 MB
@@ -258,7 +303,7 @@ function queueForRetry(endpoint: string, payload: FeedbackPayload): void {
           console.warn(
             `[siteping] retry queue exceeded the localStorage quota — dropped the screenshot of ${stripped} of ${queue.length} queued feedback(s)`,
           );
-          return;
+          return true;
         }
       }
       while (kept.length > 1) {
@@ -269,7 +314,7 @@ function queueForRetry(endpoint: string, payload: FeedbackPayload): void {
           console.warn(
             `[siteping] retry queue exceeded the localStorage quota — dropped the ${dropped} oldest of ${queue.length} queued feedback(s)${lost > 0 ? `, and the screenshot of ${lost} of the rest` : ""}`,
           );
-          return;
+          return true;
         }
       }
       // Every write failed, so the queue already stored is left as it was.
@@ -277,7 +322,8 @@ function queueForRetry(endpoint: string, payload: FeedbackPayload): void {
     } catch {
       // localStorage unavailable — the new entry is dropped
     }
-  });
+    return false;
+  }).catch(() => false);
 }
 
 /**
@@ -338,7 +384,7 @@ function normalizeEmail(value: string): string {
  */
 export async function flushRetryQueue(
   endpoint: string,
-  currentIdentity?: Identity | null,
+  currentIdentity?: SitepingIdentity | null,
   auth: ApiClientAuth = {},
 ): Promise<void> {
   await withRetryLock(async () => {
@@ -462,6 +508,9 @@ async function parseJsonAs<T>(response: Response): Promise<T> {
 async function ignoreBody(): Promise<void> {}
 
 export class ApiClient implements WidgetClient {
+  /** Whether the console already explained a refused list (see `getFeedbacks`). */
+  private listRefusalExplained = false;
+
   constructor(
     private readonly endpoint: string,
     private readonly projectName: string,
@@ -499,7 +548,7 @@ export class ApiClient implements WidgetClient {
       // Queue the wire shape (region stripped when absent) so a later
       // flushRetryQueue replays exactly what a fresh POST would send — but
       // only when a replay can succeed (see `isTransientFailure`).
-      if (isTransientFailure(error)) queueForRetry(this.endpoint, body);
+      if (isTransientFailure(error)) queueOutcomes.set(error, await queueForRetry(this.endpoint, body));
       throw error;
     }
   }
@@ -515,7 +564,18 @@ export class ApiClient implements WidgetClient {
       { method: "GET", cache: "no-store", ...(Object.keys(headers).length > 0 ? { headers } : {}) },
       label,
       parseJsonAs<FeedbackResponseList>,
-    );
+    ).catch((error: unknown) => {
+      // With an `apiKey`, the server keeps GET behind it by default (#280): a
+      // key-less widget submits fine but never shows a pin, with nothing on
+      // screen to say why. Say it in the console, once per client.
+      if (error instanceof SitepingAuthError && !this.listRefusalExplained) {
+        this.listRefusalExplained = true;
+        console.warn(
+          `[siteping] Feedback list refused (${error.status}): with an apiKey, GET needs it unless publicEndpoints includes "GET"; pins and panel stay empty. https://siteping.dev/docs/server#the-security-model-honestly`,
+        );
+      }
+      throw error;
+    });
   }
 
   async addComment(feedbackId: string, input: CommentCreateInput): Promise<CommentResponse> {
@@ -574,6 +634,7 @@ export class ApiClient implements WidgetClient {
       },
       label,
       ignoreBody,
+      { timeoutMs: DELETE_ALL_TIMEOUT_MS, resendOnTimeout: false },
     );
   }
 }

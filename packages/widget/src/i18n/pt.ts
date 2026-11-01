@@ -18,6 +18,7 @@ export const pt: Translations = {
   "panel.retry": "Tentar novamente",
   "panel.empty": "Nenhum feedback ainda",
   "panel.showMore": "Mostrar mais",
+  "panel.notOnPage": "Não visível nesta página",
   "panel.showLess": "Mostrar menos",
   "panel.resolve": "Resolver",
   "panel.reopen": "Reabrir",
@@ -32,6 +33,7 @@ export const pt: Translations = {
   "panel.statusResolved": "Resolvido",
   "panel.statusInProgress": "Em andamento",
   "panel.statusWontFix": "Não será corrigido",
+  "panel.statusClosed": "Fechado",
 
   // Feedback type labels
   "type.label": "Tipo",
@@ -86,7 +88,7 @@ export const pt: Translations = {
 
   // Markers
   "marker.approximate": "Posição aproximada (confiança: {confidence}%)",
-  "marker.aria": "Feedback #{number}: {type} — {message}",
+  "marker.aria": "Feedback #{number}: {type}, {status} — {message}",
   "marker.count": "{count} marcadores de feedback exibidos",
 
   // FAB badge
@@ -95,13 +97,16 @@ export const pt: Translations = {
   // Accessibility — screen reader announcements
   "feedback.sent.confirmation": "Feedback enviado com sucesso",
   "feedback.error.message": "Falha ao enviar feedback",
+  "feedback.queued": "Salvo neste dispositivo. Será enviado na sua próxima visita.",
   "feedback.deleted.confirmation": "Feedback excluído",
 
   // Badge
   "badge.count": "{count} feedbacks não resolvidos",
 
   // Bulk actions toolbar
+  "bulk.aria": "Ações em massa",
   "bulk.selectAll": "Selecionar tudo",
+  "bulk.selectFeedback": "Selecionar {label}",
   "bulk.selected": "{count} selecionados",
   "bulk.resolve": "Resolver",
   "bulk.delete": "Excluir",
@@ -117,13 +122,15 @@ export const pt: Translations = {
   "group.feedbacks": "{count} feedbacks",
 
   // Stats bar
+  "stats.aria": "Estatísticas de feedbacks",
   "stats.open": "Abertos",
-  "stats.resolved": "Resolvidos",
+  "stats.closed": "Fechados",
   "stats.bugs": "Bugs",
-  "stats.progress": "{percent}% resolvidos",
+  "stats.progress": "{percent}% fechados",
 
   // Detail view
   "detail.back": "Voltar",
+  "detail.aria": "Detalhes do feedback",
   "detail.title": "Feedback #{number}",
   "detail.status": "Status",
   "detail.message": "Mensagem",

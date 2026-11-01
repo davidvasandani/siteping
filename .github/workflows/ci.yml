@@ -223,10 +223,55 @@ jobs:
         # package can never be silently skipped by this gate.
         run: bun run pkg-checks
 
+      - name: Public API surface (api/*.api.md)
+        # Same script contributors run locally (`bun run api:check`). A diff
+        # means the built public API of a 1.0 package changed: if intended,
+        # `bun run api:update` and commit the snapshot — with `!` when the
+        # change breaks consumers.
+        run: bun run api:check
+
       - name: Consistency check (locales, package registration, fix-dts chains, esbuild override, file-URL paths)
         run: bun run check:consistency
 
-  # peerDependencies promise `react >=18`, but the suite's devDeps pin React
+  # What is already on npm must keep working with this change: the published
+  # adapters against main's server (packed, strict type-check of a consumer
+  # and of the adapters' own declarations, plus a create/list round trip),
+  # and main's widget and dashboard clients against the oldest supported
+  # published server. Same script contributors run locally (`bun run skew`).
+  version-skew:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.3.11"
+
+      - name: Cache bun install
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-install-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-install-${{ runner.os }}-
+
+      - run: bun install --frozen-lockfile
+
+      # npm installs the published packages, as a consumer would.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Build the server and the dashboard
+        run: bun x turbo run build --filter=@siteping/server --filter=@siteping/dashboard
+
+      - name: Version skew (published packages vs main)
+        run: bun run skew
+
+  # peerDependencies promise React 18 and 19, but the suite's devDeps pin React
   # 19 — the oldest supported major was otherwise never exercised (same
   # failure class as the Node 20 CLI bug, #221). Overrides pin the WHOLE tree
   # to React 18 so RTL, react-dom internals and the components agree on one
@@ -271,14 +316,15 @@ jobs:
         run: ./node_modules/.bin/vitest run
 
   # bun only drives install/build — vitest and the published adapters run on
-  # the consumer's Node. Exercise the supported majors.
+  # the consumer's Node. Exercise the supported majors; the first is the
+  # packages' `engines.node` floor (check:consistency keeps them in step).
   node-compat:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        node-version: [20, 22, 24]
+        node-version: [22, 24]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -305,26 +351,5 @@ jobs:
       - name: Build
         run: bun run build
 
-      # Node 20 is past upstream EOL and the test toolchain has left it
-      # (vitest 5, jsdom 30, Babel 8 all declare engines >= 22). The published
-      # packages still promise engines >= 20, so the Node 20 lane keeps the
-      # node-environment files — core, adapters, CLI, SSR guards: what a
-      # consumer actually runs — and skips the jsdom ones, which test browser
-      # code and need the jsdom toolchain (jsdom 30 cannot start on Node 20).
       - name: Unit tests on Node ${{ matrix.node-version }}
-        env:
-          NODE_MAJOR: ${{ matrix.node-version }}
-        run: |
-          if [ "$NODE_MAJOR" != "20" ]; then
-            exec ./node_modules/.bin/vitest run
-          fi
-          # Same roots as vitest.config.ts `include`.
-          mapfile -t files < <(git grep -L '@vitest-environment jsdom' -- \
-            ':(glob)packages/**/__tests__/**/*.test.ts' \
-            ':(glob)packages/**/__tests__/**/*.test.tsx')
-          echo "Node 20 lane: ${#files[@]} node-environment test files"
-          if [ "${#files[@]}" -eq 0 ]; then
-            echo "::error::no node-environment test files matched"
-            exit 1
-          fi
-          ./node_modules/.bin/vitest run "${files[@]}"
+        run: ./node_modules/.bin/vitest run

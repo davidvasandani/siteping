@@ -5,7 +5,7 @@ Thanks for your interest in contributing! This guide covers everything you need 
 ## Prerequisites
 
 - [Bun](https://bun.sh/) **1.3.x** — the exact version is pinned in `packageManager` (root `package.json`) and used by CI. Bun 1.4 is known to break the demo build locally (symlinked `.bun` installs rejected by Turbopack — workaround: `bun install --linker=hoisted`); stick to the pinned line.
-- Node.js ^22.22.2 or >= 24.15 for development — the test and size tooling (vitest 5, jsdom 30, size-limit 14) requires it. The published packages still declare `engines.node >= 20`: CI runs the full suite on Node 22 and 24, and the node-environment tests (core, adapters, CLI — what consumers run) on Node 20
+- Node.js ^22.22.2 or >= 24.15 for development — the test and size tooling (vitest 5, jsdom 30, size-limit 14) requires it. The published packages declare `engines.node >= 22`, and CI runs the full suite on Node 22 and 24
 - For Playwright E2E tests: `bunx playwright install` — the config runs **three engines** (Chromium, Firefox, WebKit)
 
 ## Setup
@@ -27,17 +27,32 @@ bun run test:run           # run unit + type tests once
 bun run test:e2e           # run Playwright E2E tests
 bun run lint               # lint with Biome (includes the type-aware rules domain)
 bun run lint:fix           # auto-fix lint issues
-bun run verify             # build + check + lint + test:run — the full pre-PR gate
+bun run verify             # build + api:check + check + lint + test:run — the full pre-PR gate
 bun run pkg-checks         # publint + attw on every published package (same script CI runs)
+bun run api:check          # built public API of the 1.0 packages vs api/*.api.md (see Public API snapshots)
+bun run api:update         # rewrite api/*.api.md from the build, after an intended API change
 bun run check:consistency  # locale counts/lists + demo pickers, package registration, fix-dts chains, esbuild override,
                            # fileURLToPath in tooling, no @prisma/client import in adapter-prisma, workspace dependencies
-                           # pinned before publish
+                           # pinned before publish, one Node floor (engines, CI, publish jobs, demo image, docs)
 bun run knip               # dead files / exports / dependencies
+bun run skew               # published packages vs this change, both ways (needs a build and npm, see below)
 bun run new:locale <code>  # scaffold a new built-in locale (see Adding a Locale)
 bun run new:adapter <name> # scaffold a new first-party adapter (see Creating a New Adapter)
 ```
 
 Run `bun run verify` before submitting a PR — it is exactly what CI enforces.
+
+CI also runs `bun run skew`, left out of `verify` because it needs the npm
+registry. It checks what is already on npm against your change: the latest
+published adapters against `main`'s `@siteping/server` (a strict type-check of
+a consumer and of the adapters' own declarations, plus a create-and-list round
+trip), and the widget and dashboard clients against the oldest supported
+server (`MINIMUM_SERVER` in `scripts/version-skew.mjs`: the latest release
+until 1.0). A failure names the published package and the step that broke.
+Keep the old shape — deprecate instead of removing, add optional members,
+feature-detect in the clients. A deliberate break is a `!` commit that lists
+the published version it breaks in the script's `KNOWN_BREAKS`, until the
+fixed release reaches npm.
 
 > **WSL note:** if a local `vitest` run hangs or balloons in memory, use the
 > real binary (`./node_modules/.bin/vitest run`) rather than `bunx vitest`
@@ -128,7 +143,7 @@ is the smallest). The pieces that matter:
 1. **`package.json`** — copy from a real adapter, not from memory. The
    critical parts the old hand-written template used to miss: the dual
    `import`/`require` exports map with per-condition `types`, `sideEffects: false`,
-   `publishConfig.access: public`, `engines.node >= 20`, and the build script
+   `publishConfig.access: public`, `engines.node >= 22`, and the build script
    **must** chain fix-dts: `"build": "tsup && node ../../scripts/fix-dts.mjs dist"`
    (`bun run check:consistency` fails if it's missing). `@siteping/core` is a
    `devDependency`, never a `dependency` — it is bundled at build time and not
@@ -195,7 +210,7 @@ Two implementation strategies:
   comment; `buildFeedbackRecord` leaves `comments` out, so a store with
   threads adds `comments: []` to the record it returns).
 
-Verify with the shared conformance suite (~67 tests — the scaffold pre-wires
+Verify with the shared conformance suite (~70 tests — the scaffold pre-wires
 this file):
 
 ```ts
@@ -302,6 +317,29 @@ a regression test. `packages/core/__tests__/filters.property.test.ts` is the
 worked example: it caught a pagination bug that only surfaced for a
 non-positive page number, which no hand-written case had thought to try.
 
+### Bundle budgets
+
+The widget and the dashboard ship to every visitor, so CI fails a PR that
+outgrows a budget: `bun run size` in `packages/widget` and
+`packages/dashboard`, after a build. Each budget covers what a browser
+downloads for one load step, gzipped — an entry with every chunk it imports
+statically (the first load), or what a dynamic import adds on top of it (the
+widget panel, the locale dictionaries). `scripts/size-limit.mjs` derives the
+file lists from the built imports, so a new shared chunk counts where it
+loads.
+
+Each limit is the measured size plus 1 kB, rounded up to the next 0.5 kB. When
+a change needs more:
+
+1. Look for the bytes first: a smaller implementation, code moved behind a
+   dynamic import, a dependency dropped.
+2. Otherwise raise the limit in the same PR, to the new measured size plus
+   1 kB rounded up to the next 0.5 kB, and state in the PR description the
+   growth (before and after, from the CI step summary) and what it buys.
+
+A limit goes down the same way when a change saves a kilobyte or more, so the
+headroom stays around 1 kB and every kilobyte is a decision.
+
 ## Supply-chain posture
 
 The repo is scored by [OpenSSF Scorecard](https://scorecard.dev/viewer/?uri=github.com/NeosiaNexus/SitePing)
@@ -358,17 +396,61 @@ Releases are **fully automated** via [Release Please](https://github.com/googlea
 | `fix(scope):` | Patch | Patch | `fix(widget): prevent double submit` |
 | `feat(scope):` | Minor | Patch | `feat(panel): add dark mode` |
 | `feat(scope)!:` | Major | Minor | `feat(api)!: redesign payload format` |
-| `docs:` / `test:` / `chore:` | — (included in next release) | — | `docs(widget): clarify config` |
+| `perf:` / `refactor:` / `test:` / `docs:` / `chore:` | Patch | Patch | `docs(widget): clarify config` |
+| `build:` / `ci:` | — (no release) | — (no release) | `ci: pin actionlint` |
 
 > **Note:** The commit scope (`widget`, `cli`) is cosmetic. Release-please routes commits to packages based on which **files** the commit touches, not the scope name.
 
-> **Pre-1.0 behavior** (all current packages): `feat` bumps **patch** instead of minor, breaking changes (`!`) bump **minor** instead of major. `docs` / `test` / `chore` commits don't trigger releases on their own — they're included in the next release triggered by `feat` or `fix`.
+> **Pre-1.0 behavior** (all current packages): `feat` bumps **patch** instead of minor, breaking changes (`!`) bump **minor** instead of major.
+
+> **Every type listed in `changelog-sections`** (`release-please-config.json`: feat, fix, perf, refactor, test, docs, chore) releases the packages whose files it touches — a `docs:` edit to a package README publishes a patch. `build:` and `ci:` are the types that never release. Dependabot's `chore(deps)` and `chore(deps-dev)` bumps therefore release a patch too, even for a dev dependency that ships nothing.
 
 **What you don't need to do:**
 - Edit `package.json` version — Release Please does it
 - Write `CHANGELOG.md` — auto-generated from commits
 - Create git tags — auto-created on release
 - Run `npm publish` — CI handles it
+
+A prerelease version (`1.0.0-rc.1`, set with a `Release-As:` footer) publishes under the `next` dist-tag, never `latest` — `scripts/npm-dist-tag.mjs` picks the tag in every publish job, and the post-release check fails if a version sits on the wrong one.
+
+## Public API snapshots
+
+`api/<package>.api.md` records the public API of each package of the 1.0 set
+(`widget`, `dashboard`, `server`, `adapter-prisma`, `adapter-memory`,
+`adapter-localstorage`, `adapter-kit`), read from the **built** `dist/`, for
+every subpath of its `exports` map:
+
+- the runtime export keys of the ESM and CJS builds;
+- every exported type, function and constant, as declared in the shipped
+  `.d.ts`;
+- every declaration of the package's own `dist/` those reach without being
+  exported. Removing a field from a type the API only references breaks
+  consumers just as much, so it shows up too.
+
+Re-exports from another published package are listed by name, since that
+package's snapshot holds their shape. Comments are left out, except
+`@deprecated` and `@experimental`, which stay as markers. Members and union
+types are sorted, so reordering them doesn't change the file.
+
+`bun run api:check`, part of `bun run verify` and of CI, fails when the build no
+longer matches a snapshot. It also fails, whatever the snapshots say, when the
+ESM and CJS builds export different keys, when a value the `.d.ts` declares is
+missing at runtime (or the reverse), or when a `.d.cts` file drifts from its
+`.d.ts` twin.
+
+When the check fails:
+
+1. If the change is unintended (a type that widened through inference, an
+   export that leaked), fix the source.
+2. If it is intended, run `bun run build && bun run api:update` and commit the
+   updated `api/*.api.md` with the change. Reviewers read the API diff there.
+3. Removing or renaming an export, narrowing a type, adding a required member
+   to an interface that users implement (`SitepingStore`, `InboxSource`…), or
+   making an optional one required is a **breaking change**: mark the commit with
+   `!` (`feat(widget)!: …`). Additions are a `feat`.
+
+When a package joins the 1.0 set, add it to `PACKAGES` in
+`scripts/api-surface.mjs` and run `bun run api:update`.
 
 ## Pull Request Guidelines
 
