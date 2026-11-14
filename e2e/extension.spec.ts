@@ -124,6 +124,7 @@ const test = base.extend<Fixtures>({
         `--load-extension=${extension}`,
         `--allowlisted-extension-id=${allowlistedExtensionId}`,
         "--use-fake-ui-for-media-stream",
+        "--use-fake-device-for-media-stream",
         "--auto-select-tab-capture-source-by-title=Fixture",
       ],
     });
