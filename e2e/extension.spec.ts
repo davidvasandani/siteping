@@ -39,6 +39,8 @@ declare const chrome: {
 const BUILD = fileURLToPath(new URL("../apps/extension/dist/chrome", import.meta.url));
 const WEBHOOK = "https://hooks.slack.com/services/T000/B000/e2e";
 const GREEN = [0, 170, 85] as const;
+const TEST_EXTENSION_KEY =
+  "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3z84pRlgxn/ec9OAp0NOJtmGQdgUjPBQKuOYed2wNhEeeW1VPu39OW0+YpCxZaa3M3yu7jC2n8QEskJ48vJ4kCExTZru99ZX4+AMeXZqHoyLVw+XS3zqqeJZTfGWvA8FMu37XHBfMdt/VDN7XCS6lqHfgD+U2M0HZdKX/AXFtKJil1vOzaU1rX57ntEym60YTY3JVysjvsvSDpFhD8XPZ7WPFQ19XUT7Ic7t1JlK2+GN42TJgF+Wtyn0z+1zQwlPmIHftEotAeNpmK1fKP4Ksx/7FkYanw6QJWBQwmf+WrgsFNP/dS0BiKjUTVmkfoBAwbTqAyjUR8B4Kxmm5vkhFwIDAQAB";
 
 const page1 = (other: string) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Fixture</title>
 <style>body{margin:0;font:16px system-ui;background:#fff} main{padding:40px}
@@ -100,8 +102,13 @@ const test = base.extend<Fixtures>({
     cpSync(BUILD, extension, { recursive: true });
     const manifestPath = join(extension, "manifest.json");
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-    writeFileSync(manifestPath, JSON.stringify({ ...manifest, host_permissions: ["<all_urls>"] }));
-    const allowlistedExtensionId = [...createHash("sha256").update(extension).digest().subarray(0, 16)]
+    writeFileSync(
+      manifestPath,
+      JSON.stringify({ ...manifest, key: TEST_EXTENSION_KEY, host_permissions: ["<all_urls>"] }),
+    );
+    const allowlistedExtensionId = [
+      ...createHash("sha256").update(Buffer.from(TEST_EXTENSION_KEY, "base64")).digest().subarray(0, 16),
+    ]
       .flatMap((byte) => [String.fromCharCode(97 + (byte >> 4)), String.fromCharCode(97 + (byte & 15))])
       .join("");
 
