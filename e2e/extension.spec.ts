@@ -271,8 +271,7 @@ test("annotate a page, review it, export to PDF and Slack", async ({ context, wo
       (box as HTMLElement).style.transition = "transform 1s linear";
     });
     await page.waitForTimeout(1_500);
-    const stopPopup = await setEnabled(page, worker, extensionId, true);
-    await stopPopup.getByRole("button", { name: "Stop" }).click();
+    await popup.getByRole("button", { name: "Stop" }).click();
     await expect(page.getByText("Recording", { exact: true })).toHaveCount(0);
   });
 
