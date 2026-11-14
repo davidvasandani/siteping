@@ -95,45 +95,48 @@ const test = base.extend<Fixtures>({
     other.close();
   },
 
-  // biome-ignore lint/correctness/noEmptyPattern: Playwright reads the fixture's dependencies from this pattern
-  context: async ({}, use) => {
-    const work = mkdtempSync(join(tmpdir(), "siteping-extension-"));
-    const extension = join(work, "extension");
-    cpSync(BUILD, extension, { recursive: true });
-    const manifestPath = join(extension, "manifest.json");
-    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-    writeFileSync(
-      manifestPath,
-      JSON.stringify({ ...manifest, key: TEST_EXTENSION_KEY, host_permissions: ["<all_urls>"] }),
-    );
-    const allowlistedExtensionId = [
-      ...createHash("sha256").update(Buffer.from(TEST_EXTENSION_KEY, "base64")).digest().subarray(0, 16),
-    ]
-      .flatMap((byte) => [String.fromCharCode(97 + (byte >> 4)), String.fromCharCode(97 + (byte & 15))])
-      .join("");
+  context: [
+    // biome-ignore lint/correctness/noEmptyPattern: Playwright reads the fixture's dependencies from this pattern
+    async ({}, use) => {
+      const work = mkdtempSync(join(tmpdir(), "siteping-extension-"));
+      const extension = join(work, "extension");
+      cpSync(BUILD, extension, { recursive: true });
+      const manifestPath = join(extension, "manifest.json");
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+      writeFileSync(
+        manifestPath,
+        JSON.stringify({ ...manifest, key: TEST_EXTENSION_KEY, host_permissions: ["<all_urls>"] }),
+      );
+      const allowlistedExtensionId = [
+        ...createHash("sha256").update(Buffer.from(TEST_EXTENSION_KEY, "base64")).digest().subarray(0, 16),
+      ]
+        .flatMap((byte) => [String.fromCharCode(97 + (byte >> 4)), String.fromCharCode(97 + (byte & 15))])
+        .join("");
 
-    // biome-ignore lint/suspicious/noUndeclaredEnvVars: Playwright runs outside Turborepo, and no cached task reads this
-    const executablePath = process.env.SITEPING_CHROMIUM;
-    const context = await chromium.launchPersistentContext(join(work, "profile"), {
-      // Extensions need the full browser, not the headless shell.
-      ...(executablePath ? { executablePath } : { channel: "chromium" }),
-      headless: false,
-      viewport: { width: 1280, height: 720 },
-      args: [
-        `--disable-extensions-except=${extension}`,
-        `--load-extension=${extension}`,
-        `--allowlisted-extension-id=${allowlistedExtensionId}`,
-        "--enable-usermedia-screen-capturing",
-        // Chromium's own tab-capture browser tests enable compositor output;
-        // without it Linux reports the granted tab stream as a missing device.
-        "--use-gpu-in-tests",
-        "--window-size=1280,720",
-      ],
-    });
-    await use(context);
-    await context.close();
-    rmSync(work, { recursive: true, force: true });
-  },
+      // biome-ignore lint/suspicious/noUndeclaredEnvVars: Playwright runs outside Turborepo, and no cached task reads this
+      const executablePath = process.env.SITEPING_CHROMIUM;
+      const context = await chromium.launchPersistentContext(join(work, "profile"), {
+        // Extensions need the full browser, not the headless shell.
+        ...(executablePath ? { executablePath } : { channel: "chromium" }),
+        headless: false,
+        viewport: { width: 1280, height: 720 },
+        args: [
+          `--disable-extensions-except=${extension}`,
+          `--load-extension=${extension}`,
+          `--allowlisted-extension-id=${allowlistedExtensionId}`,
+          "--enable-usermedia-screen-capturing",
+          // Chromium's own tab-capture browser tests enable compositor output;
+          // without it Linux reports the granted tab stream as a missing device.
+          "--use-gpu-in-tests",
+          "--window-size=1280,720",
+        ],
+      });
+      await use(context);
+      await context.close();
+      rmSync(work, { recursive: true, force: true });
+    },
+    { timeout: 30_000 },
+  ],
 
   worker: async ({ context }, use) => {
     await use(context.serviceWorkers()[0] ?? (await context.waitForEvent("serviceworker")));
@@ -371,9 +374,9 @@ test("annotate a page, review it, export to PDF and Slack", async ({ context, wo
     const pdf = readFileSync(await download.path()).toString("latin1");
     expect(pdf.startsWith("%PDF-1.4")).toBe(true);
     expect(pdf.trimEnd().endsWith("%%EOF")).toBe(true);
-    // Two screenshots as JPEG, and the Japanese line, which the standard
-    // fonts cannot write, as raw pixels.
-    expect(pdf.match(/\/Filter \/DCTDecode/g)).toHaveLength(2);
+    // Two screenshots and the recording poster as JPEG, plus the Japanese
+    // line, which the standard fonts cannot write, as raw pixels.
+    expect(pdf.match(/\/Filter \/DCTDecode/g)).toHaveLength(3);
     expect(pdf.match(/\/ColorSpace \/DeviceRGB \/BitsPerComponent 8 \/Filter \/FlateDecode/g)?.length).toBeGreaterThan(
       0,
     );
