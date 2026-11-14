@@ -60,9 +60,13 @@ function cut(text: string, limit: number): string {
 
 const oneLine = (text: string): string => text.replace(/\s+/g, " ").trim();
 
-/** A link in mrkdwn. In the address `|` would start the label and `>` end the link, so both are percent-encoded. */
+/**
+ * A link in mrkdwn. In the address `|` would start the label and `>` end the
+ * link, so both are percent-encoded; `&` is written as its entity like
+ * everywhere else in the text, which Slack turns back into `&`.
+ */
 function link(url: string, label: string): string {
-  const address = url.replace(/\|/g, "%7C").replace(/</g, "%3C").replace(/>/g, "%3E");
+  const address = url.replace(/&/g, "&amp;").replace(/\|/g, "%7C").replace(/</g, "%3C").replace(/>/g, "%3E");
   return `<${address}|${escapeMrkdwn(label)}>`;
 }
 
@@ -79,24 +83,45 @@ function summary(report: Report): string {
   ].join(SEPARATOR);
 }
 
+/** Shorter and shorter quotes to try when a section does not fit; the last keeps only the head and the foot. */
+const EXCERPT_STEPS = [EXCERPT_LENGTH, 300, 150, 60, 0];
+
+/**
+ * One feedback as a section's text, within Slack's limit. The limit applies
+ * to the text as sent, after escaping, where one `&` has become five
+ * characters and an address can be thousands long. So the section is built
+ * and measured, and when it is too long it is rebuilt with less: first
+ * without the link (the label still says where), then with a shorter quote.
+ * The PDF has every message whole.
+ */
 function itemSection(item: ReportItem): string {
   const head = `*#${item.number}*${SEPARATOR}${TYPE_EMOJI[item.type]} ${TYPE_LABEL[item.type]}${SEPARATOR}${STATUS_LABEL[item.status]}`;
-  const quote = escapeMrkdwn(cut(item.message.trim(), EXCERPT_LENGTH))
-    .split(/\r?\n/)
-    .map((line) => `> ${line}`.trimEnd())
-    .join("\n");
   const label = cut(oneLine(item.pageLabel), LABEL_LIMIT);
-  const foot = (page: string): string =>
-    [
-      page,
+  const build = (excerpt: number, linked: boolean): string => {
+    const quote =
+      excerpt > 0
+        ? escapeMrkdwn(cut(item.message.trim(), excerpt))
+            .split(/\r?\n/)
+            .map((line) => `> ${line}`.trimEnd())
+        : [];
+    const foot = [
+      linked && item.pageUrl ? link(item.pageUrl, label) : escapeMrkdwn(label),
       escapeMrkdwn(cut(oneLine(item.author), LABEL_LIMIT)),
       formatDate(item.createdAt),
       ...(item.comments.length > 0 ? [item.comments.length === 1 ? "1 reply" : `${item.comments.length} replies`] : []),
     ].join(SEPARATOR);
+    return [head, ...quote, foot].join("\n");
+  };
 
-  const linked = `${head}\n${quote}\n${foot(item.pageUrl ? link(item.pageUrl, label) : escapeMrkdwn(label))}`;
-  // An address can be thousands of characters long; the label says where it was.
-  return linked.length <= SECTION_LIMIT ? linked : `${head}\n${quote}\n${foot(escapeMrkdwn(label))}`;
+  for (const excerpt of EXCERPT_STEPS) {
+    for (const linked of [true, false]) {
+      const text = build(excerpt, linked);
+      if (text.length <= SECTION_LIMIT) return text;
+    }
+  }
+  // Unreachable with the limits above (head and foot alone stay under 1500
+  // characters); kept so the function can never hand Slack an oversized section.
+  return build(0, false).slice(0, SECTION_LIMIT);
 }
 
 /** The review as webhook payloads, to post in order. */

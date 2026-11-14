@@ -348,8 +348,14 @@ test("annotate a page, review it, export to PDF and Slack", async ({ context, wo
 
   await test.step("send to Slack, after saying what is sent", async () => {
     const posted: { text: string; blocks: { type: string; text?: { text: string } }[] }[] = [];
+    // Slack answers only when the test lets it, to look at the page mid-send.
+    let answer = (): void => {};
+    const answered = new Promise<void>((resolve) => {
+      answer = resolve;
+    });
     await context.route("https://hooks.slack.com/**", async (route) => {
       posted.push(route.request().postDataJSON());
+      await answered;
       await route.fulfill({ status: 200, body: "ok" });
     });
 
@@ -371,7 +377,18 @@ test("annotate a page, review it, export to PDF and Slack", async ({ context, wo
     await expect(confirm).toContainText("Screenshots are not sent");
     expect(posted).toEqual([]);
     await confirm.getByRole("button", { name: "Send" }).click();
+
+    // While the send is in flight, a redraw must not offer the button again.
+    const sending = review.locator("#send-slack");
+    await expect(sending).toHaveText("Sending…");
+    await expect(sending).toBeDisabled();
+    const include = review.locator("article.card").first().getByLabel("Include in exports");
+    await include.uncheck();
+    await include.check();
+    await expect(sending).toBeDisabled();
+    answer();
     await expect(review.locator("#notice")).toHaveText("Sent to Slack.");
+    await expect(sending).toBeEnabled();
 
     expect(posted).toHaveLength(1);
     const texts = posted[0]?.blocks.flatMap((block) => (block.type === "section" ? [block.text?.text ?? ""] : []));

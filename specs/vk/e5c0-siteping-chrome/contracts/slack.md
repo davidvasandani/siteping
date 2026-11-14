@@ -34,8 +34,12 @@ A feedback section:
 ```
 
 The message is cut at 600 characters with an ellipsis; the PDF has it whole.
-`&`, `<`, `>` in reviewer text are written `&amp;`, `&lt;`, `&gt;`. A `|` in a
-URL is written `%7C`.
+`&`, `<`, `>` in reviewer text are written `&amp;`, `&lt;`, `&gt;`. In a link's
+address `&` is written `&amp;` and `|`, `<`, `>` are percent-encoded.
+
+The 3000-character limit is checked on the text as sent, after escaping. A
+section over it is rebuilt without the link, then with a shorter quote (300,
+150, 60 characters, then none).
 
 ## Response
 

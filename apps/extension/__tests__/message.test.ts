@@ -64,6 +64,14 @@ describe("buildSlackMessages", () => {
     expect(text?.match(/<[^>]*>/g)).toEqual(["<https://example.com/a?x=%3Cb%3E%7Cc|/a?x=&lt;b&gt;|c>"]);
   });
 
+  it("writes an ampersand in an address as its entity, as in the rest of the text", () => {
+    const [text] = sections(
+      buildSlackMessages(toReport([createRecord({ url: "/search?q=a&page=2" })], at))[0]?.blocks ?? [],
+    );
+
+    expect(text).toContain("<https://example.com/search?q=a&amp;page=2|/search?q=a&amp;page=2>");
+  });
+
   it("quotes every line of a message and cuts a long one", () => {
     const multi = createRecord({ message: "First line\n\nThird line" });
     const long = createRecord({ message: "x".repeat(2000) });
@@ -127,6 +135,25 @@ describe("buildSlackMessages", () => {
     expect(text?.length).toBeLessThanOrEqual(3000);
     expect(text).not.toContain("<https://");
     expect(text).toContain("/search?q=aaa");
+  });
+
+  it("keeps a section within the limit when escaping multiplies its length", () => {
+    // Each of these becomes four or five characters once escaped.
+    const records = [
+      createRecord({ message: "&".repeat(600) }),
+      createRecord({ message: "<>".repeat(1000), authorName: "&".repeat(200), url: `/${"&".repeat(300)}` }),
+    ];
+
+    const texts = sections(buildSlackMessages(toReport(records, at))[0]?.blocks ?? []);
+
+    expect(texts).toHaveLength(2);
+    for (const text of texts) {
+      expect(text.length).toBeLessThanOrEqual(3000);
+      // Cut on a character of the original, never through an entity.
+      expect(text).not.toMatch(/&(?!amp;|lt;|gt;)/);
+    }
+    // The quote is shortened, not dropped, and the page stays linked.
+    expect(texts[0]).toMatch(/^\*#1\*.*\n> (&amp;)+…\n<https:/);
   });
 
   it("keeps the header within Slack's 150 characters", () => {

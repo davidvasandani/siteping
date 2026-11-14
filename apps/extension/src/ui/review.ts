@@ -63,6 +63,8 @@ let settings: Settings = { ...DEFAULT_SETTINGS };
 let filters: Filters = { ...NO_FILTERS, site: new URLSearchParams(window.location.search).get("site") ?? ALL };
 /** Ids the reviewer unticked: left out of exports until ticked again. */
 const excluded = new Set<string>();
+/** Export buttons whose export is running: they stay disabled through any redraw. */
+const running = new Set<HTMLButtonElement>();
 
 const shown = (): FeedbackRecord[] => applyFilters(records, filters);
 const selection = (): FeedbackRecord[] => chosen(shown(), excluded);
@@ -210,7 +212,9 @@ function renderSummary(): void {
   const visible = shown();
   const selected = selection();
   summary.textContent = summarize(visible, selected);
-  for (const button of [exportPdf, sendSlack, copySlack]) button.disabled = selected.length === 0;
+  for (const button of [exportPdf, sendSlack, copySlack]) {
+    button.disabled = selected.length === 0 || running.has(button);
+  }
 }
 
 function render(): void {
@@ -242,9 +246,16 @@ async function reload(): Promise<void> {
 // Exports
 // ---------------------------------------------------------------------------
 
-/** Run an export with its button busy; a failure is shown, never thrown at the page. */
+/**
+ * Run an export with its button busy; a failure is shown, never thrown at
+ * the page. The page redraws while an export runs (a tick, a filter, feedback
+ * arriving from another tab), and a redraw must not hand the button back: a
+ * second send over the first would post the review twice.
+ */
 async function busy(button: HTMLButtonElement, label: string, task: () => Promise<void>): Promise<void> {
+  if (running.has(button)) return;
   const idle = button.textContent;
+  running.add(button);
   button.disabled = true;
   button.textContent = label;
   try {
@@ -252,6 +263,7 @@ async function busy(button: HTMLButtonElement, label: string, task: () => Promis
   } catch (cause) {
     say(message(cause), "error");
   } finally {
+    running.delete(button);
     button.textContent = idle;
     renderSummary();
   }
