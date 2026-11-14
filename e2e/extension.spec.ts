@@ -31,6 +31,7 @@ import { type BrowserContext, test as base, chromium, expect, type Page, type Wo
  * carries no extension typings.
  */
 declare const chrome: {
+  action: { openPopup(): Promise<void> };
   tabs: { query(query: { url: string }): Promise<{ id?: number }[]> };
   storage: { local: { get(keys: null): Promise<Record<string, unknown>> } };
 };
@@ -239,23 +240,29 @@ test("annotate a page, review it, export to PDF and Slack", async ({ context, wo
   });
 
   await test.step("record the current tab without a capture prompt", async () => {
-    const popup = await setEnabled(page, worker, extensionId, true);
+    const setupPopup = await setEnabled(page, worker, extensionId, true);
+    await setupPopup.close();
+    await page.bringToFront();
+
+    // Open the real action popup rather than navigating to popup.html. Chrome
+    // grants tabCapture only to an extension action/command invocation.
+    const opened = context.waitForEvent("page");
+    await worker.evaluate(() => chrome.action.openPopup());
+    const popup = await opened;
     const owner = popup.getByLabel("Feedback to attach the recording to");
     await expect(owner).toHaveCount(1);
     await expect(owner.locator("option")).toHaveCount(1);
-    // Opening popup.html as a test tab does not grant tabCapture's action
-    // invocation. The shipped shortcut is a real extension invocation and is
-    // therefore the prompt-free path Chromium can exercise headlessly.
-    await popup.close();
-    await page.bringToFront();
-    await page.keyboard.press("Alt+Shift+R");
+    await popup.getByRole("button", { name: "Record" }).click();
     await expect(page.getByText("Recording", { exact: true })).toBeVisible();
     await page.locator("#box").evaluate((box) => {
       (box as HTMLElement).style.transform = "translateX(80px)";
       (box as HTMLElement).style.transition = "transform 1s linear";
     });
     await page.waitForTimeout(1_500);
-    await page.keyboard.press("Alt+Shift+R");
+    const stopOpened = context.waitForEvent("page");
+    await worker.evaluate(() => chrome.action.openPopup());
+    const stopPopup = await stopOpened;
+    await stopPopup.getByRole("button", { name: "Stop" }).click();
     await expect(page.getByText("Recording", { exact: true })).toHaveCount(0);
   });
 
