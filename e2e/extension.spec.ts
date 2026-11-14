@@ -243,15 +243,19 @@ test("annotate a page, review it, export to PDF and Slack", async ({ context, wo
     const owner = popup.getByLabel("Feedback to attach the recording to");
     await expect(owner).toHaveCount(1);
     await expect(owner.locator("option")).toHaveCount(1);
-    await popup.getByRole("button", { name: "Record" }).click();
+    // Opening popup.html as a test tab does not grant tabCapture's action
+    // invocation. The shipped shortcut is a real extension invocation and is
+    // therefore the prompt-free path Chromium can exercise headlessly.
+    await popup.close();
+    await page.bringToFront();
+    await page.keyboard.press("Alt+Shift+R");
     await expect(page.getByText("Recording", { exact: true })).toBeVisible();
     await page.locator("#box").evaluate((box) => {
       (box as HTMLElement).style.transform = "translateX(80px)";
       (box as HTMLElement).style.transition = "transform 1s linear";
     });
     await page.waitForTimeout(1_500);
-    const stopPopup = await setEnabled(page, worker, extensionId, true);
-    await stopPopup.getByRole("button", { name: "Stop" }).click();
+    await page.keyboard.press("Alt+Shift+R");
     await expect(page.getByText("Recording", { exact: true })).toHaveCount(0);
   });
 
