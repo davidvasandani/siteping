@@ -256,7 +256,13 @@ test("annotate a page, review it, export to PDF and Slack", async ({ context, wo
     await expect(owner).toHaveCount(1);
     await expect(owner.locator("option")).toHaveCount(1);
     await popup.getByRole("button", { name: "Record" }).click();
-    await expect(page.getByText("Recording", { exact: true })).toBeVisible();
+    await expect
+      .poll(async () => {
+        const alert = popup.getByRole("alert");
+        if (await alert.isVisible()) throw new Error(`Record failed: ${await alert.textContent()}`);
+        return page.getByText("Recording", { exact: true }).count();
+      })
+      .toBe(1);
     await page.locator("#box").evaluate((box) => {
       (box as HTMLElement).style.transform = "translateX(80px)";
       (box as HTMLElement).style.transition = "transform 1s linear";
