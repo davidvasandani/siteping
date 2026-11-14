@@ -135,7 +135,7 @@ const test = base.extend<Fixtures>({
       await context.close();
       rmSync(work, { recursive: true, force: true });
     },
-    { timeout: 30_000 },
+    { scope: "test", timeout: 30_000 },
   ],
 
   worker: async ({ context }, use) => {
