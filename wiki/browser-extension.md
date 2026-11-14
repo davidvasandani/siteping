@@ -31,8 +31,9 @@ from the code.
 - It would ask for an identity per site and keep it in that site's
   `localStorage`; pass `identity` from extension settings instead. It still
   keeps its "Mine" ids in the site's `localStorage`.
-- `<siteping-widget>` is created without `customElements`, which is why it
-  works there at all (`customElements` is null in isolated worlds).
+- The launcher never registers a custom element (`<siteping-widget>` is a
+  plain unknown element), so the widget does not depend on `customElements`
+  being available to content scripts.
 - A page restored from the back/forward cache keeps the widget without
   re-running the script: reconcile on `pageshow` (`event.persisted`).
 
@@ -40,10 +41,11 @@ from the code.
 - `tabs.captureVisibleTab` works only under `activeTab` or `<all_urls>`. A
   host permission for one site is not enough. That is why there is no
   per-site "always on" mode: it would lose screenshots or need every site.
-- `activeTab` survives same-origin navigation in the tab, so the background
-  re-injects on `status: "complete"`; a refused injection means the grant
-  ended, and the tab is switched off. Chrome does not reset a per-tab badge
-  on navigation; clear it yourself.
+- `activeTab` is documented to last while the tab stays on the same origin,
+  so the background re-injects on `status: "complete"`; a refused injection
+  means the grant ended, and the tab is switched off. This path is unit-tested
+  but not exercised by the e2e, which holds `<all_urls>` instead. Do not rely
+  on the browser clearing a per-tab badge on navigation; clear it.
 - `permissions.request` must start inside the click handler. A dialog's
   `close` event is a later task, where Safari may not count the gesture.
 - Safari 16.4 is the floor (`storage.session`); `unlimitedStorage` is fully
