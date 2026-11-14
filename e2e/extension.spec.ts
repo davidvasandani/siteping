@@ -117,7 +117,7 @@ const test = base.extend<Fixtures>({
     const context = await chromium.launchPersistentContext(join(work, "profile"), {
       // Extensions need the full browser, not the headless shell.
       ...(executablePath ? { executablePath } : { channel: "chromium" }),
-      headless: true,
+      headless: false,
       viewport: { width: 1280, height: 720 },
       args: [
         `--disable-extensions-except=${extension}`,
