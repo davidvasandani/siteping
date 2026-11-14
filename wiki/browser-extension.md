@@ -103,3 +103,16 @@ html2canvas renderer. Chrome to hide: `siteping-widget`,
 `xcrun safari-web-extension-converter` and an unsigned `xcodebuild`. Each run
 attaches the Chrome folder and the unsigned app. Not signed, not published,
 not released by tag. Related: [fork releases](fork-releases.md).
+
+What the macOS job showed (macos-15, Xcode 16.4):
+- The converter lists manifest keys Safari does not support. It flagged
+  `background.persistent`; nothing else in this manifest. Declare the Safari
+  background as `{ "scripts": [...] }` only. Read that warning after any
+  manifest change: it is the cheapest Safari signal available without a Mac.
+- With `--project-location X --app-name SitePing --macos-only`, the project is
+  `X/SitePing/SitePing.xcodeproj` and the extension is built as
+  `SitePing Extension.appex` inside `SitePing.app`.
+- `xcodebuild ... CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+  CODE_SIGN_IDENTITY="" build` compiles it unsigned in about half a minute.
+- This proves the build, not the behaviour: the extension has not been run in
+  Safari.

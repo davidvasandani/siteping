@@ -44,7 +44,7 @@ describe("the shipped manifest", () => {
   it("declares the background the way each browser runs it", () => {
     expect(manifestOf("chrome").background).toEqual({ service_worker: "background.js" });
     expect(manifestOf("chrome").minimum_chrome_version).toBe("116");
-    expect(manifestOf("safari").background).toEqual({ scripts: ["background.js"], persistent: false });
+    expect(manifestOf("safari").background).toEqual({ scripts: ["background.js"] });
     expect(manifestOf("safari")).not.toHaveProperty("minimum_chrome_version");
   });
 

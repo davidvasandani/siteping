@@ -21,7 +21,9 @@ const repo = join(root, "..", "..");
 
 const TARGETS = {
   chrome: { background: { service_worker: "background.js" }, minimum_chrome_version: "116" },
-  safari: { background: { scripts: ["background.js"], persistent: false } },
+  // No `persistent` key: Safari's converter reports it as unsupported, and a
+  // Manifest V3 background page is never persistent anyway.
+  safari: { background: { scripts: ["background.js"] } },
 };
 
 const option = (name) => (process.argv.includes(name) ? process.argv[process.argv.indexOf(name) + 1] : undefined);

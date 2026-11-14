@@ -29,7 +29,7 @@ Per target:
 | Target | `background` | Extra |
 | --- | --- | --- |
 | chrome | `{ "service_worker": "background.js" }` | `"minimum_chrome_version": "116"` |
-| safari | `{ "scripts": ["background.js"], "persistent": false }` | none |
+| safari | `{ "scripts": ["background.js"] }` (no `persistent`: Apple's converter reports that key as unsupported) | none |
 
 Files next to it: `background.js`, `content.js`, `popup.html`, `popup.js`,
 `review.html`, `review.js`, `styles.css`, `icons/icon-{16,32,48,128}.png`.
