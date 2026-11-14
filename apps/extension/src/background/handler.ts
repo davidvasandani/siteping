@@ -3,6 +3,7 @@ import type { ExtensionApi, MessageSender } from "../shared/browser.js";
 import { type Replies, type Reply, type Request, type SiteStats, toWireError } from "../shared/messages.js";
 import { serializeComment, serializeRecord } from "../shared/records.js";
 import { normalizeSettings, SETTINGS_KEY } from "../shared/settings.js";
+import type { RecordingCoordinator } from "./recording.js";
 import type { ExtensionStore } from "./store.js";
 import type { TabController } from "./tabs.js";
 
@@ -10,6 +11,7 @@ export interface HandlerDeps {
   api: Pick<ExtensionApi, "storage" | "tabs">;
   store: ExtensionStore;
   tabs: TabController;
+  recording?: RecordingCoordinator;
 }
 
 export type Handler = (message: unknown, sender: MessageSender) => Promise<Reply<unknown>>;
@@ -21,7 +23,17 @@ export type Handler = (message: unknown, sender: MessageSender) => Promise<Reply
  * Every failure, an unknown request included, comes back as a reply rather
  * than an exception, so a caller never waits on a message nobody answers.
  */
-export function createHandler({ api, store, tabs }: HandlerDeps): Handler {
+export function createHandler({ api, store, tabs, recording: suppliedRecording }: HandlerDeps): Handler {
+  const recording: RecordingCoordinator = suppliedRecording ?? {
+    start: async () => {
+      throw new Error("Screen recording is unavailable in this browser.");
+    },
+    stop: async () => ({ phase: "idle" }),
+    state: async () => ({ phase: "idle" }),
+    delete: async () => {},
+    deleteProject: async () => {},
+    finished: async () => {},
+  };
   const answer: {
     [T in Request["type"]]: (request: Extract<Request, { type: T }>, sender: MessageSender) => Promise<Replies[T]>;
   } = {
@@ -44,11 +56,13 @@ export function createHandler({ api, store, tabs }: HandlerDeps): Handler {
 
     "feedback:delete": async ({ id }) => {
       await store.deleteFeedback(id);
+      await recording.delete(id);
       return null;
     },
 
     "feedback:deleteAll": async ({ projectName }) => {
       await store.deleteAllFeedbacks(projectName);
+      await recording.deleteProject(projectName);
       return null;
     },
 
@@ -91,6 +105,19 @@ export function createHandler({ api, store, tabs }: HandlerDeps): Handler {
         sites.set(record.projectName, site);
       }
       return [...sites.values()];
+    },
+
+    "recording:start": ({ tabId, feedbackId }) => recording.start(tabId, feedbackId),
+    "recording:stop": ({ reason }) => recording.stop(reason),
+    "recording:state": async (_request, sender) => {
+      const state = await recording.state();
+      return state.phase !== "idle" && sender.tab?.id !== undefined && state.session.tabId !== sender.tab.id
+        ? { phase: "idle" }
+        : state;
+    },
+    "recording:delete": async ({ feedbackId }) => {
+      await recording.delete(feedbackId);
+      return null;
     },
   };
 

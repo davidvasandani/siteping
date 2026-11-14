@@ -263,16 +263,20 @@ class ReportBuilder {
     return width;
   }
 
-  private async screenshot(item: ReportItem): Promise<PdfImage | null> {
-    if (!item.screenshot) return null;
-    const decoded = decodeDataUrl(item.screenshot.dataUrl);
+  private async image(dataUrl: string | null | undefined): Promise<PdfImage | null> {
+    if (!dataUrl) return null;
+    const decoded = decodeDataUrl(dataUrl);
     let bytes = decoded?.mediaType === "image/jpeg" ? decoded.bytes : null;
     let info = bytes ? parseJpeg(bytes) : null;
     if (!info && this.deps.toJpeg) {
-      bytes = await this.deps.toJpeg(item.screenshot.dataUrl);
+      bytes = await this.deps.toJpeg(dataUrl);
       info = bytes ? parseJpeg(bytes) : null;
     }
     return bytes && info ? this.doc.addJpeg(bytes, info) : null;
+  }
+
+  private screenshot(item: ReportItem): Promise<PdfImage | null> {
+    return this.image(item.screenshot?.dataUrl);
   }
 
   private async cardRows(item: ReportItem): Promise<Row[]> {
@@ -301,6 +305,19 @@ class ReportBuilder {
         });
       },
     });
+
+    if (item.recording) {
+      const seconds = Math.max(1, Math.round(item.recording.durationMs / 1000));
+      const duration = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+      rows.push(
+        gap(8),
+        ...(await this.textRows(
+          `Screen recording attached · ${duration} · Video remains in SitePing on the reviewer’s machine.`,
+          SMALL_BOLD,
+          INNER_WIDTH,
+        )),
+      );
+    }
     rows.push(gap(9), ...(await this.textRows(item.message, MESSAGE, INNER_WIDTH)), gap(8));
 
     // Where and who. The page is a link when the record has a safe address.
@@ -331,7 +348,7 @@ class ReportBuilder {
       const scale = Math.min(INNER_WIDTH / image.width, SCREENSHOT_MAX_HEIGHT / image.height, 0.75);
       const width = image.width * scale;
       const height = image.height * scale;
-      const region = item.screenshot?.region;
+      const region = item.recording?.posterDataUrl ? null : item.screenshot?.region;
       rows.push(gap(11), {
         height,
         draw: (page, x, y) => {
@@ -359,6 +376,20 @@ class ReportBuilder {
             );
           }
           page.rect(box, { stroke: HAIRLINE, lineWidth: 0.75, radius: 6 });
+        },
+      });
+    }
+
+    const poster = await this.image(item.recording?.posterDataUrl);
+    if (poster) {
+      const scale = Math.min(INNER_WIDTH / poster.width, 180 / poster.height, 0.75);
+      const width = poster.width * scale;
+      const height = poster.height * scale;
+      rows.push(gap(8), {
+        height,
+        draw: (page, x, y) => {
+          page.image(poster, { x, y, width, height }, 6);
+          page.rect({ x, y, width, height }, { stroke: HAIRLINE, lineWidth: 0.75, radius: 6 });
         },
       });
     }

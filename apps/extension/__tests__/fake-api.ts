@@ -95,6 +95,7 @@ export function createFakeApi(): FakeApi {
   const updatedListeners: ((tabId: number, change: TabChange, tab: TabInfo) => void)[] = [];
   const removedListeners: ((tabId: number) => void)[] = [];
   const commandListeners: ((command: string, tab?: TabInfo) => void)[] = [];
+  let offscreenOpen = false;
   let nextTabId = 100;
 
   const deliver = (message: unknown, sender: MessageSender = { id: "fake-extension" }): Promise<unknown> =>
@@ -116,6 +117,7 @@ export function createFakeApi(): FakeApi {
       getURL: (path) => `chrome-extension://fake-extension/${path}`,
       sendMessage: (message) => deliver(message),
       onMessage: { addListener: (listener) => void messageListeners.push(listener) },
+      getContexts: async () => (offscreenOpen ? [{}] : []),
     },
     storage: {
       local: new FakeStorageArea("local", storageListeners),
@@ -162,6 +164,15 @@ export function createFakeApi(): FakeApi {
       setBadgeBackgroundColor: async () => {},
     },
     commands: { onCommand: { addListener: (listener) => void commandListeners.push(listener) } },
+    offscreen: {
+      createDocument: async () => {
+        offscreenOpen = true;
+      },
+      closeDocument: async () => {
+        offscreenOpen = false;
+      },
+    },
+    tabCapture: { getMediaStreamId: async ({ targetTabId }) => `fake-stream-${targetTabId}` },
     tabList: new Map(),
     blocked: new Set(),
     injected: [],

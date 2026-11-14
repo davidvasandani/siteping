@@ -24,6 +24,10 @@
     "toggle-siteping": {
       "suggested_key": { "default": "Alt+Shift+S" },
       "description": "Switch SitePing on or off for this tab"
+    },
+    "record-siteping": {
+      "suggested_key": { "default": "Alt+Shift+R" },
+      "description": "Start or stop a SitePing screen recording"
     }
   }
 }

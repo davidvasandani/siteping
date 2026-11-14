@@ -49,6 +49,23 @@ Set `SITEPING_BUNDLE_ID` before step 1 to use your own bundle identifier.
 4. "Review and export" in the popup opens the review page: all feedback by
    site, with filters, status changes and delete.
 
+### Record the current tab (Chrome)
+
+1. Leave feedback on the page, then open the SitePing toolbar popup.
+2. Under **Screen recording**, choose the feedback the video belongs to and
+   press **Record**. You can also press Alt+Shift+R when that page has exactly
+   one feedback item. Recording is video-only: no microphone or tab audio.
+3. A red pill on the page shows elapsed and remaining time. Press Stop there,
+   in the popup, or with Alt+Shift+R. SitePing stops automatically after two
+   minutes.
+4. The review page plays, downloads, or deletes the WebM video. Deleting its
+   feedback, including from the on-page panel, deletes the recording too.
+
+The video shows the current tab as you saw it, including SitePing's button,
+markers, panels and recording pill. It stays in IndexedDB in the extension's
+browser profile and is never uploaded. Safari recording is not available yet;
+the popup says so instead of starting a capture that cannot be supported.
+
 ### Export to PDF
 
 "Export PDF" downloads one file: a summary of the site with totals by status
@@ -56,7 +73,8 @@ and type, then every feedback with its number, type, status, message, a
 clickable link to the page, author, date, replies and the screenshot with the
 annotated area outlined. Untick a feedback to leave it out.
 
-The PDF is generated in the browser. Text in Latin scripts is real text
+For feedback with a recording, the PDF adds a poster frame, duration and a
+note that the video remains in SitePing. The PDF is generated in the browser. Text in Latin scripts is real text
 (searchable, selectable). Text in other scripts, and emoji, is drawn with
 your system's fonts and placed as an image, so it appears as written but is
 not selectable.
@@ -71,8 +89,9 @@ Two ways:
   Webhook for that channel and paste its address in the review page's
   Settings. Before each send the extension says what it will post.
 
-Screenshots are not sent to Slack (a webhook cannot carry files); the message
-says they are in the PDF. A review of more than 20 feedback is posted as
+Screenshots and recordings are not sent to Slack (a webhook cannot carry
+files); the message says a local recording exists and that screenshots are in
+the PDF. A review of more than 20 feedback is posted as
 several messages.
 
 ## Privacy and permissions
@@ -82,6 +101,8 @@ several messages.
 | `activeTab` | Access to the one tab you switch SitePing on for, for as long as it stays on that site |
 | `scripting` | Putting the widget into that tab |
 | `storage`, `unlimitedStorage` | Keeping feedback and screenshots in the browser profile |
+| `tabCapture` (Chrome) | Capturing the current tab only after you press Record |
+| `offscreen` (Chrome) | Keeping the video recorder alive if the popup closes or the background worker sleeps |
 | `https://hooks.slack.com/*` (optional) | Asked for at your first "Send to Slack"; needed to read Slack's answer |
 
 The extension has no access to any site at install and declares no content
@@ -91,6 +112,9 @@ What is stored, and where:
 
 - Feedback, replies, screenshots and settings: the extension's own storage in
   your browser profile. Removing the extension removes them.
+- Screen recordings and poster frames: IndexedDB in the same extension profile,
+  keyed by feedback id. They survive a browser restart and are removed with
+  their feedback.
 - While SitePing is on for a site, the widget also keeps the ids of the
   feedback you sent in that site's `localStorage` (it backs the panel's
   "Mine" filter), as it does when a site embeds SitePing.
@@ -122,12 +146,17 @@ one Playwright downloads does not start on your system).
 
 ## What is and is not verified
 
-- Chrome: covered end to end by `e2e/extension.spec.ts`, with one stand-in.
+- Chrome: annotation/export is covered end to end by
+  `e2e/extension.spec.ts`, with one stand-in.
   A test cannot click the toolbar, so it loads a copy of the build with
   access to all sites in place of the access that click grants. The shipped
   manifest is checked separately.
-- Safari: CI converts the build with Apple's tool and compiles the app. It
-  has not been run in Safari. Every browser API used is documented for
+- Screen recording: implemented for Chrome 116+ with Chrome's tab-capture and
+  offscreen APIs. The storage/manifest/export behavior is unit-tested; run the
+  recording e2e on a full Chromium build before relying on a release artifact.
+- Safari: CI converts the build with Apple's tool and compiles the app. Screen
+  recording is deliberately unavailable there. The rest of the extension has
+  not been run in Safari. Every browser API used is documented for
   Safari 16.4, but expect to test it there before relying on it.
 - Slack: tested against Slack's documented limits and a stand-in server, not
   a real workspace.

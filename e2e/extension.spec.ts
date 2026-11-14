@@ -108,7 +108,12 @@ const test = base.extend<Fixtures>({
       ...(executablePath ? { executablePath } : { channel: "chromium" }),
       headless: true,
       viewport: { width: 1280, height: 720 },
-      args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`],
+      args: [
+        `--disable-extensions-except=${extension}`,
+        `--load-extension=${extension}`,
+        "--use-fake-ui-for-media-stream",
+        "--auto-select-tab-capture-source-by-title=Fixture",
+      ],
     });
     await use(context);
     await context.close();
@@ -233,6 +238,23 @@ test("annotate a page, review it, export to PDF and Slack", async ({ context, wo
     await expect(markers(page)).toHaveCount(1);
   });
 
+  await test.step("record the current tab without a capture prompt", async () => {
+    const popup = await setEnabled(page, worker, extensionId, true);
+    const owner = popup.getByLabel("Feedback to attach the recording to");
+    await expect(owner).toHaveCount(1);
+    await expect(owner.locator("option")).toHaveCount(1);
+    await popup.getByRole("button", { name: "Record" }).click();
+    await expect(page.getByText("Recording", { exact: true })).toBeVisible();
+    await page.locator("#box").evaluate((box) => {
+      (box as HTMLElement).style.transform = "translateX(80px)";
+      (box as HTMLElement).style.transition = "transform 1s linear";
+    });
+    await page.waitForTimeout(1_500);
+    const stopPopup = await setEnabled(page, worker, extensionId, true);
+    await stopPopup.getByRole("button", { name: "Stop" }).click();
+    await expect(page.getByText("Recording", { exact: true })).toHaveCount(0);
+  });
+
   await test.step("markers belong to their page, across loads and client-side routes", async () => {
     await page.locator("#next").click();
     await expect(page.locator("h1")).toHaveText("Second page");
@@ -256,6 +278,8 @@ test("annotate a page, review it, export to PDF and Slack", async ({ context, wo
     await expect(card.locator(".message")).toHaveText(message);
     await expect(card.locator(".chip").first()).toHaveText("Bug");
     await expect(card.locator(".meta a")).toHaveAttribute("href", new RegExp(`^${sites.main}/\\?siteping=`));
+    await expect(card.locator(".recording-media video")).toHaveCount(1);
+    await expect(card.locator(".recording-media")).toContainText("Screen recording");
 
     // The centre of the marked region is the page's green box, not SitePing's
     // overlay, and the capture is the tab's own pixels.

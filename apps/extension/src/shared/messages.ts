@@ -13,6 +13,7 @@ import {
   StoreNotFoundError,
   StorePersistenceError,
 } from "@siteping/core";
+import type { RecordingState } from "../recording/model.js";
 import type { ExtensionApi } from "./browser.js";
 import type { StoredComment, StoredFeedback } from "./records.js";
 import { InvalidSettingsError, type Settings } from "./settings.js";
@@ -37,7 +38,11 @@ export type Request =
   | { type: "tab:get"; tabId: number }
   | { type: "tab:self" }
   | { type: "tab:set"; tabId: number; enabled: boolean }
-  | { type: "stats" };
+  | { type: "stats" }
+  | { type: "recording:start"; tabId: number; feedbackId: string }
+  | { type: "recording:stop"; reason: "manual" | "limit" }
+  | { type: "recording:state" }
+  | { type: "recording:delete"; feedbackId: string };
 
 export interface SiteStats {
   projectName: string;
@@ -62,12 +67,20 @@ export interface Replies {
   "tab:self": { enabled: boolean };
   "tab:set": { enabled: boolean };
   stats: SiteStats[];
+  "recording:start": RecordingState;
+  "recording:stop": RecordingState;
+  "recording:state": RecordingState;
+  "recording:delete": null;
 }
 
 export type RequestType = Request["type"];
 
 /** What the background sends a content script. No reply is expected. */
-export type ContentMessage = { type: "unmount" } | { type: "navigated" };
+export type ContentMessage =
+  | { type: "unmount" }
+  | { type: "navigated" }
+  | { type: "recording:show"; state: RecordingState }
+  | { type: "recording:hide"; message?: string };
 
 /**
  * An error in a form that survives a message. `kind` names the core store

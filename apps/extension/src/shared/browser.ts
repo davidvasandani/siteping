@@ -51,6 +51,10 @@ export interface ExtensionApi {
     getURL(path: string): string;
     sendMessage(message: unknown): Promise<unknown>;
     onMessage: { addListener(listener: MessageListener): void };
+    getContexts(filter: {
+      contextTypes: ("TAB" | "POPUP" | "BACKGROUND" | "OFFSCREEN_DOCUMENT" | "SIDE_PANEL" | "DEVELOPER_TOOLS")[];
+      documentUrls?: string[];
+    }): Promise<unknown[]>;
   };
   storage: {
     local: StorageArea;
@@ -81,6 +85,17 @@ export interface ExtensionApi {
   };
   commands: {
     onCommand: { addListener(listener: (command: string, tab?: TabInfo) => void): void };
+  };
+  offscreen: {
+    createDocument(parameters: {
+      url: string;
+      reasons: ("USER_MEDIA" | "BLOBS")[];
+      justification: string;
+    }): Promise<void>;
+    closeDocument(): Promise<void>;
+  };
+  tabCapture: {
+    getMediaStreamId(options: { targetTabId: number }): Promise<string>;
   };
 }
 

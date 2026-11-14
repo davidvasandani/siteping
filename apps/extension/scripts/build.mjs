@@ -28,7 +28,7 @@ const TARGETS = {
 
 const option = (name) => (process.argv.includes(name) ? process.argv[process.argv.indexOf(name) + 1] : undefined);
 
-async function bundle(outdir) {
+async function bundle(outdir, target) {
   const shared = {
     bundle: true,
     format: "iife",
@@ -59,6 +59,9 @@ async function bundle(outdir) {
       entryPoints: { popup: join(root, "src/ui/popup.ts"), review: join(root, "src/ui/review.ts") },
       outdir,
     }),
+    ...(target === "chrome"
+      ? [build({ ...shared, entryPoints: { offscreen: join(root, "src/offscreen/offscreen.ts") }, outdir })]
+      : []),
   ]);
   assertSeamUsed(seam);
 }
@@ -67,13 +70,18 @@ async function buildTarget(target, outdir, version, manifest) {
   await rm(outdir, { recursive: true, force: true });
   await mkdir(join(outdir, "icons"), { recursive: true });
 
-  await bundle(outdir);
+  await bundle(outdir, target);
+  const targetManifest = {
+    ...manifest,
+    permissions: target === "chrome" ? [...manifest.permissions, "tabCapture", "offscreen"] : manifest.permissions,
+  };
   await Promise.all([
     ...["popup.html", "review.html", "styles.css"].map((file) => cp(join(root, "src/ui", file), join(outdir, file))),
+    ...(target === "chrome" ? [cp(join(root, "src/offscreen/offscreen.html"), join(outdir, "offscreen.html"))] : []),
     ...ICON_SIZES.map((size) => writeFile(join(outdir, "icons", `icon-${size}.png`), renderIcon(size))),
     writeFile(
       join(outdir, "manifest.json"),
-      `${JSON.stringify({ ...manifest, version, ...TARGETS[target] }, null, 2)}\n`,
+      `${JSON.stringify({ ...targetManifest, version, ...TARGETS[target] }, null, 2)}\n`,
     ),
   ]);
   console.log(`built ${target} ${version} in ${outdir}`);

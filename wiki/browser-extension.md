@@ -1,10 +1,30 @@
 ---
 title: Browser extension (apps/extension): the widget on any site, local only
 tags: [extension, chrome, safari, widget, storage, permissions, e2e]
-tasks: [vk/e5c0-siteping-chrome]
+tasks: [vk/e5c0-siteping-chrome, vk/48b5-siteping-extensi]
 ---
 
 # Browser extension
+
+## Screen recordings
+
+Task `vk/48b5-siteping-extensi` adds Chrome-only current-tab video as an
+extension-side sidecar keyed by feedback id. Chrome's service worker obtains a
+`tabCapture` stream id after the reviewer invokes Record; an offscreen document
+owns MediaRecorder and is the sole writer of `siteping-recordings` IndexedDB.
+Review pages read Blob values directly, just as they read large feedback data
+directly, and create short-lived object URLs for playback/download.
+
+The hard limit is two minutes, video only. Tab navigation keeps recording;
+closing the popup does not. The on-page pill is deliberately visible in the
+video, unlike screenshot capture, because recording promises the page as the
+reviewer saw it. PDF receives a poster/duration/note and Slack receives only a
+local-recording note. Neither receives video bytes.
+
+Deleting feedback through either UI must pass through the background and then
+delete the IndexedDB sidecar. Chrome adds `tabCapture` and `offscreen` without
+host access. Safari omits both permissions and exposes an unavailable state;
+converter/build success does not imply recording support.
 
 **Where:** `apps/extension` (private, fork-only, Manifest V3). User-facing
 description in `apps/extension/README.md`; this page is what is not obvious

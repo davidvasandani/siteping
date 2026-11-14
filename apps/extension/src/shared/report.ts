@@ -27,6 +27,7 @@ export interface ReportItem {
   viewport: string;
   comments: { author: string; body: string; createdAt: Date }[];
   screenshot: { dataUrl: string; region: ScreenshotRegion | null } | null;
+  recording?: { durationMs: number; posterDataUrl: string | null };
 }
 
 export interface Report {
@@ -44,7 +45,11 @@ export interface ReportCounts {
 }
 
 /** Build the export model from records, in the order given. */
-export function toReport(records: readonly FeedbackRecord[], generatedAt: Date): Report {
+export function toReport(
+  records: readonly FeedbackRecord[],
+  generatedAt: Date,
+  recordingInfo: ReadonlyMap<string, { durationMs: number; posterDataUrl: string | null }> = new Map(),
+): Report {
   const sites = new Set(records.map((record) => record.projectName));
   const mixed = sites.size > 1;
   const [onlySite] = sites;
@@ -52,29 +57,33 @@ export function toReport(records: readonly FeedbackRecord[], generatedAt: Date):
     title: mixed || onlySite === undefined ? "All sites" : siteLabel(onlySite),
     siteCount: sites.size,
     generatedAt,
-    items: records.map((record, index) => ({
-      number: index + 1,
-      id: record.id,
-      type: record.type,
-      status: record.status,
-      message: record.message,
-      pageUrl: pageUrl(record),
-      pageLabel: mixed ? `${siteLabel(record.projectName)}${record.url}` : record.url,
-      author: record.authorName,
-      createdAt: record.createdAt,
-      viewport: record.viewport.replace(/x/i, "×"),
-      comments: (record.comments ?? []).map((comment) => ({
-        author: comment.authorName,
-        body: comment.body,
-        createdAt: comment.createdAt,
-      })),
-      // Only an inline image: the extension stores nothing else, and an
-      // export must not fetch whatever address a record happens to carry.
-      screenshot:
-        record.screenshotUrl?.startsWith("data:") && isSafeImageUrl(record.screenshotUrl)
-          ? { dataUrl: record.screenshotUrl, region: record.screenshotRegion }
-          : null,
-    })),
+    items: records.map((record, index) => {
+      const recording = recordingInfo.get(record.id);
+      return {
+        number: index + 1,
+        id: record.id,
+        type: record.type,
+        status: record.status,
+        message: record.message,
+        pageUrl: pageUrl(record),
+        pageLabel: mixed ? `${siteLabel(record.projectName)}${record.url}` : record.url,
+        author: record.authorName,
+        createdAt: record.createdAt,
+        viewport: record.viewport.replace(/x/i, "×"),
+        comments: (record.comments ?? []).map((comment) => ({
+          author: comment.authorName,
+          body: comment.body,
+          createdAt: comment.createdAt,
+        })),
+        // Only an inline image: the extension stores nothing else, and an
+        // export must not fetch whatever address a record happens to carry.
+        screenshot:
+          record.screenshotUrl?.startsWith("data:") && isSafeImageUrl(record.screenshotUrl)
+            ? { dataUrl: record.screenshotUrl, region: record.screenshotRegion }
+            : null,
+        ...(recording ? { recording } : {}),
+      };
+    }),
   };
 }
 

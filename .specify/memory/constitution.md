@@ -82,10 +82,18 @@ concurrent writes from two contexts both survive.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.6.0
+**Version**: 0.7.0
 
 ## Widget navigation amendment (2026-10-16)
 Annotation anchors and scroll offsets belong to the recorded page. Cross-page actions
 must navigate safely before resolving them. Preserve configured page identity,
 existing scroll-container handling, and consumer wire compatibility. Fork consumer
 updates use immutable release URLs and lockfile integrity.
+
+## Extension recording amendment (2026-11-14)
+Screen recordings are local-first extension data under Principle IX. Large binary
+media is stored outside JSON extension messaging, with one writing context under
+Principle X and extension-side ownership keyed to the feedback id under Principle
+VIII. Recording requires an explicit reviewer action, never adds audio implicitly,
+and must have a bounded lifetime. Feedback deletion cascades to associated media;
+quota or media failures must preserve feedback text and be visible to the reviewer.
