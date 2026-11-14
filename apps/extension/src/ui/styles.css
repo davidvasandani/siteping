@@ -1,0 +1,430 @@
+/* Shared by the popup and the review page. Light and dark follow the system. */
+
+:root {
+  color-scheme: light dark;
+  --accent: #0066ff;
+  --accent-contrast: #ffffff;
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --text: #0f172a;
+  --muted: #64748b;
+  --border: #e2e8f0;
+  --danger: #d01f1f;
+  --success: #15803d;
+  --radius: 10px;
+  --shadow: 0 1px 2px rgb(15 23 42 / 6%), 0 4px 16px rgb(15 23 42 / 6%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --accent: #4d94ff;
+    --accent-contrast: #06122b;
+    --bg: #0b1120;
+    --surface: #111a2e;
+    --text: #e8edf6;
+    --muted: #93a1b8;
+    --border: #24304a;
+    --danger: #f87171;
+    --success: #4ade80;
+    --shadow: 0 1px 2px rgb(0 0 0 / 40%);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* On body, not :root: Chrome gives an extension page's body a font size of 75%. */
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+small,
+.muted {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  font: inherit;
+  font-size: 11px;
+}
+
+a {
+  color: var(--accent);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Controls */
+
+.button,
+select,
+input[type="text"],
+input[type="email"],
+input[type="url"] {
+  min-height: 34px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.button-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.button-danger {
+  color: var(--danger);
+}
+
+.notice {
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--success) 12%, var(--surface));
+  color: var(--text);
+}
+
+.notice-error {
+  background: color-mix(in srgb, var(--danger) 12%, var(--surface));
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+}
+
+/* Popup */
+
+.popup {
+  width: 320px;
+  padding: 14px 16px;
+  background: var(--surface);
+}
+
+.popup main {
+  display: grid;
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.popup .site {
+  margin: 0;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.popup .counts {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.switch-row span {
+  display: grid;
+}
+
+input.switch {
+  position: relative;
+  flex: none;
+  width: 40px;
+  height: 24px;
+  margin: 0;
+  border-radius: 12px;
+  background: var(--border);
+  appearance: none;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+input.switch::after {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 30%);
+  content: "";
+  transition: transform 0.15s;
+}
+
+input.switch:checked {
+  background: var(--accent);
+}
+
+input.switch:checked::after {
+  transform: translateX(16px);
+}
+
+input.switch:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Review page */
+
+.review {
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 24px 20px 64px;
+}
+
+.review > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.review h1 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 -8px 12px;
+  padding: 10px 8px;
+  background: var(--bg);
+}
+
+.toolbar .spacer {
+  flex: 1;
+}
+
+#summary {
+  margin: 0 0 12px;
+  color: var(--muted);
+}
+
+#notice {
+  margin-bottom: 12px;
+}
+
+.empty {
+  padding: 48px 24px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  color: var(--muted);
+  text-align: center;
+}
+
+.card {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  margin-bottom: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--type-color, var(--border));
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.card > input[type="checkbox"] {
+  align-self: start;
+  width: 16px;
+  height: 16px;
+  margin: 3px 0 0;
+}
+
+.card-body {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.card-head time {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.chip {
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--chip-color) 14%, transparent);
+  color: var(--chip-color);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.message {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.meta a {
+  overflow-wrap: anywhere;
+}
+
+.shot {
+  position: relative;
+  justify-self: start;
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  line-height: 0;
+}
+
+.shot img {
+  max-width: 100%;
+  max-height: 360px;
+}
+
+.shot .region {
+  position: absolute;
+  border: 2px solid var(--accent);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.thread {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 8px 0 0;
+  border-top: 1px solid var(--border);
+  list-style: none;
+}
+
+.thread p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.actions select,
+.actions .button {
+  min-height: 30px;
+  padding: 3px 10px;
+  font-size: 13px;
+}
+
+/* Dialogs */
+
+dialog {
+  width: min(480px, calc(100vw - 32px));
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 20px 60px rgb(0 0 0 / 30%);
+}
+
+dialog::backdrop {
+  background: rgb(15 23 42 / 45%);
+}
+
+dialog h2 {
+  margin: 0 0 12px;
+  font-size: 17px;
+}
+
+dialog form {
+  display: grid;
+  gap: 12px;
+}
+
+dialog .field {
+  display: grid;
+  gap: 4px;
+}
+
+dialog label {
+  font-weight: 600;
+}
+
+dialog menu {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin: 4px 0 0;
+  padding: 0;
+}

@@ -25,11 +25,13 @@ export default defineConfig({
       "@siteping/screenshot-storage/memory": source("screenshot-storage", "backends/memory"),
       "@siteping/screenshot-storage": source("screenshot-storage"),
       "@siteping/server": source("server"),
+      // apps/extension bundles the widget from source; its tests import it the same way.
+      "@siteping/widget": source("widget"),
     },
   },
   test: {
     // e2e/: unit tests of the fixture servers' helpers (Playwright runs *.spec.ts there).
-    include: ["packages/**/__tests__/**/*.test.{ts,tsx}", "e2e/**/*.test.mjs"],
+    include: ["packages/**/__tests__/**/*.test.{ts,tsx}", "apps/extension/__tests__/**/*.test.ts", "e2e/**/*.test.mjs"],
     setupFiles: ["packages/widget/__tests__/setup-i18n.ts"],
     // Type-level tests: *.test-d.ts files are statically checked by tsc via
     // vitest's typecheck mode (they never execute). They lock the public

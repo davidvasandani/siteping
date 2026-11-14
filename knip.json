@@ -44,6 +44,17 @@
       "entry": ["__tests__/**/*.{test,test-d}.{ts,tsx}"],
       "project": ["src/**", "__tests__/**"]
     },
-    "apps/demo": {}
+    "apps/demo": {},
+    "apps/extension": {
+      "entry": [
+        "scripts/*.mjs",
+        "src/background/index.ts",
+        "src/content/index.ts",
+        "src/ui/popup.ts",
+        "src/ui/review.ts",
+        "__tests__/**/*.test.ts"
+      ],
+      "project": ["src/**", "scripts/**", "__tests__/**"]
+    }
   }
 }

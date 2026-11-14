@@ -1,0 +1,25 @@
+{
+  "name": "@siteping/extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SitePing as a browser extension for Chrome and Safari — annotate any website, keep everything local, export to PDF or Slack",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "safari:xcode": "node scripts/safari.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@siteping/core": "workspace:*",
+    "@siteping/widget": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/chrome": "0.3.7",
+    "esbuild": "^0.28.2",
+    "pdfjs-dist": "6.5.438"
+  }
+}

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SitePing</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="popup">
+    <header class="brand">
+      <img src="icons/icon-48.png" alt="" width="24" height="24" />
+      <strong>SitePing</strong>
+    </header>
+
+    <main>
+      <p id="site" class="site">&nbsp;</p>
+
+      <label class="switch-row" for="enabled">
+        <span>
+          <strong>Annotate this page</strong>
+          <small id="hint">Shows the SitePing button on the page.</small>
+        </span>
+        <input id="enabled" type="checkbox" class="switch" disabled />
+      </label>
+
+      <p id="error" class="notice notice-error" role="alert" hidden></p>
+      <p id="counts" class="counts">&nbsp;</p>
+
+      <button id="review" type="button" class="button button-primary">Review and export</button>
+    </main>
+
+    <footer>
+      <small>Everything stays on this computer. <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> switches SitePing on or off.</small>
+    </footer>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
