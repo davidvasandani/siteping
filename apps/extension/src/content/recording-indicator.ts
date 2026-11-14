@@ -55,7 +55,9 @@ export function showRecordingIndicator(api: ContentApi, state: RecordingState): 
   const dot = document.createElement("span");
   dot.textContent = "●";
   dot.style.color = "#dc2626";
-  element.append(dot, document.createTextNode("Recording"), timer, stop);
+  const label = document.createElement("span");
+  label.textContent = "Recording";
+  element.append(dot, label, timer, stop);
   document.documentElement.append(element);
   const update = () => {
     const elapsed = Math.max(0, Date.now() - Date.parse(state.session.startedAt));
