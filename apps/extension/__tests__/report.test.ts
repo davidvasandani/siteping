@@ -126,6 +126,21 @@ describe("buildReportPdf", () => {
     expect(allText(read.pages)).not.toContain("?");
   });
 
+  it("hands the rasteriser joined emoji as written", async () => {
+    const family = [0x1f468, 0x1f469, 0x1f467]
+      .map((code) => String.fromCodePoint(code))
+      .join(String.fromCodePoint(0x200d));
+    const texts: string[] = [];
+    const rasterize = (request: RasterRequest) => {
+      texts.push(request.text);
+      return [{ width: 60, height: request.lineHeight, pixelWidth: 2, pixelHeight: 2, rgb: new Uint8Array(12) }];
+    };
+
+    await buildReportPdf(toReport([createRecord({ message: `Looks great ${family}` })], at), { rasterize });
+
+    expect(texts).toEqual([`Looks great ${family}`]);
+  });
+
   it("draws an author's name the fonts cannot write as an image too", async () => {
     const texts: string[] = [];
     const rasterize = (request: RasterRequest) => {

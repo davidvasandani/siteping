@@ -73,8 +73,12 @@ function normalizeChar(char: string): string {
   if ((code >= 0x2000 && code <= 0x200a) || code === 0x202f || code === 0x205f || code === 0x3000) return " ";
   // Hyphen and non-breaking hyphen.
   if (code === 0x2010 || code === 0x2011) return "-";
-  // Characters with no width: soft hyphen, zero-width space and joiners, word joiner, byte-order mark.
-  if (code === 0xad || (code >= 0x200b && code <= 0x200d) || code === 0x2060 || code === 0xfeff) return "";
+  // Characters with no width and no effect on their neighbours: soft hyphen,
+  // zero-width space, word joiner, byte-order mark. The zero-width joiner and
+  // non-joiner (0x200d, 0x200c) are kept: they make one emoji out of several
+  // and decide how Persian or Arabic letters connect. A paragraph holding one
+  // is drawn by the system's fonts, which honour them.
+  if (code === 0xad || code === 0x200b || code === 0x2060 || code === 0xfeff) return "";
   return char;
 }
 

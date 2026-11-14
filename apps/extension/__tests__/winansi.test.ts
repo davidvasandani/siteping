@@ -62,6 +62,20 @@ describe("normalizeText", () => {
     expect(canEncode(normalized)).toBe(true);
   });
 
+  it("keeps the joiners that shape emoji and connected scripts", () => {
+    const joiner = String.fromCodePoint(0x200d);
+    const nonJoiner = String.fromCodePoint(0x200c);
+    const family = [0x1f468, 0x1f469, 0x1f467].map((code) => String.fromCodePoint(code)).join(joiner);
+    // "mi-khaham" in Persian, written with a non-joiner between its two parts.
+    const persian = `${String.fromCodePoint(0x0645, 0x06cc)}${nonJoiner}${String.fromCodePoint(0x062e, 0x0648, 0x0627, 0x0647, 0x0645)}`;
+
+    expect(normalizeText(family)).toBe(family);
+    expect(normalizeText(persian)).toBe(persian);
+    // Neither can be written with the standard fonts, so both go to the rasteriser whole.
+    expect(canEncode(normalizeText(family))).toBe(false);
+    expect(canEncode(normalizeText(`a${joiner}b`))).toBe(false);
+  });
+
   it("drops control characters", () => {
     const [nul, bell, del] = [0x00, 0x07, 0x7f].map((code) => String.fromCodePoint(code));
     expect(normalizeText(`a${nul}b${bell}c${del}`)).toBe("abc");
