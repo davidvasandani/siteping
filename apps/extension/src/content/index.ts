@@ -22,6 +22,13 @@ if (!scope.__sitepingExtension) {
     else if (type === "navigated") controller.refresh();
     return undefined;
   });
+
+  // Back and Forward can restore this document from the browser's cache,
+  // widget included, without running this script again.
+  window.addEventListener("pageshow", (event) => {
+    // An extension reloaded under the page no longer answers: nothing to do.
+    if (event.persisted) void controller.resume().catch(() => {});
+  });
 }
 
 void scope.__sitepingExtension.mount();

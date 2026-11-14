@@ -35,6 +35,7 @@ export type Request =
   | { type: "settings:set"; settings: Settings }
   | { type: "capture" }
   | { type: "tab:get"; tabId: number }
+  | { type: "tab:self" }
   | { type: "tab:set"; tabId: number; enabled: boolean }
   | { type: "stats" };
 
@@ -58,6 +59,7 @@ export interface Replies {
   "settings:set": Settings;
   capture: { dataUrl: string };
   "tab:get": { enabled: boolean };
+  "tab:self": { enabled: boolean };
   "tab:set": { enabled: boolean };
   stats: SiteStats[];
 }

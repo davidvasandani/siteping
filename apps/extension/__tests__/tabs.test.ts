@@ -72,6 +72,7 @@ describe("createTabController", () => {
     await tabs.handleUpdated(7, { status: "complete" });
 
     expect(await tabs.isEnabled(7)).toBe(false);
+    expect(api.badges.get(7)).toBe("");
   });
 
   it("tells the content script about an address change without a load", async () => {

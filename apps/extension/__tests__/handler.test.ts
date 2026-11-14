@@ -147,6 +147,15 @@ describe("createHandler", () => {
     });
   });
 
+  it("tells a content script whether its own tab is switched on", async () => {
+    const { ok } = setup();
+    await ok({ type: "tab:set", tabId: 4, enabled: true });
+
+    expect(await ok({ type: "tab:self" }, { tab: { id: 4 } })).toEqual({ enabled: true });
+    expect(await ok({ type: "tab:self" }, { tab: { id: 5 } })).toEqual({ enabled: false });
+    expect(await ok({ type: "tab:self" }, {})).toEqual({ enabled: false });
+  });
+
   it("counts feedback per site, open ones apart", async () => {
     const { ok } = setup();
     const a = await ok<{ id: string }>({

@@ -72,6 +72,11 @@ export function createHandler({ api, store, tabs }: HandlerDeps): Handler {
 
     "tab:get": async ({ tabId }) => ({ enabled: await tabs.isEnabled(tabId) }),
 
+    // A content script asking about its own tab, whose id it cannot know.
+    "tab:self": async (_request, sender) => ({
+      enabled: sender.tab?.id !== undefined && (await tabs.isEnabled(sender.tab.id)),
+    }),
+
     "tab:set": async ({ tabId, enabled }) => {
       await (enabled ? tabs.enable(tabId) : tabs.disable(tabId));
       return { enabled };

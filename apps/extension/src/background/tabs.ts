@@ -126,7 +126,9 @@ export function createTabController(
             await inject(tabId);
             await badge(tabId, true);
           } catch {
+            // The tab left the site it was switched on for: access has ended.
             await forget(tabId);
+            await badge(tabId, false);
           }
         } else if (change.url !== undefined) {
           // The address changed without a load (`history.pushState`). The

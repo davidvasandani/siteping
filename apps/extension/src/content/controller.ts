@@ -1,5 +1,6 @@
 import type { SitepingConfig, SitepingInstance } from "@siteping/core";
 import type { ContentApi } from "../shared/browser.js";
+import { call } from "../shared/messages.js";
 import { pageScopeUrl, projectOf } from "../shared/scope.js";
 import { FALLBACK_AUTHOR, readSettings } from "../shared/settings.js";
 import { createRemoteStore } from "./remote-store.js";
@@ -11,6 +12,13 @@ export interface Controller {
   unmount(): void;
   /** The address changed without a load: show the feedback of the page now displayed. */
   refresh(): void;
+  /**
+   * The document came back from the back/forward cache, as it was when the
+   * reviewer left it. SitePing may have been switched off since, on a later
+   * page of the same tab: the background is asked, and the widget leaves if
+   * so. Otherwise it reloads, since feedback may have changed meanwhile.
+   */
+  resume(): Promise<void>;
 }
 
 /**
@@ -58,6 +66,13 @@ export function createController(api: ContentApi, init: (config: SitepingConfig)
 
     refresh() {
       void instance?.refresh();
+    },
+
+    async resume() {
+      if (!instance) return;
+      const { enabled } = await call(api, { type: "tab:self" });
+      if (enabled) this.refresh();
+      else this.unmount();
     },
   };
 }

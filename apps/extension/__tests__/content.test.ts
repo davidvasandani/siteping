@@ -5,6 +5,14 @@ import { createController } from "../src/content/controller.js";
 import { SETTINGS_KEY } from "../src/shared/settings.js";
 import { createFakeApi } from "./fake-api.js";
 
+/** Answer the controller's question about its own tab, as the background would. */
+const answerTabSelf = (api: ReturnType<typeof createFakeApi>, enabled: boolean): void => {
+  api.runtime.onMessage.addListener((message, _sender, respond) => {
+    if ((message as { type?: string }).type === "tab:self") respond({ ok: true, value: { enabled } });
+    return undefined;
+  });
+};
+
 const setup = () => {
   const api = createFakeApi();
   const instance = { destroy: vi.fn(), refresh: vi.fn(async () => {}) } as unknown as SitepingInstance;
@@ -83,6 +91,36 @@ describe("createController", () => {
     await mounting;
 
     expect(init).not.toHaveBeenCalled();
+  });
+
+  it("leaves a page restored from the back/forward cache when the tab was switched off since", async () => {
+    const { api, controller, init, instance } = setup();
+    answerTabSelf(api, false);
+    await controller.mount();
+
+    await controller.resume();
+
+    expect(instance.destroy).toHaveBeenCalledTimes(1);
+    // And it can be switched on again from there.
+    await controller.mount();
+    expect(init).toHaveBeenCalledTimes(2);
+  });
+
+  it("reloads the feedback of a restored page when the tab is still switched on", async () => {
+    const { api, controller, instance } = setup();
+    answerTabSelf(api, true);
+    await controller.mount();
+
+    await controller.resume();
+
+    expect(instance.destroy).not.toHaveBeenCalled();
+    expect(instance.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks nothing for a restored page that had no widget", async () => {
+    const { controller } = setup();
+    // Nobody answers `tab:self` here: a call would reject.
+    await expect(controller.resume()).resolves.toBeUndefined();
   });
 
   it("refreshes the widget on an address change, and ignores one before it is mounted", async () => {
