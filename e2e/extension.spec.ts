@@ -421,7 +421,7 @@ test("annotate a page, review it, export to PDF and Slack", async ({ context, wo
     await review.getByRole("button", { name: "Send to Slack" }).click();
     const confirm = review.locator("dialog#slack");
     await expect(confirm.locator("#slack-what")).toContainText("the text of 2 feedback items to your Slack webhook");
-    await expect(confirm).toContainText("Screenshots are not sent");
+    await expect(confirm).toContainText("Screenshots and recordings are not sent");
     expect(posted).toEqual([]);
 
     // Feedback that arrives while the confirmation is open appears in the
