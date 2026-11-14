@@ -50,6 +50,29 @@ change such entries must update the catalog, source constants, dependency
 automation, and user documentation together, or record a deliberate exception
 with its threat, detection path, and reopening trigger.
 
+### VIII. Fork additions stay mergeable
+This repository is a fork that merges upstream `main`. A feature the fork adds
+on top of upstream lives in an additive workspace and does not edit the source
+of a published `packages/*` package. A spec that must edit one names the files,
+the reason no additive seam works, and how the next upstream merge is kept
+clean. A build-time seam into a package's internals fails the build when it
+stops matching.
+
+### IX. Local-first extension data
+Content a reviewer creates in the browser extension (text, page URLs,
+screenshots, identity) stays on their machine. It leaves only through an export
+the reviewer triggers, to a destination the reviewer configured, and the UI
+states what is sent. The extension requests no host access at install: page
+access comes from the reviewer switching it on for a tab, and any further host
+is an optional permission requested at the action that needs it. Specs that add
+a network call or a permission list both and validate the shipped manifest.
+
+### X. One writer per shared storage
+A store reachable from several browser contexts (tabs, popup, extension pages,
+background) has exactly one writing context. Other contexts send it their
+writes; they may read directly. Specs name the writer and validate that
+concurrent writes from two contexts both survive.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -59,7 +82,7 @@ with its threat, detection path, and reopening trigger.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.5.0
+**Version**: 0.6.0
 
 ## Widget navigation amendment (2026-10-16)
 Annotation anchors and scroll offsets belong to the recorded page. Cross-page actions
