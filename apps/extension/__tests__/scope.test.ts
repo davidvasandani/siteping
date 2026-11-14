@@ -54,6 +54,33 @@ describe("pageUrl and deepLinkUrl", () => {
     expect(deepLinkUrl(crafted)).toBeNull();
   });
 
+  it("keeps a path that starts with two slashes on its own site", () => {
+    // A valid path, which relative resolution would read as another host.
+    const scope = pageScopeUrl(at("https://example.com//other.example/page?id=1"));
+    const odd = { id: "f1", projectName: "https://example.com", url: scope };
+
+    expect(scope).toBe("//other.example/page?id=1");
+    expect(pageUrl(odd)).toBe("https://example.com//other.example/page?id=1");
+    expect(deepLinkUrl(odd)).toBe("https://example.com//other.example/page?id=1&siteping=f1");
+  });
+
+  it.each([
+    ["an absolute URL", "https://other.example/page"],
+    ["a protocol-relative URL without a leading path", "other.example/page"],
+    ["credentials in front of another host", "@other.example/page"],
+    ["a backslash path", "\\other.example/page"],
+    ["nothing", ""],
+  ])("refuses %s as a page of the site", (_label, url) => {
+    const record = { id: "f1", projectName: "https://example.com", url };
+    expect(pageUrl(record)).toBeNull();
+    expect(deepLinkUrl(record)).toBeNull();
+  });
+
+  it("refuses a record whose site is not an http origin", () => {
+    expect(pageUrl({ projectName: "javascript:alert(1)", url: "/a" })).toBeNull();
+    expect(pageUrl({ projectName: "not a url", url: "/a" })).toBeNull();
+  });
+
   it("round-trips through pageScopeUrl", () => {
     const link = deepLinkUrl(record);
     expect(link && pageScopeUrl(at(link))).toBe(record.url);
