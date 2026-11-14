@@ -124,6 +124,10 @@ const test = base.extend<Fixtures>({
         `--load-extension=${extension}`,
         `--allowlisted-extension-id=${allowlistedExtensionId}`,
         "--enable-usermedia-screen-capturing",
+        // Chromium's own tab-capture browser tests enable compositor output;
+        // without it Linux reports the granted tab stream as a missing device.
+        "--use-gpu-in-tests",
+        "--window-size=1280,720",
       ],
     });
     await use(context);
