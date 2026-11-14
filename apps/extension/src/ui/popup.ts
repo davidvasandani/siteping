@@ -1,7 +1,8 @@
+import { formatRecordingTime, type RecordingState } from "../recording/model.js";
 import { extensionApi, type TabInfo } from "../shared/browser.js";
 import { call } from "../shared/messages.js";
 import { plural } from "../shared/report.js";
-import { isAnnotatable, siteLabel } from "../shared/scope.js";
+import { isAnnotatable, pageScopeUrl, siteLabel } from "../shared/scope.js";
 import { byId } from "./dom.js";
 
 /**
@@ -17,6 +18,44 @@ const hint = byId<HTMLElement>("hint");
 const error = byId<HTMLParagraphElement>("error");
 const counts = byId<HTMLParagraphElement>("counts");
 const review = byId<HTMLButtonElement>("review");
+const recordingHint = byId<HTMLElement>("recording-hint");
+const recordingFeedback = byId<HTMLSelectElement>("recording-feedback");
+const recordingToggle = byId<HTMLButtonElement>("recording-toggle");
+const recordingTime = byId<HTMLSpanElement>("recording-time");
+let recordingInterval: ReturnType<typeof setInterval> | undefined;
+
+function paintRecording(state: RecordingState, tabId: number, supported: boolean): void {
+  clearInterval(recordingInterval);
+  if (!supported) {
+    recordingHint.textContent = "Screen recording is not available in Safari yet.";
+    recordingFeedback.disabled = true;
+    recordingToggle.disabled = true;
+    return;
+  }
+  const active = state.phase !== "idle";
+  recordingFeedback.disabled = active || recordingFeedback.options.length === 0;
+  recordingToggle.disabled = !active && !recordingFeedback.value;
+  recordingToggle.textContent = active ? "Stop" : "Record";
+  if (!active) {
+    recordingTime.textContent = state.lastResult?.message ?? "";
+    return;
+  }
+  const update = () => {
+    const elapsed = Date.now() - Date.parse(state.session.startedAt);
+    recordingTime.textContent = `${formatRecordingTime(elapsed)} · ${formatRecordingTime(state.session.limitMs - elapsed)} left`;
+  };
+  update();
+  recordingInterval = setInterval(update, 1000);
+  recordingToggle.onclick = () => {
+    recordingToggle.disabled = true;
+    void call(api, { type: "recording:stop", reason: "manual" }).then(
+      () => window.close(),
+      (cause: unknown) => showError(cause instanceof Error ? cause.message : String(cause)),
+    );
+  };
+  if (state.session.tabId !== tabId)
+    recordingHint.textContent = "Another tab is recording. Stop it before starting here.";
+}
 
 function showError(message: string): void {
   error.textContent = message;
@@ -77,6 +116,44 @@ async function start(): Promise<void> {
         enabled.disabled = false;
       });
   });
+
+  const raw = globalThis as {
+    chrome?: { tabCapture?: unknown; offscreen?: unknown };
+    browser?: { tabCapture?: unknown; offscreen?: unknown };
+  };
+  const browser = raw.browser ?? raw.chrome;
+  const recordingSupported = Boolean(browser?.tabCapture && browser?.offscreen);
+  if (recordingSupported && projectName && tab?.url) {
+    const address = new URL(tab.url);
+    const page = pageScopeUrl(address);
+    const result = await call(api, { type: "feedback:list", query: { projectName, url: page, limit: 100 } });
+    recordingFeedback.replaceChildren(
+      ...result.feedbacks.map((feedback) => {
+        const item = document.createElement("option");
+        item.value = feedback.id;
+        item.textContent = feedback.message.length > 72 ? `${feedback.message.slice(0, 71)}…` : feedback.message;
+        return item;
+      }),
+    );
+    if (result.feedbacks.length === 0) recordingHint.textContent = "Leave feedback on this page before recording.";
+    recordingToggle.onclick = () => {
+      if (!recordingFeedback.value) return;
+      recordingToggle.disabled = true;
+      error.hidden = true;
+      void call(api, { type: "recording:start", tabId, feedbackId: recordingFeedback.value }).then(
+        (state) => paintRecording(state, tabId, true),
+        (cause: unknown) => {
+          showError(cause instanceof Error ? cause.message : String(cause));
+          recordingToggle.disabled = false;
+        },
+      );
+    };
+  }
+  paintRecording(
+    recordingSupported ? await call(api, { type: "recording:state" }) : { phase: "idle" },
+    tabId,
+    recordingSupported,
+  );
 }
 
 start().catch((cause: unknown) => showError(cause instanceof Error ? cause.message : String(cause)));

@@ -8,6 +8,9 @@ import {
 } from "@siteping/core";
 import { rasterizeText, toJpeg } from "../pdf/raster.js";
 import { buildReportPdf } from "../pdf/report.js";
+import { getAllRecordings } from "../recording/database.js";
+import type { RecordingMetadata } from "../recording/model.js";
+import { formatRecordingTime, recordingFileName } from "../recording/model.js";
 import { extensionApi } from "../shared/browser.js";
 import { formatDate, STATUS_COLOR, STATUS_LABEL, TYPE_COLOR, TYPE_LABEL } from "../shared/labels.js";
 import { call } from "../shared/messages.js";
@@ -59,6 +62,8 @@ const slackDialog = byId<HTMLDialogElement>("slack");
 const slackWhat = byId<HTMLParagraphElement>("slack-what");
 
 let records: FeedbackRecord[] = [];
+let recordings = new Map<string, RecordingMetadata>();
+const recordingUrls = new Set<string>();
 let settings: Settings = { ...DEFAULT_SETTINGS };
 let filters: Filters = { ...NO_FILTERS, site: new URLSearchParams(window.location.search).get("site") ?? ALL };
 /** Ids the reviewer unticked: left out of exports until ticked again. */
@@ -71,6 +76,30 @@ let confirmedSlack: { webhookUrl: string; payloads: SlackPayload[] } | null = nu
 const shown = (): FeedbackRecord[] => applyFilters(records, filters);
 const selection = (): FeedbackRecord[] => chosen(shown(), excluded);
 const message = (cause: unknown): string => (cause instanceof Error ? cause.message : String(cause));
+
+function blobDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error("Could not read the recording poster."));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function reportOf(selected: FeedbackRecord[]): Promise<ReturnType<typeof toReport>> {
+  const info = new Map<string, { durationMs: number; posterDataUrl: string | null }>();
+  await Promise.all(
+    selected.map(async (record) => {
+      const recording = recordings.get(record.id);
+      if (!recording) return;
+      info.set(record.id, {
+        durationMs: recording.durationMs,
+        posterDataUrl: recording.poster ? await blobDataUrl(recording.poster) : null,
+      });
+    }),
+  );
+  return toReport(selected, new Date(), info);
+}
 
 function say(text: string, kind: "ok" | "error" = "ok"): void {
   notice.textContent = text;
@@ -124,6 +153,43 @@ function screenshot(record: FeedbackRecord): HTMLElement | null {
     figure.append(outline);
   }
   return figure;
+}
+
+function revokeRecordingUrls(): void {
+  for (const url of recordingUrls) URL.revokeObjectURL(url);
+  recordingUrls.clear();
+}
+
+function recordingMedia(record: FeedbackRecord): HTMLElement | null {
+  const recording = recordings.get(record.id);
+  if (!recording) return null;
+  const url = URL.createObjectURL(recording.video);
+  recordingUrls.add(url);
+  const video = h("video", { controls: true, preload: "metadata", src: url });
+  const download = h(
+    "a",
+    {
+      class: "button",
+      href: url,
+      download: recordingFileName(record.id, recording.createdAt),
+    },
+    "Download video",
+  );
+  const remove = h("button", { type: "button", class: "button button-danger" }, "Delete recording");
+  remove.addEventListener("click", () => {
+    if (!window.confirm("Delete this screen recording? The feedback and screenshot will stay.")) return;
+    void call(api, { type: "recording:delete", feedbackId: record.id }).then(
+      () => reload().then(() => say("Recording deleted.")),
+      (cause: unknown) => say(message(cause), "error"),
+    );
+  });
+  return h(
+    "section",
+    { class: "recording-media" },
+    h("strong", {}, `Screen recording · ${formatRecordingTime(recording.durationMs)}`),
+    video,
+    h("div", { class: "actions" }, download, remove),
+  );
 }
 
 function card(record: FeedbackRecord): HTMLElement {
@@ -202,6 +268,7 @@ function card(record: FeedbackRecord): HTMLElement {
       h("p", { class: "message" }, record.message),
       h("div", { class: "meta" }, page, h("span", {}, record.authorName), h("span", {}, record.viewport)),
       screenshot(record),
+      recordingMedia(record),
       thread,
       h("div", { class: "actions" }, status, remove),
     ),
@@ -220,6 +287,7 @@ function renderSummary(): void {
 }
 
 function render(): void {
+  revokeRecordingUrls();
   filters = reconcileFilters(filters, records);
   renderFilters();
   const visible = shown();
@@ -240,7 +308,18 @@ function render(): void {
 }
 
 async function reload(): Promise<void> {
-  [records, settings] = await Promise.all([readAllRecords(api.storage.local), readSettings(api.storage.local)]);
+  const [nextRecords, nextSettings, nextRecordings] = await Promise.all([
+    readAllRecords(api.storage.local),
+    readSettings(api.storage.local),
+    getAllRecordings(),
+  ]);
+  records = nextRecords;
+  settings = nextSettings;
+  recordings = new Map(
+    nextRecordings
+      .filter((item) => nextRecords.some((record) => record.id === item.feedbackId))
+      .map((item) => [item.feedbackId, item]),
+  );
   render();
 }
 
@@ -283,7 +362,7 @@ function download(bytes: Uint8Array, fileName: string): void {
 
 exportPdf.addEventListener("click", () =>
   busy(exportPdf, "Exporting…", async () => {
-    const report = toReport(selection(), new Date());
+    const report = await reportOf(selection());
     const bytes = await buildReportPdf(report, {
       rasterize: rasterizeText,
       toJpeg,
@@ -298,7 +377,7 @@ exportPdf.addEventListener("click", () =>
 
 copySlack.addEventListener("click", () =>
   busy(copySlack, "Copying…", async () => {
-    const report = toReport(selection(), new Date());
+    const report = await reportOf(selection());
     const { text, html } = buildClipboard(report);
     try {
       await navigator.clipboard.write([
@@ -315,7 +394,7 @@ copySlack.addEventListener("click", () =>
   }),
 );
 
-sendSlack.addEventListener("click", () => {
+sendSlack.addEventListener("click", async () => {
   if (!settings.slackWebhookUrl) {
     openSettings("Add your Slack Incoming Webhook to send reviews to Slack.");
     settingsSlack.focus();
@@ -325,7 +404,7 @@ sendSlack.addEventListener("click", () => {
   // address are fixed now. Feedback arriving from another tab while the
   // dialog is open, or a webhook changed in another window, is not part of
   // what the reviewer agreed to.
-  const report = toReport(selection(), new Date());
+  const report = await reportOf(selection());
   confirmedSlack = { webhookUrl: settings.slackWebhookUrl, payloads: buildSlackMessages(report) };
   slackWhat.textContent = `This posts the text of ${plural(report.items.length, "feedback item")} to your Slack webhook: each message, its page address, type, status, author name and date.`;
   slackDialog.showModal();
@@ -400,9 +479,11 @@ filterType.addEventListener("change", () => {
 let pending: ReturnType<typeof setTimeout> | undefined;
 api.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
-  if (!Object.keys(changes).some((key) => isFeedbackKey(key) || key === SETTINGS_KEY)) return;
+  if (!Object.keys(changes).some((key) => isFeedbackKey(key) || key === SETTINGS_KEY || key === "recording-revision"))
+    return;
   clearTimeout(pending);
   pending = setTimeout(() => void reload().catch((cause: unknown) => say(message(cause), "error")), 80);
 });
 
 reload().catch((cause: unknown) => say(message(cause), "error"));
+window.addEventListener("unload", revokeRecordingUrls);

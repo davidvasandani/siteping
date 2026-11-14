@@ -50,6 +50,7 @@
         "scripts/*.mjs",
         "src/background/index.ts",
         "src/content/index.ts",
+        "src/offscreen/offscreen.ts",
         "src/ui/popup.ts",
         "src/ui/review.ts",
         "__tests__/**/*.test.ts"

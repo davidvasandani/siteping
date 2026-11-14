@@ -26,7 +26,11 @@ describe("the shipped manifest", () => {
 
     expect(manifest.manifest_version).toBe(3);
     expect(manifest.version).toBe(version);
-    expect(manifest.permissions).toEqual(["activeTab", "scripting", "storage", "unlimitedStorage"]);
+    expect(manifest.permissions).toEqual(
+      target === "chrome"
+        ? ["activeTab", "scripting", "storage", "unlimitedStorage", "tabCapture", "offscreen"]
+        : ["activeTab", "scripting", "storage", "unlimitedStorage"],
+    );
     // The one host the extension can ever reach, and only once the reviewer grants it.
     expect(manifest.optional_host_permissions).toEqual(["https://hooks.slack.com/*"]);
     for (const key of [
@@ -49,7 +53,7 @@ describe("the shipped manifest", () => {
   });
 
   it("declares the shortcut the background listens for", () => {
-    expect(Object.keys(manifestOf("chrome").commands)).toEqual(["toggle-siteping"]);
+    expect(Object.keys(manifestOf("chrome").commands)).toEqual(["toggle-siteping", "record-siteping"]);
     expect(readFileSync(join(root, "src/background/index.ts"), "utf8")).toContain('"toggle-siteping"');
   });
 });
@@ -65,6 +69,7 @@ describe("the built folder", () => {
       manifest.background.service_worker ?? manifest.background.scripts[0],
       "content.js",
       "review.html",
+      ...(target === "chrome" ? ["offscreen.html", "offscreen.js"] : []),
     ];
     for (const page of ["popup.html", "review.html"]) {
       const html = readFileSync(join(dir, page), "utf8");

@@ -1,7 +1,8 @@
 import { initSiteping } from "@siteping/widget";
 import { extensionApi } from "../shared/browser.js";
-import type { ContentMessage } from "../shared/messages.js";
+import { type ContentMessage, call } from "../shared/messages.js";
 import { type Controller, createController } from "./controller.js";
+import { hideRecordingIndicator, showRecordingIndicator, showRecordingResult } from "./recording-indicator.js";
 
 /**
  * Content script entry, injected by the background into a tab the reviewer
@@ -20,8 +21,21 @@ if (!scope.__sitepingExtension) {
     const type = (message as ContentMessage | null)?.type;
     if (type === "unmount") controller.unmount();
     else if (type === "navigated") controller.refresh();
+    else if (type === "recording:show")
+      showRecordingIndicator(api, (message as Extract<ContentMessage, { type: "recording:show" }>).state);
+    else if (type === "recording:hide") {
+      const result = message as Extract<ContentMessage, { type: "recording:hide" }>;
+      if (result.message) showRecordingResult(result.message);
+      else hideRecordingIndicator();
+    }
     return undefined;
   });
+
+  void call(api, { type: "recording:state" })
+    .then((state) => {
+      if (state.phase !== "idle") showRecordingIndicator(api, state);
+    })
+    .catch(() => {});
 
   // Back and Forward can restore this document from the browser's cache,
   // widget included, without running this script again.
