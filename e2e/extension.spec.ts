@@ -376,6 +376,14 @@ test("annotate a page, review it, export to PDF and Slack", async ({ context, wo
     await expect(confirm.locator("#slack-what")).toContainText("the text of 2 feedback items to your Slack webhook");
     await expect(confirm).toContainText("Screenshots are not sent");
     expect(posted).toEqual([]);
+
+    // Feedback that arrives while the confirmation is open appears in the
+    // list, but is not part of what the confirmation described.
+    await page.bringToFront();
+    await annotate(page, "h1", "Arrived after the confirmation opened");
+    await review.bringToFront();
+    await expect(review.locator("article.card")).toHaveCount(3);
+    await expect(confirm.locator("#slack-what")).toContainText("the text of 2 feedback items");
     await confirm.getByRole("button", { name: "Send" }).click();
 
     // While the send is in flight, a redraw must not offer the button again.
@@ -413,7 +421,7 @@ test("annotate a page, review it, export to PDF and Slack", async ({ context, wo
 
     review.once("dialog", (dialog) => void dialog.accept());
     await review.locator("article.card").first().getByRole("button", { name: "Delete" }).click();
-    await expect(review.locator("article.card")).toHaveCount(1);
+    await expect(review.locator("article.card")).toHaveCount(2);
   });
 
   await test.step("switch off: the widget leaves the page", async () => {

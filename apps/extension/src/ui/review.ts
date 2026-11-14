@@ -15,7 +15,7 @@ import { isFeedbackKey, readAllRecords } from "../shared/records.js";
 import { plural, toReport } from "../shared/report.js";
 import { deepLinkUrl, siteLabel } from "../shared/scope.js";
 import { DEFAULT_SETTINGS, readSettings, SETTINGS_KEY, type Settings } from "../shared/settings.js";
-import { buildClipboard, buildSlackMessages } from "../slack/message.js";
+import { buildClipboard, buildSlackMessages, type SlackPayload } from "../slack/message.js";
 import { SLACK_ORIGIN, sendToSlack } from "../slack/send.js";
 import { byId, h } from "./dom.js";
 import {
@@ -65,6 +65,8 @@ let filters: Filters = { ...NO_FILTERS, site: new URLSearchParams(window.locatio
 const excluded = new Set<string>();
 /** Export buttons whose export is running: they stay disabled through any redraw. */
 const running = new Set<HTMLButtonElement>();
+/** The Slack send the open confirmation describes, taken when it opened. */
+let confirmedSlack: { webhookUrl: string; payloads: SlackPayload[] } | null = null;
 
 const shown = (): FeedbackRecord[] => applyFilters(records, filters);
 const selection = (): FeedbackRecord[] => chosen(shown(), excluded);
@@ -319,8 +321,13 @@ sendSlack.addEventListener("click", () => {
     settingsSlack.focus();
     return;
   }
-  const count = selection().length;
-  slackWhat.textContent = `This posts the text of ${plural(count, "feedback item")} to your Slack webhook: each message, its page address, type, status, author name and date.`;
+  // What the dialog describes is what gets sent: the messages and the
+  // address are fixed now. Feedback arriving from another tab while the
+  // dialog is open, or a webhook changed in another window, is not part of
+  // what the reviewer agreed to.
+  const report = toReport(selection(), new Date());
+  confirmedSlack = { webhookUrl: settings.slackWebhookUrl, payloads: buildSlackMessages(report) };
+  slackWhat.textContent = `This posts the text of ${plural(report.items.length, "feedback item")} to your Slack webhook: each message, its page address, type, status, author name and date.`;
   slackDialog.showModal();
 });
 
@@ -328,12 +335,14 @@ sendSlack.addEventListener("click", () => {
 // requires before it shows a permission prompt, so the request starts here
 // and not in a later event.
 byId<HTMLButtonElement>("slack-confirm").addEventListener("click", () => {
+  const confirmed = confirmedSlack;
+  confirmedSlack = null;
+  if (!confirmed) return;
   const granted = api.permissions.request({ origins: [SLACK_ORIGIN] });
   void busy(sendSlack, "Sending…", async () => {
     if (!(await granted)) throw new Error("Slack was not contacted: access to hooks.slack.com was not granted.");
-    const payloads = buildSlackMessages(toReport(selection(), new Date()));
-    await sendToSlack(settings.slackWebhookUrl, payloads);
-    say(`Sent to Slack${payloads.length > 1 ? ` in ${payloads.length} messages` : ""}.`);
+    await sendToSlack(confirmed.webhookUrl, confirmed.payloads);
+    say(`Sent to Slack${confirmed.payloads.length > 1 ? ` in ${confirmed.payloads.length} messages` : ""}.`);
   });
 });
 
