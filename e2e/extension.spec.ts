@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -31,7 +32,6 @@ import { type BrowserContext, test as base, chromium, expect, type Page, type Wo
  * carries no extension typings.
  */
 declare const chrome: {
-  action: { openPopup(): Promise<void> };
   tabs: { query(query: { url: string }): Promise<{ id?: number }[]> };
   storage: { local: { get(keys: null): Promise<Record<string, unknown>> } };
 };
@@ -101,6 +101,9 @@ const test = base.extend<Fixtures>({
     const manifestPath = join(extension, "manifest.json");
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
     writeFileSync(manifestPath, JSON.stringify({ ...manifest, host_permissions: ["<all_urls>"] }));
+    const allowlistedExtensionId = [...createHash("sha256").update(extension).digest().subarray(0, 16)]
+      .flatMap((byte) => [String.fromCharCode(97 + (byte >> 4)), String.fromCharCode(97 + (byte & 15))])
+      .join("");
 
     // biome-ignore lint/suspicious/noUndeclaredEnvVars: Playwright runs outside Turborepo, and no cached task reads this
     const executablePath = process.env.SITEPING_CHROMIUM;
@@ -112,6 +115,7 @@ const test = base.extend<Fixtures>({
       args: [
         `--disable-extensions-except=${extension}`,
         `--load-extension=${extension}`,
+        `--allowlisted-extension-id=${allowlistedExtensionId}`,
         "--use-fake-ui-for-media-stream",
         "--auto-select-tab-capture-source-by-title=Fixture",
       ],
@@ -240,15 +244,7 @@ test("annotate a page, review it, export to PDF and Slack", async ({ context, wo
   });
 
   await test.step("record the current tab without a capture prompt", async () => {
-    const setupPopup = await setEnabled(page, worker, extensionId, true);
-    await setupPopup.close();
-    await page.bringToFront();
-
-    // Open the real action popup rather than navigating to popup.html. Chrome
-    // grants tabCapture only to an extension action/command invocation.
-    const opened = context.waitForEvent("page");
-    await worker.evaluate(() => chrome.action.openPopup());
-    const popup = await opened;
+    const popup = await setEnabled(page, worker, extensionId, true);
     const owner = popup.getByLabel("Feedback to attach the recording to");
     await expect(owner).toHaveCount(1);
     await expect(owner.locator("option")).toHaveCount(1);
@@ -259,9 +255,7 @@ test("annotate a page, review it, export to PDF and Slack", async ({ context, wo
       (box as HTMLElement).style.transition = "transform 1s linear";
     });
     await page.waitForTimeout(1_500);
-    const stopOpened = context.waitForEvent("page");
-    await worker.evaluate(() => chrome.action.openPopup());
-    const stopPopup = await stopOpened;
+    const stopPopup = await setEnabled(page, worker, extensionId, true);
     await stopPopup.getByRole("button", { name: "Stop" }).click();
     await expect(page.getByText("Recording", { exact: true })).toHaveCount(0);
   });
