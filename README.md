@@ -110,6 +110,10 @@ The full documentation lives at **[siteping.dev/docs](https://siteping.dev/docs)
 | [`@siteping/adapter-localstorage`](./packages/adapter-localstorage) | Client-side store (zero server) | [localStorage adapter](https://siteping.dev/docs/adapters/localstorage) |
 | [`@siteping/cli`](./packages/cli) | `init` / `sync` / `status` / `doctor` | [CLI](https://siteping.dev/docs/cli) |
 
+## Browser extension
+
+This fork also ships SitePing as a Chrome and Safari extension: annotate any website without embedding anything, keep everything on your computer, and export a review to PDF or Slack. See [apps/extension](./apps/extension/README.md).
+
 ## Contributing
 
 Bug reports, locale translations, docs fixes, features: everything counts, and locale additions are the friendliest first PR. Start with [CONTRIBUTING.md](./CONTRIBUTING.md).

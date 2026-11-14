@@ -14,6 +14,7 @@
 - `bun run pkg-checks` — publint + attw over published packages (list derived from release-please manifest)
 - `bun run check:consistency` — locale counts and lists, demo locale pickers, package registration (release-please, release.yml, root CHANGELOG index), fix-dts chains, esbuild override = widget spec, `fileURLToPath` (never a file URL's `.pathname`) in Node tooling, no `@prisma/client` import in adapter-prisma's src (optional peer) nor `@siteping/server` import in integration-issues' src (structural hook types), every published `workspace:` dependency pinned in release.yml with its publish job waiting for the dependency's, one Node floor = core's `engines.node` across workspaces, adapter scaffold, oldest node-compat lane, publish jobs, demo image and docs "Node N+" claims, bounded peer ranges, widget keydown listeners that handle Tab added through `addSurfaceKeydownListener` (runs in CI)
 - `bun run new:locale <code>` / `bun run new:adapter <name>` — scaffolds (see CONTRIBUTING)
+- `bunx turbo run build --filter=@siteping/extension` — build the browser extension into `apps/extension/dist/{chrome,safari}`; `bunx playwright test e2e/extension.spec.ts --project=chromium` runs it in Chromium (`SITEPING_CHROMIUM=<binary>` on NixOS)
 - `bun run openapi:update` — regenerate `packages/server/openapi.json` (the wire protocol, from the server's zod schemas and response types) after a protocol change; a test fails while it is stale
 
 ## Architecture
@@ -35,6 +36,7 @@
 - Annotations stored as % relative to anchor element bounding box
 - Core is an Internal Package (exports raw TS, no build step), bundled into consumers via `noExternal: ["@siteping/core"]` in tsup
 - Turborepo handles build orchestration, dependency ordering (`^build`), and local caching
+- **Browser extension** — `apps/extension` (private, fork-only, Manifest V3, Chrome + Safari): the unmodified widget in a content script, in store mode. The background owns the only store (`createCollectionStore` over `storage.local`, one key per feedback); tabs and extension pages send it messages. `scripts/seam.mjs` swaps the widget's `screenshot.ts` for a tab capture at bundle time and fails the build if the swap stops matching. Exports: a handwritten PDF writer (`src/pdf`) and Slack Incoming Webhook / clipboard (`src/slack`). No `packages/*` edit; see `apps/extension/README.md` and `wiki/browser-extension.md`.
 - **Docs site** — `apps/demo` (private, Next.js) serves siteping.dev: landing, `/demo`, and `/docs` (Fumadocs). Pages are MDX in `apps/demo/content/docs/`; EN at bare URLs, other locales prefixed (`/fr/docs/...`), `.fr.mdx` siblings + `meta.fr.json` for sidebar labels, `fallbackLanguage: "en"`. **Docs are written from the source code, never copied from a README** — package READMEs are thin npm cards pointing at the site. Sitemap, search index, and hreflang are all derived from the content tree. See CONTRIBUTING.md "Editing the Documentation".
 
 ## Code Style

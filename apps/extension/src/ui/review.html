@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SitePing review</title>
+    <link rel="icon" href="icons/icon-32.png" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="review">
+      <header>
+        <div class="brand">
+          <img src="icons/icon-48.png" alt="" width="28" height="28" />
+          <h1>SitePing review</h1>
+        </div>
+        <button id="open-settings" type="button" class="button">Settings</button>
+      </header>
+
+      <div class="toolbar">
+        <select id="filter-site" aria-label="Site"></select>
+        <select id="filter-status" aria-label="Status"></select>
+        <select id="filter-type" aria-label="Type"></select>
+        <span class="spacer"></span>
+        <button id="copy-slack" type="button" class="button">Copy for Slack</button>
+        <button id="send-slack" type="button" class="button">Send to Slack</button>
+        <button id="export-pdf" type="button" class="button button-primary">Export PDF</button>
+      </div>
+
+      <p id="notice" class="notice" role="status" hidden></p>
+      <p id="summary" aria-live="polite"></p>
+      <main id="list"></main>
+    </div>
+
+    <dialog id="settings" aria-labelledby="settings-title">
+      <form id="settings-form" method="dialog">
+        <h2 id="settings-title">Settings</h2>
+        <div class="field">
+          <label for="settings-name">Your name</label>
+          <input
+            id="settings-name"
+            type="text"
+            maxlength="200"
+            autocomplete="name"
+            aria-describedby="settings-name-hint"
+          />
+          <small id="settings-name-hint">Recorded as the author of feedback you leave, on every site.</small>
+        </div>
+        <div class="field">
+          <label for="settings-email">Your email</label>
+          <input
+            id="settings-email"
+            type="email"
+            maxlength="200"
+            autocomplete="email"
+            aria-describedby="settings-email-hint"
+          />
+          <small id="settings-email-hint">Optional. Kept with the feedback you leave.</small>
+        </div>
+        <div class="field">
+          <label for="settings-slack">Slack Incoming Webhook</label>
+          <input
+            id="settings-slack"
+            type="url"
+            placeholder="https://hooks.slack.com/services/…"
+            autocomplete="off"
+            aria-describedby="settings-slack-hint"
+          />
+          <small id="settings-slack-hint">
+            Create one in Slack (Apps, Incoming Webhooks) for the channel that should receive reviews. It is stored on
+            this computer and used only when you send a review.
+          </small>
+        </div>
+        <p id="settings-error" class="notice notice-error" role="alert" hidden></p>
+        <menu>
+          <button id="settings-cancel" type="button" class="button">Cancel</button>
+          <button type="submit" class="button button-primary">Save</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="slack" aria-labelledby="slack-title">
+      <form method="dialog">
+        <h2 id="slack-title">Send to Slack</h2>
+        <p id="slack-what"></p>
+        <p class="muted">
+          Screenshots are not sent: they stay on this computer and are in the PDF export. Nothing else leaves it.
+        </p>
+        <menu>
+          <button type="submit" class="button">Cancel</button>
+          <button id="slack-confirm" type="submit" class="button button-primary">Send</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <script src="review.js"></script>
+  </body>
+</html>
