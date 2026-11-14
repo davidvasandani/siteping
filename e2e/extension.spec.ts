@@ -39,6 +39,8 @@ declare const chrome: {
 const BUILD = fileURLToPath(new URL("../apps/extension/dist/chrome", import.meta.url));
 const WEBHOOK = "https://hooks.slack.com/services/T000/B000/e2e";
 const GREEN = [0, 170, 85] as const;
+const TEST_EXTENSION_KEY =
+  "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3z84pRlgxn/ec9OAp0NOJtmGQdgUjPBQKuOYed2wNhEeeW1VPu39OW0+YpCxZaa3M3yu7jC2n8QEskJ48vJ4kCExTZru99ZX4+AMeXZqHoyLVw+XS3zqqeJZTfGWvA8FMu37XHBfMdt/VDN7XCS6lqHfgD+U2M0HZdKX/AXFtKJil1vOzaU1rX57ntEym60YTY3JVysjvsvSDpFhD8XPZ7WPFQ19XUT7Ic7t1JlK2+GN42TJgF+Wtyn0z+1zQwlPmIHftEotAeNpmK1fKP4Ksx/7FkYanw6QJWBQwmf+WrgsFNP/dS0BiKjUTVmkfoBAwbTqAyjUR8B4Kxmm5vkhFwIDAQAB";
 
 const page1 = (other: string) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Fixture</title>
 <style>body{margin:0;font:16px system-ui;background:#fff} main{padding:40px}
@@ -93,37 +95,48 @@ const test = base.extend<Fixtures>({
     other.close();
   },
 
-  // biome-ignore lint/correctness/noEmptyPattern: Playwright reads the fixture's dependencies from this pattern
-  context: async ({}, use) => {
-    const work = mkdtempSync(join(tmpdir(), "siteping-extension-"));
-    const extension = join(work, "extension");
-    cpSync(BUILD, extension, { recursive: true });
-    const manifestPath = join(extension, "manifest.json");
-    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-    writeFileSync(manifestPath, JSON.stringify({ ...manifest, host_permissions: ["<all_urls>"] }));
-    const allowlistedExtensionId = [...createHash("sha256").update(extension).digest().subarray(0, 16)]
-      .flatMap((byte) => [String.fromCharCode(97 + (byte >> 4)), String.fromCharCode(97 + (byte & 15))])
-      .join("");
+  context: [
+    // biome-ignore lint/correctness/noEmptyPattern: Playwright reads the fixture's dependencies from this pattern
+    async ({}, use) => {
+      const work = mkdtempSync(join(tmpdir(), "siteping-extension-"));
+      const extension = join(work, "extension");
+      cpSync(BUILD, extension, { recursive: true });
+      const manifestPath = join(extension, "manifest.json");
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+      writeFileSync(
+        manifestPath,
+        JSON.stringify({ ...manifest, key: TEST_EXTENSION_KEY, host_permissions: ["<all_urls>"] }),
+      );
+      const allowlistedExtensionId = [
+        ...createHash("sha256").update(Buffer.from(TEST_EXTENSION_KEY, "base64")).digest().subarray(0, 16),
+      ]
+        .flatMap((byte) => [String.fromCharCode(97 + (byte >> 4)), String.fromCharCode(97 + (byte & 15))])
+        .join("");
 
-    // biome-ignore lint/suspicious/noUndeclaredEnvVars: Playwright runs outside Turborepo, and no cached task reads this
-    const executablePath = process.env.SITEPING_CHROMIUM;
-    const context = await chromium.launchPersistentContext(join(work, "profile"), {
-      // Extensions need the full browser, not the headless shell.
-      ...(executablePath ? { executablePath } : { channel: "chromium" }),
-      headless: true,
-      viewport: { width: 1280, height: 720 },
-      args: [
-        `--disable-extensions-except=${extension}`,
-        `--load-extension=${extension}`,
-        `--allowlisted-extension-id=${allowlistedExtensionId}`,
-        "--use-fake-ui-for-media-stream",
-        "--auto-select-tab-capture-source-by-title=Fixture",
-      ],
-    });
-    await use(context);
-    await context.close();
-    rmSync(work, { recursive: true, force: true });
-  },
+      // biome-ignore lint/suspicious/noUndeclaredEnvVars: Playwright runs outside Turborepo, and no cached task reads this
+      const executablePath = process.env.SITEPING_CHROMIUM;
+      const context = await chromium.launchPersistentContext(join(work, "profile"), {
+        // Extensions need the full browser, not the headless shell.
+        ...(executablePath ? { executablePath } : { channel: "chromium" }),
+        headless: false,
+        viewport: { width: 1280, height: 720 },
+        args: [
+          `--disable-extensions-except=${extension}`,
+          `--load-extension=${extension}`,
+          `--allowlisted-extension-id=${allowlistedExtensionId}`,
+          "--enable-usermedia-screen-capturing",
+          // Chromium's own tab-capture browser tests enable compositor output;
+          // without it Linux reports the granted tab stream as a missing device.
+          "--use-gpu-in-tests",
+          "--window-size=1280,720",
+        ],
+      });
+      await use(context);
+      await context.close();
+      rmSync(work, { recursive: true, force: true });
+    },
+    { scope: "test", timeout: 30_000 },
+  ],
 
   worker: async ({ context }, use) => {
     await use(context.serviceWorkers()[0] ?? (await context.waitForEvent("serviceworker")));
@@ -249,14 +262,19 @@ test("annotate a page, review it, export to PDF and Slack", async ({ context, wo
     await expect(owner).toHaveCount(1);
     await expect(owner.locator("option")).toHaveCount(1);
     await popup.getByRole("button", { name: "Record" }).click();
-    await expect(page.getByText("Recording", { exact: true })).toBeVisible();
+    await expect
+      .poll(async () => {
+        const alert = popup.getByRole("alert");
+        if (await alert.isVisible()) throw new Error(`Record failed: ${await alert.textContent()}`);
+        return page.getByText("Recording", { exact: true }).count();
+      })
+      .toBe(1);
     await page.locator("#box").evaluate((box) => {
       (box as HTMLElement).style.transform = "translateX(80px)";
       (box as HTMLElement).style.transition = "transform 1s linear";
     });
     await page.waitForTimeout(1_500);
-    const stopPopup = await setEnabled(page, worker, extensionId, true);
-    await stopPopup.getByRole("button", { name: "Stop" }).click();
+    await popup.getByRole("button", { name: "Stop" }).click();
     await expect(page.getByText("Recording", { exact: true })).toHaveCount(0);
   });
 
@@ -356,9 +374,9 @@ test("annotate a page, review it, export to PDF and Slack", async ({ context, wo
     const pdf = readFileSync(await download.path()).toString("latin1");
     expect(pdf.startsWith("%PDF-1.4")).toBe(true);
     expect(pdf.trimEnd().endsWith("%%EOF")).toBe(true);
-    // Two screenshots as JPEG, and the Japanese line, which the standard
-    // fonts cannot write, as raw pixels.
-    expect(pdf.match(/\/Filter \/DCTDecode/g)).toHaveLength(2);
+    // Two screenshots and the recording poster as JPEG, plus the Japanese
+    // line, which the standard fonts cannot write, as raw pixels.
+    expect(pdf.match(/\/Filter \/DCTDecode/g)).toHaveLength(3);
     expect(pdf.match(/\/ColorSpace \/DeviceRGB \/BitsPerComponent 8 \/Filter \/FlateDecode/g)?.length).toBeGreaterThan(
       0,
     );
@@ -403,7 +421,7 @@ test("annotate a page, review it, export to PDF and Slack", async ({ context, wo
     await review.getByRole("button", { name: "Send to Slack" }).click();
     const confirm = review.locator("dialog#slack");
     await expect(confirm.locator("#slack-what")).toContainText("the text of 2 feedback items to your Slack webhook");
-    await expect(confirm).toContainText("Screenshots are not sent");
+    await expect(confirm).toContainText("Screenshots and recordings are not sent");
     expect(posted).toEqual([]);
 
     // Feedback that arrives while the confirmation is open appears in the
