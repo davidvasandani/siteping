@@ -47,7 +47,9 @@ Set `SITEPING_BUNDLE_ID` before step 1 to use your own bundle identifier.
    each page's own markers. Leaving the site switches it off; switch it on
    again when you come back.
 4. "Review and export" in the popup opens the review page: all feedback by
-   site, with filters, status changes and delete.
+   site, with filters, status changes and delete. Each feedback also shows the
+   browser major version, operating system, device class and viewport in which
+   it was created.
 
 ### Record the current tab (Chrome)
 
@@ -71,7 +73,9 @@ the popup says so instead of starting a capture that cannot be supported.
 "Export PDF" downloads one file: a summary of the site with totals by status
 and type, then every feedback with its number, type, status, message, a
 clickable link to the page, author, date, replies and the screenshot with the
-annotated area outlined. Untick a feedback to leave it out.
+annotated area outlined. Browser, operating system, device class and viewport
+are included so a teammate can reproduce environment-specific issues. Untick a
+feedback to leave it out.
 
 For feedback with a recording, the PDF adds a poster frame, duration and a
 note that the video remains in SitePing. The PDF is generated in the browser. Text in Latin scripts is real text
@@ -91,7 +95,9 @@ Two ways:
 
 Screenshots and recordings are not sent to Slack (a webhook cannot carry
 files); the message says a local recording exists and that screenshots are in
-the PDF. A review of more than 20 feedback is posted as
+the PDF. Each item includes the same concise browser, operating-system, device
+and viewport labels as the review page; the complete raw user-agent string is
+never sent. A review of more than 20 feedback is posted as
 several messages.
 
 ## Privacy and permissions
@@ -122,8 +128,9 @@ What is stored, and where:
 What is sent, and where:
 
 - Nothing, until "Send to Slack". That posts the text of the chosen feedback
-  (message, page address, type, status, author name, date) to the webhook
-  address you saved, which must be on `hooks.slack.com`.
+  (message, page address, type, status, author name, date, and concise browser,
+  operating-system, device and viewport labels) to the webhook address you
+  saved, which must be on `hooks.slack.com`. The raw user-agent stays local.
 
 ## How it is built
 

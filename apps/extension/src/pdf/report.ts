@@ -1,4 +1,5 @@
 import { FEEDBACK_STATUSES, FEEDBACK_TYPES } from "@siteping/core";
+import { formatEnvironment } from "../shared/environment.js";
 import { ACCENT, formatDate, STATUS_COLOR, STATUS_LABEL, TYPE_COLOR, TYPE_LABEL } from "../shared/labels.js";
 import { countItems, plural, type Report, type ReportItem } from "../shared/report.js";
 import { decodeDataUrl, parseJpeg } from "./jpeg.js";
@@ -322,7 +323,7 @@ class ReportBuilder {
 
     // Where and who. The page is a link when the record has a safe address.
     const pageLabel = normalizeText(item.pageLabel).replace(/\n/g, " ");
-    const by = `${normalizeText(item.author).replace(/\n/g, " ")}  ·  ${item.viewport}`;
+    const by = normalizeText(item.author).replace(/\n/g, " ");
     const byRow = await this.lineRow(by, SMALL, INNER_WIDTH * 0.45);
     const pageRow = await this.lineRow(pageLabel, { ...SMALL, color: ACCENT }, INNER_WIDTH * 0.52);
     rows.push({
@@ -340,6 +341,7 @@ class ReportBuilder {
         byRow.draw?.(page, x + INNER_WIDTH - byWidth, y);
       },
     });
+    rows.push(gap(3), ...(await this.textRows(formatEnvironment(item.environment), SMALL, INNER_WIDTH)));
 
     const image = await this.screenshot(item);
     if (image) {

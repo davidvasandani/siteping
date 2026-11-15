@@ -12,6 +12,7 @@ import { getAllRecordings } from "../recording/database.js";
 import type { RecordingMetadata } from "../recording/model.js";
 import { formatRecordingTime, recordingFileName } from "../recording/model.js";
 import { extensionApi } from "../shared/browser.js";
+import { describeEnvironment, formatEnvironment } from "../shared/environment.js";
 import { formatDate, STATUS_COLOR, STATUS_LABEL, TYPE_COLOR, TYPE_LABEL } from "../shared/labels.js";
 import { call } from "../shared/messages.js";
 import { isFeedbackKey, readAllRecords } from "../shared/records.js";
@@ -193,6 +194,7 @@ function recordingMedia(record: FeedbackRecord): HTMLElement | null {
 }
 
 function card(record: FeedbackRecord): HTMLElement {
+  const environment = describeEnvironment(record.userAgent, record.viewport);
   const include = h("input", {
     type: "checkbox",
     checked: !excluded.has(record.id),
@@ -266,7 +268,13 @@ function card(record: FeedbackRecord): HTMLElement {
         h("time", { datetime: record.createdAt.toISOString() }, formatDate(record.createdAt)),
       ),
       h("p", { class: "message" }, record.message),
-      h("div", { class: "meta" }, page, h("span", {}, record.authorName), h("span", {}, record.viewport)),
+      h(
+        "div",
+        { class: "meta" },
+        page,
+        h("span", {}, record.authorName),
+        h("span", { title: "Browser · operating system · device · viewport" }, formatEnvironment(environment)),
+      ),
       screenshot(record),
       recordingMedia(record),
       thread,

@@ -1,5 +1,8 @@
 import { buildFeedbackRecord, type FeedbackCreateInput, type FeedbackRecord } from "@siteping/core";
 
+export const CHROME_WINDOWS_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
+
 let counter = 0;
 
 /** A create input as the widget's `StoreClient` builds one. */

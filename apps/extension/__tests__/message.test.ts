@@ -8,7 +8,7 @@ import {
   ITEMS_PER_MESSAGE,
   type SlackBlock,
 } from "../src/slack/message.js";
-import { createRecord } from "./fixtures.js";
+import { CHROME_WINDOWS_USER_AGENT, createRecord } from "./fixtures.js";
 
 const at = new Date("2026-11-14T15:00:00Z");
 
@@ -26,8 +26,20 @@ describe("escapeMrkdwn", () => {
 describe("buildSlackMessages", () => {
   it("builds one message: header, totals, one section per feedback, a closing note", () => {
     const records = [
-      createRecord({ type: "bug", message: "Button overlaps the table", url: "/pricing", authorName: "Ada" }),
-      createRecord({ type: "question", status: "resolved", message: "Is this final?", url: "/about" }),
+      createRecord({
+        type: "bug",
+        message: "Button overlaps the table",
+        url: "/pricing",
+        authorName: "Ada",
+        userAgent: CHROME_WINDOWS_USER_AGENT,
+      }),
+      createRecord({
+        type: "question",
+        status: "resolved",
+        message: "Is this final?",
+        url: "/about",
+        userAgent: CHROME_WINDOWS_USER_AGENT,
+      }),
     ];
 
     const [payload, ...rest] = buildSlackMessages(toReport(records, at));
@@ -44,8 +56,8 @@ describe("buildSlackMessages", () => {
     ]);
     expect(payload?.blocks[2]).toEqual({ type: "divider" });
     expect(sections(payload?.blocks ?? [])).toEqual([
-      "*#1*  ·  🐞 Bug  ·  Open\n> Button overlaps the table\n<https://example.com/pricing|/pricing>  ·  Ada  ·  14 Nov 2026",
-      "*#2*  ·  ❓ Question  ·  Resolved\n> Is this final?\n<https://example.com/about|/about>  ·  Ada  ·  14 Nov 2026",
+      "*#1*  ·  🐞 Bug  ·  Open\n> Button overlaps the table\nChrome 141 · Windows · Desktop · 1280×720\n<https://example.com/pricing|/pricing>  ·  Ada  ·  14 Nov 2026",
+      "*#2*  ·  ❓ Question  ·  Resolved\n> Is this final?\nChrome 141 · Windows · Desktop · 1280×720\n<https://example.com/about|/about>  ·  Ada  ·  14 Nov 2026",
     ]);
   });
 
@@ -153,7 +165,7 @@ describe("buildSlackMessages", () => {
       expect(text).not.toMatch(/&(?!amp;|lt;|gt;)/);
     }
     // The quote is shortened, not dropped, and the page stays linked.
-    expect(texts[0]).toMatch(/^\*#1\*.*\n> (&amp;)+…\n<https:/);
+    expect(texts[0]).toMatch(/^\*#1\*.*\n> (&amp;)+…\nUnknown browser.*\n<https:/);
   });
 
   it("keeps the header within Slack's 150 characters", () => {
@@ -185,7 +197,13 @@ describe("buildSlackMessages", () => {
 
 describe("buildClipboard", () => {
   it("offers plain text and HTML with the same content", () => {
-    const record = createRecord({ type: "change", message: "Shorter headline\nplease", url: "/", authorName: "Ada" });
+    const record = createRecord({
+      type: "change",
+      message: "Shorter headline\nplease",
+      url: "/",
+      authorName: "Ada",
+      userAgent: CHROME_WINDOWS_USER_AGENT,
+    });
 
     const { text, html } = buildClipboard(toReport([record], at));
 
@@ -197,11 +215,13 @@ describe("buildClipboard", () => {
         "#1  ·  Change  ·  Open",
         "> Shorter headline",
         "> please",
+        "Chrome 141 · Windows · Desktop · 1280×720",
         "https://example.com/  ·  Ada  ·  14 Nov 2026",
       ].join("\n"),
     );
     expect(html).toContain("<b>SitePing feedback  ·  example.com</b>");
     expect(html).toContain("<blockquote>Shorter headline<br>please</blockquote>");
+    expect(html).toContain("<p>Chrome 141 · Windows · Desktop · 1280×720</p>");
     expect(html).toContain('<a href="https://example.com/">/</a>  ·  Ada  ·  14 Nov 2026');
   });
 
