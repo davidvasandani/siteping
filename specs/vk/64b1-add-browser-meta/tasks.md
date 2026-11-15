@@ -43,5 +43,5 @@ files and may be completed together.
       affected checks until no significant findings remain (depends on T009).
 - [x] T011 Update `wiki/browser-extension.md` and `wiki/index.md` with reusable
       lessons tagged `vk/64b1-add-browser-meta` (depends on T010).
-- [ ] T012 Commit, push, create the SitePing PR with Vibe Kanban, wait for green
+- [x] T012 Commit, push, create the SitePing PR with Vibe Kanban, wait for green
       required CI, and merge (depends on T011).
