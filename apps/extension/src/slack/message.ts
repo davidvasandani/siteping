@@ -1,4 +1,5 @@
 import type { FeedbackType } from "@siteping/core";
+import { formatEnvironment } from "../shared/environment.js";
 import { formatDate, STATUS_LABEL, TYPE_LABEL } from "../shared/labels.js";
 import { countItems, plural, type Report, type ReportItem } from "../shared/report.js";
 
@@ -110,10 +111,12 @@ function itemSection(item: ReportItem): string {
       formatDate(item.createdAt),
       ...(item.comments.length > 0 ? [item.comments.length === 1 ? "1 reply" : `${item.comments.length} replies`] : []),
     ].join(SEPARATOR);
+    const environment = escapeMrkdwn(formatEnvironment(item.environment));
     return [
       head,
       ...quote,
       ...(item.recording ? ["_Screen recording attached (kept on the reviewer’s machine)._"] : []),
+      environment,
       foot,
     ].join("\n");
   };
@@ -170,12 +173,14 @@ export function buildClipboard(report: Report): { text: string; html: string } {
     const message = cut(item.message.trim(), EXCERPT_LENGTH);
     const label = cut(oneLine(item.pageLabel), LABEL_LIMIT);
     const tail = [oneLine(item.author), formatDate(item.createdAt)].join(SEPARATOR);
+    const environment = formatEnvironment(item.environment);
     const recording = item.recording ? "Screen recording attached (kept on the reviewer’s machine)." : "";
 
     text.push(
       head,
       ...message.split(/\r?\n/).map((line) => `> ${line}`.trimEnd()),
       ...(recording ? [recording] : []),
+      environment,
       [item.pageUrl ?? label, tail].join(SEPARATOR),
       "",
     );
@@ -183,6 +188,7 @@ export function buildClipboard(report: Report): { text: string; html: string } {
       `<p><b>#${item.number}</b>${SEPARATOR}${escapeHtml(TYPE_LABEL[item.type])}${SEPARATOR}${escapeHtml(STATUS_LABEL[item.status])}</p>`,
       `<blockquote>${escapeHtml(message).replace(/\r?\n/g, "<br>")}</blockquote>`,
       ...(recording ? [`<p><i>${escapeHtml(recording)}</i></p>`] : []),
+      `<p>${escapeHtml(environment)}</p>`,
       `<p>${item.pageUrl ? `<a href="${escapeHtml(item.pageUrl)}">${escapeHtml(label)}</a>` : escapeHtml(label)}${SEPARATOR}${escapeHtml(tail)}</p>`,
     );
   }

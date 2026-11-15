@@ -82,7 +82,7 @@ concurrent writes from two contexts both survive.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.7.0
+**Version**: 0.8.0
 
 ## Widget navigation amendment (2026-10-16)
 Annotation anchors and scroll offsets belong to the recorded page. Cross-page actions
@@ -97,3 +97,11 @@ Principle X and extension-side ownership keyed to the feedback id under Principl
 VIII. Recording requires an explicit reviewer action, never adds audio implicitly,
 and must have a bounded lifetime. Feedback deletion cascades to associated media;
 quota or media failures must preserve feedback text and be visible to the reviewer.
+
+## Extension environment-metadata amendment (2026-11-15)
+Browser, operating-system, device, and viewport labels shown for extension
+feedback are presentation derived from the standard feedback record, not a new
+fingerprinting channel. Derivation must be local, dependency-free unless a plan
+justifies otherwise, tolerant of unknown or malformed values, and consistent
+across on-screen review and explicit exports. Raw user-agent strings remain
+local; exports use concise derived labels.

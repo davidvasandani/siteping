@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildReportPdf, type RasterRequest } from "../src/pdf/report.js";
 import { toReport } from "../src/shared/report.js";
-import { createRecord, TINY_JPEG_DATA_URL } from "./fixtures.js";
+import { CHROME_WINDOWS_USER_AGENT, createRecord, TINY_JPEG_DATA_URL } from "./fixtures.js";
 import { readPdf } from "./pdf-reader.js";
 
 const at = new Date("2026-11-14T15:00:00Z");
@@ -37,6 +37,7 @@ describe("buildReportPdf", () => {
       url: "/pricing?id=5",
       authorName: "Chloé Lefèvre",
       viewport: "390x844",
+      userAgent: CHROME_WINDOWS_USER_AGENT,
     });
 
     const read = await readPdf(await buildReportPdf(toReport([record], at)));
@@ -51,7 +52,8 @@ describe("buildReportPdf", () => {
         "Shorten the headline.",
         "It wraps on mobile.",
         "/pricing?id=5",
-        "Chloé Lefèvre · 390×844",
+        "Chloé Lefèvre",
+        "Chrome 141 · Windows · Desktop · 390×844",
       ]),
     );
     expect(read.pages[0]?.links).toEqual(["https://example.com/pricing?id=5"]);
@@ -150,7 +152,7 @@ describe("buildReportPdf", () => {
 
     await buildReportPdf(toReport([createRecord({ authorName: "Łukasz" })], at), { rasterize });
 
-    expect(texts).toEqual(["Łukasz  ·  1280×720"]);
+    expect(texts).toEqual(["Łukasz"]);
   });
 
   it("without a rasteriser, still produces the report", async () => {

@@ -7,6 +7,7 @@ import {
   isSafeImageUrl,
   type ScreenshotRegion,
 } from "@siteping/core";
+import { describeEnvironment, type EnvironmentMetadata } from "./environment.js";
 import { pageUrl, siteLabel } from "./scope.js";
 
 /** One feedback as an export shows it. Both exports are built from this, neither reads storage. */
@@ -23,8 +24,7 @@ export interface ReportItem {
   pageLabel: string;
   author: string;
   createdAt: Date;
-  /** Viewport the reviewer had, e.g. `1280×720`. */
-  viewport: string;
+  environment: EnvironmentMetadata;
   comments: { author: string; body: string; createdAt: Date }[];
   screenshot: { dataUrl: string; region: ScreenshotRegion | null } | null;
   recording?: { durationMs: number; posterDataUrl: string | null };
@@ -69,7 +69,7 @@ export function toReport(
         pageLabel: mixed ? `${siteLabel(record.projectName)}${record.url}` : record.url,
         author: record.authorName,
         createdAt: record.createdAt,
-        viewport: record.viewport.replace(/x/i, "×"),
+        environment: describeEnvironment(record.userAgent, record.viewport),
         comments: (record.comments ?? []).map((comment) => ({
           author: comment.authorName,
           body: comment.body,

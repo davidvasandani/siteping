@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { countItems, plural, toReport } from "../src/shared/report.js";
-import { createRecord, TINY_JPEG_DATA_URL } from "./fixtures.js";
+import { CHROME_WINDOWS_USER_AGENT, createRecord, TINY_JPEG_DATA_URL } from "./fixtures.js";
 
 const at = new Date("2026-11-14T15:00:00Z");
 
@@ -35,6 +35,7 @@ describe("toReport", () => {
     const record = createRecord({
       authorName: "Ada",
       viewport: "1280x720",
+      userAgent: CHROME_WINDOWS_USER_AGENT,
       screenshotDataUrl: TINY_JPEG_DATA_URL,
       screenshotRegion: { xPct: 0.1, yPct: 0.2, wPct: 0.3, hPct: 0.4 },
     });
@@ -55,7 +56,12 @@ describe("toReport", () => {
 
     expect(item).toMatchObject({
       author: "Ada",
-      viewport: "1280×720",
+      environment: {
+        browser: "Chrome 141",
+        os: "Windows",
+        device: "Desktop",
+        viewport: "1280×720",
+      },
       comments: [{ author: "Bo", body: "On it", createdAt: at }],
       screenshot: { dataUrl: TINY_JPEG_DATA_URL, region: { xPct: 0.1, yPct: 0.2, wPct: 0.3, hPct: 0.4 } },
     });
