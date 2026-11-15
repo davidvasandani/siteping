@@ -1,10 +1,29 @@
 ---
 title: Browser extension (apps/extension): the widget on any site, local only
 tags: [extension, chrome, safari, widget, storage, permissions, e2e]
-tasks: [vk/e5c0-siteping-chrome, vk/48b5-siteping-extensi]
+tasks: [vk/e5c0-siteping-chrome, vk/48b5-siteping-extensi, vk/64b1-add-browser-meta]
 ---
 
 # Browser extension
+
+## Browser environment metadata
+
+Task `vk/64b1-add-browser-meta` makes the environment already stored on every
+core feedback record useful in the extension review. `shared/environment.ts`
+derives browser family/major, OS family, device class and a normalized viewport
+at display time. Existing records need no migration, and `packages/*` remains
+unchanged.
+
+UA compatibility tokens overlap, so detection order is part of the contract:
+Edge, Opera, Samsung Internet and iOS aliases precede generic Chrome/Safari.
+iPad desktop mode says `Macintosh` but retains `Mobile`, so it must be handled
+before macOS. Android without `Mobile` is a tablet. Unknown values are honest
+labels, never exceptions or guesses.
+
+The same pure display model feeds review cards, PDF, Slack and clipboard. Only
+concise labels leave through explicit exports; the raw UA stays local. Keep the
+parser narrow and table-tested instead of adding a full UA dependency or exact
+device fingerprinting.
 
 ## Screen recordings
 
