@@ -13,6 +13,7 @@ import {
   type SitepingIdentity,
   type SitepingPanelAction,
 } from "@siteping/core";
+import { annotationDestination } from "./annotation-navigation.js";
 import type { GetFeedbacksOptions, WidgetClient } from "./api-client.js";
 import { SegmentedControl } from "./components/segmented-control.js";
 import { PAGE_SIZE } from "./constants.js";
@@ -181,6 +182,7 @@ export class Panel {
     options?: {
       getScope: () => PageScope;
       scopeAnnotationsByUrl: boolean;
+      deepLinkParam?: string | undefined;
       defaultPanelScope?: SitepingConfig["defaultPanelScope"];
       panelActions?: readonly SitepingPanelAction[] | undefined;
       ownFeedback?: Pick<OwnFeedback, "ids" | "remove"> | undefined;
@@ -333,9 +335,17 @@ export class Panel {
         },
         // Same rule as the page markers: another page's scroll offset and
         // anchor mean nothing here (reachable via the "all pages" scope).
-        canGoToAnnotation: (fb) => !this.scopeAnnotationsByUrl || fb.url === this.getScope().url,
+        canGoToAnnotation: (fb) =>
+          !this.scopeAnnotationsByUrl ||
+          fb.url === this.getScope().url ||
+          annotationDestination(fb.url, fb.id, options?.deepLinkParam) !== null,
         lostNote: (id) => this.lostNote(id),
         onGoToAnnotation: (fb) => {
+          if (this.scopeAnnotationsByUrl && fb.url !== this.getScope().url) {
+            const destination = annotationDestination(fb.url, fb.id, options?.deepLinkParam);
+            if (destination) window.location.assign(destination);
+            return;
+          }
           if (fb.annotations.length > 0) {
             const ann = fb.annotations[0];
             if (!ann) return;
