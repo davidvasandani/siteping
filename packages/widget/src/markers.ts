@@ -7,6 +7,7 @@ import {
 } from "@siteping/core";
 import { EASE_OUT, Z_INDEX_MAX } from "./constants.js";
 import { type ResolvedAnnotation, resolveAnnotation } from "./dom/resolver.js";
+import { scrollRectIntoView } from "./dom/scroll-into-view.js";
 import { classifyVisibility } from "./dom/visibility.js";
 import { el, focusRing, setText } from "./dom-utils.js";
 import type { EventBus, WidgetEvents } from "./events.js";
@@ -845,15 +846,30 @@ export class MarkerManager {
    * annotation time. That keeps the focus correct after layout changes
    * (responsive breakpoints, lazy-loaded content) because the marker has
    * already been re-positioned to track the live anchor.
+   *
+   * The marker layer hangs off `<body>`, so it can only scroll the document:
+   * when the anchor sits in an inner scroll container (app shells), the
+   * anchor's own scrollers are driven instead.
    */
   focusFeedback(feedbackId: string): boolean {
     const entry = this.entries.find((e) => e.feedback.id === feedbackId);
-    const markerEl = entry?.elements.find(isShown);
+    const index = entry ? entry.elements.findIndex(isShown) : -1;
+    const markerEl = entry?.elements[index];
     if (!entry || !markerEl) return false;
-    markerEl.scrollIntoView({ behavior: prefersReducedMotion() ? "auto" : "smooth", block: "center" });
+    if (!this.scrollAnchorIntoView(entry, index)) {
+      markerEl.scrollIntoView({ behavior: prefersReducedMotion() ? "auto" : "smooth", block: "center" });
+    }
     this.pinHighlight(entry.feedback);
     this.highlight(feedbackId);
     return true;
+  }
+
+  /** Centre the annotation in its inner scrollers; `false` when it has none (or no anchor). */
+  private scrollAnchorIntoView(entry: MarkerEntry, index: number): boolean {
+    const annotation = entry.feedback.annotations[index];
+    if (!annotation) return false;
+    const resolved = resolveAnnotation(toAnchorData(annotation), toRectData(annotation));
+    return resolved ? scrollRectIntoView(resolved.element, resolved.rect) : false;
   }
 
   /**
