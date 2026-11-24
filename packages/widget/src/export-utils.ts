@@ -15,130 +15,6 @@ const ICON_CSV = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" str
 const ICON_JSON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H6a2 2 0 0 0-2 2v4a2 2 0 0 1-2 2 2 2 0 0 1 2 2v4a2 2 0 0 0 2 2h2"/><path d="M16 3h2a2 2 0 0 1 2 2v4a2 2 0 0 0 2 2 2 2 0 0 0-2 2v4a2 2 0 0 1-2 2h-2"/></svg>`;
 
 // ---------------------------------------------------------------------------
-// CSS
-// ---------------------------------------------------------------------------
-
-export const EXPORT_CSS = /* css */ `
-  /* ============================
-     Export Button & Menu
-     ============================ */
-
-  .sp-export-btn {
-    padding: 5px 12px;
-    border-radius: var(--sp-radius-full);
-    border: 1px solid var(--sp-border);
-    background: transparent;
-    color: var(--sp-text-tertiary);
-    font-family: var(--sp-font);
-    font-size: 11px;
-    font-weight: 500;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    transition: all 0.2s ease;
-    position: relative;
-  }
-
-  .sp-export-btn svg {
-    width: 13px;
-    height: 13px;
-  }
-
-  .sp-export-btn:hover {
-    border-color: var(--sp-accent);
-    color: var(--sp-accent-text);
-    background: var(--sp-accent-light);
-  }
-
-  .sp-export-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-    pointer-events: none;
-  }
-
-  .sp-export-menu {
-    position: absolute;
-    top: calc(100% + 6px);
-    right: 0;
-    min-width: 180px;
-    padding: 4px;
-    border-radius: var(--sp-radius);
-    background: var(--sp-glass-bg-heavy);
-    backdrop-filter: blur(var(--sp-blur));
-    -webkit-backdrop-filter: blur(var(--sp-blur));
-    border: 1px solid var(--sp-glass-border);
-    box-shadow: var(--sp-shadow-lg);
-    z-index: 10;
-    opacity: 0;
-    transform: translateY(-4px) scale(0.97);
-    transition: opacity 0.15s ease, transform 0.15s ease;
-    pointer-events: none;
-  }
-
-  .sp-export-menu--open {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-    pointer-events: auto;
-  }
-
-  .sp-export-option {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    width: 100%;
-    padding: 8px 16px;
-    border: none;
-    border-radius: 8px;
-    background: transparent;
-    color: var(--sp-text-secondary);
-    font-family: var(--sp-font);
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s ease;
-    text-align: left;
-  }
-
-  .sp-export-option:hover,
-  .sp-export-option:focus-visible {
-    background: var(--sp-accent-light);
-    color: var(--sp-accent-text);
-  }
-
-  .sp-export-option-icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-  }
-
-  .sp-export-option-icon svg {
-    width: 16px;
-    height: 16px;
-  }
-
-  .sp-export-option-label {
-    flex: 1;
-  }
-
-  @media (forced-colors: active) {
-    .sp-export-btn,
-    .sp-export-option,
-    .sp-export-menu {
-      border: 2px solid ButtonText !important;
-      background: Canvas !important;
-      color: ButtonText !important;
-    }
-
-    .sp-export-btn:focus-visible,
-    .sp-export-option:focus-visible {
-      outline: 3px solid Highlight !important;
-    }
-  }
-`;
-
-// ---------------------------------------------------------------------------
 // CSV / JSON conversion
 // ---------------------------------------------------------------------------
 
@@ -236,7 +112,7 @@ export class ExportButton {
     // Wrapper for relative positioning of the menu
     this.element = el("div", { style: "position: relative; display: inline-flex;" });
 
-    // Trigger button — matches .sp-btn-delete-all pill style
+    // Trigger button: a tinted text button, like .sp-btn-delete-all
     const btn = document.createElement("button");
     btn.className = "sp-export-btn";
     btn.setAttribute("aria-haspopup", "true");
@@ -245,6 +121,8 @@ export class ExportButton {
     const label = document.createElement("span");
     setText(label, t("export.label"));
     btn.appendChild(label);
+    // The label is visually hidden (an icon bar button): the pointer gets it as a tooltip.
+    btn.title = t("export.label");
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
       this.toggle();

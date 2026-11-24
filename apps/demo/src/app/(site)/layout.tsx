@@ -1,5 +1,6 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
+import { Analytics } from "@/components/analytics";
 import "../globals.css";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
@@ -26,15 +27,22 @@ export const metadata: Metadata = {
     title: "SitePing — Client feedback, pinned to the page",
     description: "Open-source feedback widget. Self-hosted, DOM-anchored, npm install and go.",
   },
-  other: {
-    "theme-color": "#030712",
-  },
+};
+
+// Every page of this group opens on the night-blue ink (the landing's header,
+// the demo banner), so the phone's status bar matches it in both OS schemes.
+// No color-scheme here: the demo's client site is light and keeps light controls.
+export const viewport: Viewport = {
+  themeColor: "#05071a",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className={inter.variable}>
-      <body className="bg-gray-950 font-sans text-gray-100">{children}</body>
+      <body className="bg-gray-950 font-sans text-gray-100">
+        {children}
+        <Analytics />
+      </body>
     </html>
   );
 }

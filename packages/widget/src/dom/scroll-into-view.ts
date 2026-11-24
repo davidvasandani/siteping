@@ -9,6 +9,8 @@
  * the annotated rect in each, clamped to its scroll range.
  */
 
+import { prefersReducedMotion } from "../viewport.js";
+
 const SCROLLABLE_OVERFLOW = new Set(["auto", "scroll", "overlay"]);
 
 /**
@@ -97,7 +99,7 @@ function centreIn(el: Element, top: number, left: number, h: number, w: number):
   const dx = el.scrollLeft - x;
   if (dy || dx) {
     el.scrollTo({ top: y, left: x, behavior: "instant" });
-    el.scrollBy({ top: dy, left: dx, behavior: "smooth" });
+    el.scrollBy({ top: dy, left: dx, behavior: prefersReducedMotion() ? "instant" : "smooth" });
   }
   return [dy, dx];
 }
@@ -127,6 +129,7 @@ export function scrollRectIntoView(anchor: Element, rect: DOMRect): boolean {
   // Last scroller: the window clamps on its own (window metrics hold in quirks mode too).
   const dy = viewportScrolls("y") ? top + rect.height / 2 - innerHeight / 2 : 0;
   const dx = viewportScrolls("x") ? left + rect.width / 2 - innerWidth / 2 : 0;
-  if (!fixed && (dy || dx)) window.scrollBy({ top: dy, left: dx, behavior: "smooth" });
+  if (!fixed && (dy || dx))
+    window.scrollBy({ top: dy, left: dx, behavior: prefersReducedMotion() ? "instant" : "smooth" });
   return true;
 }

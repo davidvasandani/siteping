@@ -32,6 +32,9 @@
 //  11. a widget `keydown` listener that handles Tab is added with a plain
 //      addEventListener instead of addSurfaceKeydownListener, so a host
 //      modal's capture-phase focus trap would take the Tab first.
+//  12. Renovate's list of bundled dev dependencies (the ones whose bumps keep
+//      a releasing commit type) differs from the devDependencies a tsup
+//      `noExternal` inlines into a published package.
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -195,8 +198,8 @@ for (const pkgPath of Object.keys(manifest)) {
 
 // The root `overrides.esbuild` is the supply-chain floor for every transitive
 // esbuild (#242), and it wins over packages/widget's own devDependency. When
-// Dependabot bumps only the widget spec (#269), the lockfile cannot move: the
-// bump lands as a no-op and every later bun update job dies on NoChangeError.
+// a bot bumps only the widget spec (Dependabot did, #269), the lockfile
+// cannot move: the bump lands as a no-op and later update jobs fail.
 // Keeping the two specs identical makes such a PR fail here instead, so the
 // override is bumped in the same PR.
 const esbuildOverride = JSON.parse(read("package.json")).overrides?.esbuild;
@@ -432,6 +435,45 @@ for (const pkgPath of Object.keys(manifest)) {
           `${file}:${line} adds a keydown listener that handles Tab with addEventListener — use addSurfaceKeydownListener (host-isolation.ts), or a host modal's capture-phase focus trap takes the Tab first`,
         );
       }
+    }
+  }
+}
+
+// --- 12. Bundled dev dependencies release -----------------------------------
+// Renovate titles dev-dependency bumps `build(deps-dev)`, a type
+// release-please never releases (#513). A devDependency that a tsup
+// `noExternal` inlines into a published bundle ships, though: its rules in
+// .github/renovate.json keep a releasing `chore(deps)` title and join the
+// production pull request. Both rules must list exactly those packages, or a
+// newly bundled one would ship on the next unrelated release, unreviewed.
+{
+  const bundledDevDependencies = new Set();
+  for (const pkgPath of Object.keys(manifest)) {
+    if (!existsSync(join(root, pkgPath, "tsup.config.ts"))) continue;
+    const devDependencies = JSON.parse(read(`${pkgPath}/package.json`)).devDependencies ?? {};
+    for (const list of read(`${pkgPath}/tsup.config.ts`).matchAll(/noExternal:\s*\[([^\]]*)\]/g)) {
+      for (const [, name] of list[1].matchAll(/["']([^"']+)["']/g)) {
+        if (!name.startsWith("@siteping/") && name in devDependencies) bundledDevDependencies.add(name);
+      }
+    }
+  }
+  const expected = [...bundledDevDependencies].sort().join(", ");
+  const bundledRules = JSON.parse(read(".github/renovate.json")).packageRules.filter(
+    (rule) =>
+      rule.matchDepTypes?.includes("devDependencies") &&
+      (rule.semanticCommitType === "chore" || rule.groupSlug === "production-dependencies"),
+  );
+  if (bundledRules.length !== 2 && expected) {
+    errors.push(
+      `.github/renovate.json needs the two bundled dev dependency rules (chore(deps) title, production group) for: ${expected}`,
+    );
+  }
+  for (const rule of bundledRules) {
+    const listed = [...(rule.matchPackageNames ?? [])].sort().join(", ");
+    if (listed !== expected) {
+      errors.push(
+        `.github/renovate.json rule "${rule.description.slice(0, 40)}…" lists [${listed}] but the bundled devDependencies are [${expected}]`,
+      );
     }
   }
 }

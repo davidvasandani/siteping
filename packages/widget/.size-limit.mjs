@@ -12,19 +12,19 @@ export default [
   {
     name: "ESM first load (index.js + static chunks)",
     path: firstLoad(dir, "dist/index.js"),
-    limit: "61.5 KB",
+    limit: "52 KB",
     gzip: true,
   },
   {
     name: "React entry first load (react.js + static imports)",
     path: firstLoad(dir, "dist/react.js"),
-    limit: "62 KB",
+    limit: "53 KB",
     gzip: true,
   },
   {
     name: "Panel, on first open (lazy)",
     path: lazyLoad(dir, "dist/index.js", /^panel-/),
-    limit: "11 KB",
+    limit: "22 KB",
     gzip: true,
   },
   {
@@ -36,7 +36,7 @@ export default [
   {
     name: "IIFE script bundle (index.global.js)",
     path: "dist/index.global.js",
-    limit: "144 KB",
+    limit: "146 KB",
     gzip: true,
   },
 ];

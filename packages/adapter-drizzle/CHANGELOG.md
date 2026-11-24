@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.2.4](https://github.com/NeosiaNexus/SitePing/compare/adapter-drizzle-v0.2.3...adapter-drizzle-v0.2.4) (2026-11-14)
+
+
+### Miscellaneous
+
+* **deps-dev:** bump the dev-dependencies group with 8 updates ([#551](https://github.com/NeosiaNexus/SitePing/issues/551)) ([d8908e4](https://github.com/NeosiaNexus/SitePing/commit/d8908e4e86b89db798991be3e3f1ef661d4c0250))
+
+## [0.2.3](https://github.com/NeosiaNexus/SitePing/compare/adapter-drizzle-v0.2.2...adapter-drizzle-v0.2.3) (2026-11-09)
+
+
+### Miscellaneous
+
+* **deps-dev:** bump the dev-dependencies group with 5 updates ([#537](https://github.com/NeosiaNexus/SitePing/issues/537)) ([1ee2d1a](https://github.com/NeosiaNexus/SitePing/commit/1ee2d1ac3ebb3c21c7193ca7d4457977acb5a7d3))
+
+## [0.2.2](https://github.com/NeosiaNexus/SitePing/compare/adapter-drizzle-v0.2.1...adapter-drizzle-v0.2.2) (2026-11-03)
+
+
+### Documentation
+
+* drop the em dashes from the READMEs ([37deb7e](https://github.com/NeosiaNexus/SitePing/commit/37deb7eb04df496e0958f2efa5b00a1a895d48c4))
+
 ## [0.2.1](https://github.com/NeosiaNexus/SitePing/compare/adapter-drizzle-v0.2.0...adapter-drizzle-v0.2.1) (2026-11-02)
 
 

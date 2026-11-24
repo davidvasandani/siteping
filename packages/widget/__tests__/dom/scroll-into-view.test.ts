@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { scrollableAncestors, scrollRectIntoView } from "../../src/dom/scroll-into-view";
+import { mockMediaQueries } from "../helpers.js";
 
 interface Box {
   top: number;
@@ -76,6 +77,7 @@ describe("scrollRectIntoView", () => {
   afterEach(() => {
     document.body.replaceChildren();
     document.documentElement.removeAttribute("style");
+    mockMediaQueries([]);
   });
 
   it("returns false and scrolls nothing when only the window scrolls", () => {
@@ -110,6 +112,19 @@ describe("scrollRectIntoView", () => {
     scrollRectIntoView(anchor, new DOMRect(0, 2500, 100, 100));
     expect(smoothScroll(main)).toEqual({ top: 850, left: 0, behavior: "smooth" });
     expect(windowScrollBy).toHaveBeenCalledWith({ top: 1300, left: -550, behavior: "smooth" });
+  });
+
+  it("jumps instead of animating under prefers-reduced-motion", () => {
+    mockMediaQueries(["(prefers-reduced-motion: reduce)"]);
+    const main = scroller({ top: 1500, height: 400, scrollHeight: 2000 });
+    const anchor = document.createElement("div");
+    main.appendChild(anchor);
+    document.body.appendChild(main);
+
+    scrollRectIntoView(anchor, new DOMRect(0, 2500, 100, 100));
+    expect(smoothScroll(main)).toBeUndefined();
+    expect(main.scrollTop).toBe(850);
+    expect(windowScrollBy).toHaveBeenCalledWith({ top: 1300, left: -550, behavior: "instant" });
   });
 
   it("never slides an app shell whose viewport is clipped", () => {

@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.12.5](https://github.com/NeosiaNexus/SitePing/compare/widget-v0.12.4...widget-v0.12.5) (2026-11-15)
+
+
+### Bug Fixes
+
+* **widget:** follow identity changes across useSiteping re-renders ([#568](https://github.com/NeosiaNexus/SitePing/issues/568)) ([ce57cf9](https://github.com/NeosiaNexus/SitePing/commit/ce57cf903b4c812716c622c2c1fc6d902cabf226))
+
+
+### Performance
+
+* **widget:** keep the panel's code off the first load ([#566](https://github.com/NeosiaNexus/SitePing/issues/566)) ([7024495](https://github.com/NeosiaNexus/SitePing/commit/7024495f59e88b429f8a839ae2e51aa3cfc5ecb0))
+
+## [0.12.4](https://github.com/NeosiaNexus/SitePing/compare/widget-v0.12.3...widget-v0.12.4) (2026-11-14)
+
+
+### Features
+
+* **widget:** open the panel's list on all pages with defaultPanelScope ([#556](https://github.com/NeosiaNexus/SitePing/issues/556)) ([464b457](https://github.com/NeosiaNexus/SitePing/commit/464b45722222361d7d7576dbb0d595900fef92d1))
+
+## [0.12.3](https://github.com/NeosiaNexus/SitePing/compare/widget-v0.12.2...widget-v0.12.3) (2026-11-09)
+
+
+### Bug Fixes
+
+* **widget:** capture the annotated spot on smooth-scrolling pages in Firefox ([#539](https://github.com/NeosiaNexus/SitePing/issues/539)) ([437116f](https://github.com/NeosiaNexus/SitePing/commit/437116f938e6128692a924dda527675ca5e74ea4))
+
+## [0.12.2](https://github.com/NeosiaNexus/SitePing/compare/widget-v0.12.1...widget-v0.12.2) (2026-11-03)
+
+
+### Features
+
+* **widget:** Natif redesign, and UI polish of the widget, the dashboard and the site ([#535](https://github.com/NeosiaNexus/SitePing/issues/535)) ([d80ac52](https://github.com/NeosiaNexus/SitePing/commit/d80ac52951315e1aa7e293ccd57bdefecc01348b))
+
+
+### Documentation
+
+* drop the em dashes from the READMEs ([37deb7e](https://github.com/NeosiaNexus/SitePing/commit/37deb7eb04df496e0958f2efa5b00a1a895d48c4))
+
 ## [0.12.1](https://github.com/NeosiaNexus/SitePing/compare/widget-v0.12.0...widget-v0.12.1) (2026-11-02)
 
 
