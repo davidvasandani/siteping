@@ -1,0 +1,116 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Weekly dependency updates. Carries over, rule by rule, what the Dependabot config had learned the hard way: see the description of each rule.",
+  "extends": [
+    "config:recommended",
+    ":semanticCommitTypeAll(chore)",
+    ":semanticCommitScope(deps)",
+    "customManagers:biomeVersions"
+  ],
+  "semanticCommits": "enabled",
+  "timezone": "Europe/Paris",
+  "schedule": ["before 7am on monday"],
+  "minimumReleaseAge": "7 days",
+  "rangeStrategy": "bump",
+  "labels": ["dependencies"],
+  "prConcurrentLimit": 10,
+  "packageRules": [
+    {
+      "description": "Dev dependencies ship nothing, so their bumps are titled build(deps-dev): release-please releases every type in changelog-sections but never build or ci (#513). The repo is squash-only, so the title is the commit release-please and the auto-labeller read.",
+      "matchDepTypes": ["devDependencies"],
+      "semanticCommitType": "build",
+      "semanticCommitScope": "deps-dev"
+    },
+    {
+      "description": "Production dependencies: minors and patches arrive as one pull request, reviewed by a human (a chore commit releases the packages).",
+      "matchManagers": ["bun"],
+      "matchDepTypes": ["dependencies", "peerDependencies", "optionalDependencies", "overrides"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "production dependencies",
+      "groupSlug": "production-dependencies"
+    },
+    {
+      "description": "Dev dependencies: minors and patches arrive as one pull request, merged on its own once the required checks pass.",
+      "matchManagers": ["bun"],
+      "matchDepTypes": ["devDependencies"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "dev dependencies",
+      "groupSlug": "dev-dependencies",
+      "automerge": true
+    },
+    {
+      "description": "Except the dev dependencies a tsup noExternal inlines into a published bundle (the CLI's): they ship, so their bumps keep a releasing chore(deps) title and a human review. check:consistency keeps this list equal to the bundled devDependencies.",
+      "matchDepTypes": ["devDependencies"],
+      "matchPackageNames": ["@clack/prompts", "@mrleebo/prisma-ast", "commander"],
+      "semanticCommitType": "chore",
+      "semanticCommitScope": "deps",
+      "automerge": false
+    },
+    {
+      "description": "Their minors and patches join the production pull request.",
+      "matchDepTypes": ["devDependencies"],
+      "matchPackageNames": ["@clack/prompts", "@mrleebo/prisma-ast", "commander"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "production dependencies",
+      "groupSlug": "production-dependencies"
+    },
+    {
+      "description": "The root overrides.esbuild must equal packages/widget's esbuild devDependency (check:consistency, #269): one pull request moves both, or each half fails CI alone. Both are build tooling, so it stays in the auto-merged build(deps-dev) group.",
+      "matchPackageNames": ["esbuild"],
+      "matchDepTypes": ["devDependencies", "overrides"],
+      "semanticCommitType": "build",
+      "semanticCommitScope": "deps-dev",
+      "groupName": "dev dependencies",
+      "groupSlug": "dev-dependencies",
+      "automerge": true
+    },
+    {
+      "description": "biome.json's $schema names the Biome version (customManagers:biomeVersions): it moves with the @biomejs/biome devDependency, in the same pull request.",
+      "matchManagers": ["custom.jsonata"],
+      "matchDepNames": ["@biomejs/biome"],
+      "semanticCommitType": "build",
+      "semanticCommitScope": "deps-dev",
+      "groupName": "dev dependencies",
+      "groupSlug": "dev-dependencies",
+      "automerge": true
+    },
+    {
+      "description": "The coverage provider must ship the same major as vitest itself: separate major bumps each fail CI alone (#223/#225, #285/#288). No update-type filter, majors included, so the family always moves as one pull request.",
+      "matchPackageNames": ["vitest", "@vitest/**"],
+      "groupName": "vitest",
+      "groupSlug": "vitest",
+      "automerge": false
+    },
+    {
+      "description": "Every @size-limit/* plugin pins size-limit exactly: split pull requests (#265/#266) each go green alone but leave a nested duplicate CLI in the lockfile.",
+      "matchPackageNames": ["size-limit", "@size-limit/**"],
+      "groupName": "size-limit",
+      "groupSlug": "size-limit",
+      "automerge": false
+    },
+    {
+      "description": "CodeQL init and analyze run in the same job and refuse to mix versions; upload-sarif (scorecard.yml) and majors move with them as one pull request.",
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["github/codeql-action", "github/codeql-action/**"],
+      "groupName": "codeql-action",
+      "groupSlug": "codeql-action"
+    },
+    {
+      "description": "The demo image pins its bases by digest, and only the digests move here. The tags are deliberate: node:22-alpine is the oldest Node major the packages support, and the bun tag must stay in lockstep with packageManager and the setup-bun pin. Moving a tag is a manual, coordinated change.",
+      "matchManagers": ["dockerfile"],
+      "matchUpdateTypes": ["major", "minor", "patch"],
+      "enabled": false
+    },
+    {
+      "description": "Same agreement outside the Dockerfile: the Bun and Node versions (packageManager, setup-bun, setup-node) never move on their own.",
+      "matchDepNames": ["bun", "node"],
+      "matchManagers": ["bun", "npm", "github-actions"],
+      "enabled": false
+    },
+    {
+      "description": "TypeScript 7.0 (the Go compiler) is skipped: tsup's declaration build and attw do not run on it yet. 7.1 and later are proposed as usual.",
+      "matchPackageNames": ["typescript"],
+      "allowedVersions": "!/^7\\.0\\./"
+    }
+  ]
+}

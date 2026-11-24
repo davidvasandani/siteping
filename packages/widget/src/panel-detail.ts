@@ -5,8 +5,8 @@
  * a feedback card, showing full details: message, metadata, annotation
  * info, status actions, and a "Go to annotation" button.
  *
- * Glassmorphism design — frosted glass surfaces, staggered section
- * animations, accent gradients, premium micro-interactions.
+ * A navigation push: the list slides away and the detail lays out inset
+ * grouped sections (rows on the sheet's material, captions above them).
  */
 
 import {
@@ -22,7 +22,7 @@ import { getStatusLabel, getTypeLabel, type TFunction, tWithParams } from "./i18
 import { ICON_USER } from "./icons.js";
 import { type PanelActionItem, safeHref, snapshotFeedback } from "./panel-actions.js";
 import type { TriagePermission } from "./panel-bulk.js";
-import { getTypeBgColor, getTypeColor, type ThemeColors } from "./styles/theme.js";
+import { getTypeColor, type ThemeColors } from "./styles/theme.js";
 
 // ---------------------------------------------------------------------------
 // SVG Icons
@@ -49,862 +49,6 @@ const ICON_CODE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 const ICON_CROSSHAIR = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="22" y1="12" x2="18" y2="12"/><line x1="6" y1="12" x2="2" y2="12"/><line x1="12" y1="6" x2="12" y2="2"/><line x1="12" y1="22" x2="12" y2="18"/></svg>`;
 
 const ICON_CHEVRON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>`;
-const ICON_TERMINAL = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`;
-
-// ---------------------------------------------------------------------------
-// CSS
-// ---------------------------------------------------------------------------
-
-export const DETAIL_CSS = /* css */ `
-  /* ============================
-     Detail View — Panel-in-Panel
-     ============================ */
-
-  .sp-detail {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    flex-direction: column;
-    background: var(--sp-glass-bg);
-    backdrop-filter: blur(var(--sp-blur-heavy));
-    -webkit-backdrop-filter: blur(var(--sp-blur-heavy));
-    z-index: 20;
-    transform: translateX(100%);
-    transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1);
-    will-change: transform;
-    overflow: hidden;
-  }
-
-  .sp-detail--visible {
-    transform: translateX(0);
-  }
-
-  /* Fallback for browsers that cannot deliver a readable "frosted glass":
-     drop the translucent background to a solid one so the underlying list
-     does not bleed through. Two disjoint cohorts:
-
-       1. No backdrop-filter at all (Firefox <=102, legacy Edge / IE,
-          older Chromium on Linux).
-       2. Safari / iOS Safari where backdrop-filter is detectable only
-          via the -webkit- prefix. Empirically this still includes recent
-          Safari (observed on macOS Safari 18.6 in 2026, where
-          CSS.supports('backdrop-filter', 'blur(...)') returns false even
-          though the unprefixed property has shipped). On these builds the
-          long-standing nested-backdrop + transform compositing bug
-          silently no-ops the blur on .sp-detail (which is transformed and
-          lives inside another backdrop-filter ancestor, .sp-panel), so
-          the translucent default is unreadable. Detection is a pure
-          feature query: prefixed supported AND unprefixed not. No
-          user-agent sniffing.
-
-     Browsers where the glass effect renders correctly (most Chromium,
-     modern Firefox, any engine that advertises both property names via
-     CSS.supports) are unaffected. */
-  @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-    .sp-detail {
-      background: var(--sp-bg);
-    }
-  }
-
-  @supports (-webkit-backdrop-filter: blur(1px)) and (not (backdrop-filter: blur(1px))) {
-    .sp-detail {
-      background: var(--sp-bg);
-    }
-  }
-
-  /* ---- Header ---- */
-
-  .sp-detail-header {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 16px 20px;
-    border-bottom: 1px solid var(--sp-border);
-    background: var(--sp-glass-bg-heavy);
-    backdrop-filter: blur(var(--sp-blur));
-    -webkit-backdrop-filter: blur(var(--sp-blur));
-    flex-shrink: 0;
-    min-height: 64px;
-  }
-
-  .sp-detail-back {
-    width: 40px;
-    height: 40px;
-    border-radius: var(--sp-radius);
-    border: none;
-    background: transparent;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--sp-text-tertiary);
-    transition: all 0.2s ease;
-    flex-shrink: 0;
-    padding: 0;
-  }
-
-  .sp-detail-back:hover {
-    background: var(--sp-bg-hover);
-    color: var(--sp-text);
-  }
-
-  .sp-detail-back:active {
-    transform: scale(0.92);
-    transition-duration: 0.1s;
-  }
-
-  .sp-detail-back svg {
-    width: 18px;
-    height: 18px;
-  }
-
-  .sp-detail-title {
-    font-size: 16px;
-    font-weight: 700;
-    color: var(--sp-text);
-    letter-spacing: -0.02em;
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .sp-detail-header .sp-badge {
-    flex-shrink: 0;
-  }
-
-  /* ---- Content ---- */
-
-  .sp-detail-content {
-    flex: 1;
-    overflow-y: auto;
-    overflow-x: hidden;
-    padding: 0;
-  }
-
-  .sp-detail-content::-webkit-scrollbar {
-    width: 6px;
-  }
-
-  .sp-detail-content::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
-  .sp-detail-content::-webkit-scrollbar-thumb {
-    background: var(--sp-border);
-    border-radius: var(--sp-radius-full);
-  }
-
-  .sp-detail-content::-webkit-scrollbar-thumb:hover {
-    background: var(--sp-text-tertiary);
-  }
-
-  /* ---- Section ---- */
-
-  .sp-detail-section {
-    padding: 20px 24px;
-    border-bottom: 1px solid var(--sp-border);
-    opacity: 0;
-    transform: translateY(8px);
-    animation: sp-detail-section-in 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-  }
-
-  @keyframes sp-detail-section-in {
-    to {
-      opacity: 1;
-      transform: translateY(0);
-    }
-  }
-
-  .sp-detail-section:last-child {
-    border-bottom: none;
-  }
-
-  .sp-detail-section-title {
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--sp-text-tertiary);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    margin-bottom: 14px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .sp-detail-section-title svg {
-    width: 14px;
-    height: 14px;
-    opacity: 0.6;
-  }
-
-  /* ---- Status + Actions Section ---- */
-
-  .sp-detail-status {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 16px;
-  }
-
-  .sp-detail-status-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 5px 14px;
-    border-radius: var(--sp-radius-full);
-    font-size: 12px;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-  }
-
-  .sp-detail-status-pill--open {
-    background: rgba(34, 197, 94, 0.1);
-    color: #22c55e;
-    border: 1px solid rgba(34, 197, 94, 0.2);
-  }
-
-  .sp-detail-status-pill--resolved {
-    background: rgba(156, 163, 175, 0.1);
-    color: #9ca3af;
-    border: 1px solid rgba(156, 163, 175, 0.2);
-  }
-
-  .sp-detail-status-pill--in-progress {
-    background: rgba(245, 158, 11, 0.1);
-    color: #f59e0b;
-    border: 1px solid rgba(245, 158, 11, 0.2);
-  }
-
-  .sp-detail-status-pill--wont-fix {
-    background: rgba(148, 163, 184, 0.1);
-    color: #94a3b8;
-    border: 1px solid rgba(148, 163, 184, 0.2);
-  }
-
-  .sp-detail-status-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-
-  .sp-detail-actions {
-    display: flex;
-    gap: 8px;
-  }
-
-  .sp-detail-actions button,
-  .sp-detail-actions a {
-    flex: 1;
-    height: 40px;
-    padding: 0 16px;
-    border-radius: var(--sp-radius);
-    font-family: var(--sp-font);
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    transition: all 0.2s ease;
-  }
-
-  .sp-detail-actions button svg,
-  .sp-detail-actions a svg {
-    width: 15px;
-    height: 15px;
-  }
-
-  .sp-detail-btn-resolve {
-    border: 1.5px solid #22c55e;
-    background: rgba(34, 197, 94, 0.06);
-    color: #22c55e;
-  }
-
-  .sp-detail-btn-resolve:hover {
-    background: rgba(34, 197, 94, 0.14);
-    box-shadow: 0 0 16px rgba(34, 197, 94, 0.12);
-    transform: translateY(-1px);
-  }
-
-  .sp-detail-btn-resolve:active {
-    transform: translateY(0) scale(0.98);
-    transition-duration: 0.1s;
-  }
-
-  .sp-detail-btn-reopen {
-    border: 1.5px solid var(--sp-accent);
-    background: var(--sp-accent-light);
-    color: var(--sp-accent-text);
-  }
-
-  .sp-detail-btn-reopen:hover {
-    background: rgba(var(--sp-accent), 0.14);
-    box-shadow: 0 0 16px var(--sp-accent-glow);
-    transform: translateY(-1px);
-  }
-
-  .sp-detail-btn-reopen:active {
-    transform: translateY(0) scale(0.98);
-    transition-duration: 0.1s;
-  }
-
-  .sp-detail-btn-delete {
-    border: 1.5px solid #ef4444;
-    background: rgba(239, 68, 68, 0.06);
-    color: #ef4444;
-  }
-
-  .sp-detail-btn-delete:hover {
-    background: rgba(239, 68, 68, 0.14);
-    box-shadow: 0 0 16px rgba(239, 68, 68, 0.12);
-    transform: translateY(-1px);
-  }
-
-  .sp-detail-btn-delete:active {
-    transform: translateY(0) scale(0.98);
-    transition-duration: 0.1s;
-  }
-
-  .sp-detail-btn-custom {
-    border: 1.5px solid var(--sp-border);
-    background: var(--sp-glass-bg-heavy);
-    color: var(--sp-text);
-    text-decoration: none;
-  }
-
-  .sp-detail-btn-custom:hover {
-    background: var(--sp-bg-hover);
-    border-color: var(--sp-accent);
-    color: var(--sp-accent-text);
-    box-shadow: 0 0 16px var(--sp-accent-glow);
-    transform: translateY(-1px);
-  }
-
-  .sp-detail-btn-custom:active {
-    transform: translateY(0) scale(0.98);
-    transition-duration: 0.1s;
-  }
-
-  .sp-detail-actions--custom {
-    flex-wrap: wrap;
-    margin-top: 8px;
-  }
-
-  /* Content-sized so the row wraps, shrinkable so one long label truncates. */
-  .sp-detail-actions--custom > .sp-detail-btn-custom {
-    flex: 1 1 auto;
-    min-width: 0;
-  }
-
-  .sp-detail-btn-custom svg {
-    flex-shrink: 0;
-  }
-
-  .sp-detail-btn-custom span {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .sp-detail-actions button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-    pointer-events: none;
-    transform: none;
-    box-shadow: none;
-  }
-
-  /* ---- Message Section ---- */
-
-  .sp-detail-message {
-    font-size: 14px;
-    line-height: 1.65;
-    color: var(--sp-text);
-    padding: 14px 16px;
-    border-left: 3px solid var(--sp-accent);
-    border-radius: 0 var(--sp-radius) var(--sp-radius) 0;
-    background: var(--sp-glass-bg-heavy);
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-
-  /* ---- Thread Section ---- */
-
-  .sp-thread-list {
-    list-style: none;
-  }
-
-  .sp-comment {
-    margin-top: 8px;
-    border-left-color: var(--sp-border);
-  }
-
-  .sp-comment[data-role="team"] {
-    border-left-color: var(--sp-accent);
-  }
-
-  .sp-comment-head,
-  .sp-thread-foot {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 12px;
-  }
-
-  .sp-comment-head {
-    margin-bottom: 4px;
-    font-weight: 600;
-  }
-
-  .sp-comment-head .sp-badge {
-    background: var(--sp-accent-light);
-  }
-
-  .sp-comment-head time,
-  .sp-thread-foot,
-  .sp-thread-input::placeholder {
-    font-weight: 400;
-    color: var(--sp-text-secondary);
-  }
-
-  .sp-comment-head time {
-    margin-left: auto;
-  }
-
-  .sp-thread-input {
-    height: auto;
-    margin-top: 10px;
-    padding: 10px 14px;
-  }
-
-  .sp-thread-foot {
-    justify-content: space-between;
-    margin-top: 8px;
-  }
-
-  /* A reply in flight: Send spins, and keeps the keyboard focus. */
-  .sp-thread-foot [aria-busy="true"]::before {
-    content: "";
-    display: inline-block;
-    width: 10px;
-    height: 10px;
-    margin-right: 8px;
-    border: 2px solid;
-    border-top-color: transparent;
-    border-radius: 50%;
-    animation: sp-spin 0.6s linear infinite;
-  }
-
-  .sp-thread-error {
-    margin-top: 8px;
-    padding: 8px 12px;
-    border-radius: var(--sp-radius);
-    background: var(--sp-type-bug-bg);
-    font-size: 12px;
-  }
-
-  .sp-thread-error:empty {
-    display: none;
-  }
-
-  /* ---- Screenshot Section ---- */
-
-  .sp-detail-screenshot {
-    display: block;
-    width: 100%;
-    height: auto;
-    max-height: 400px;
-    object-fit: contain;
-    border-radius: var(--sp-radius);
-    border: 1px solid var(--sp-glass-border);
-    background: var(--sp-glass-bg-heavy);
-  }
-
-  /* ---- Metadata Section ---- */
-
-  .sp-detail-meta {
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-  }
-
-  .sp-detail-meta-row {
-    display: flex;
-    align-items: flex-start;
-    gap: 12px;
-  }
-
-  .sp-detail-meta-row svg {
-    width: 14px;
-    height: 14px;
-    color: var(--sp-text-tertiary);
-    flex-shrink: 0;
-    margin-top: 1px;
-  }
-
-  .sp-detail-meta-content {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .sp-detail-meta-label {
-    font-size: 10px;
-    font-weight: 600;
-    color: var(--sp-text-tertiary);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    line-height: 1;
-    margin-bottom: 4px;
-  }
-
-  .sp-detail-meta-value {
-    font-size: 13px;
-    line-height: 1.4;
-    color: var(--sp-text);
-    word-break: break-all;
-  }
-
-  .sp-detail-meta-value--mono {
-    font-family: "SF Mono", "Cascadia Code", "Fira Code", "Consolas", monospace;
-    font-size: 12px;
-    background: var(--sp-glass-bg-heavy);
-    padding: 2px 6px;
-    border-radius: 4px;
-    border: 1px solid var(--sp-glass-border-subtle);
-  }
-
-  .sp-detail-meta-value--secondary {
-    color: var(--sp-text-secondary);
-    font-size: 12px;
-  }
-
-  /* ---- Annotation Section ---- */
-
-  .sp-detail-annotation {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  .sp-detail-annotation-info {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    padding: 14px;
-    border-radius: var(--sp-radius);
-    background: var(--sp-glass-bg-heavy);
-    border: 1px solid var(--sp-glass-border-subtle);
-  }
-
-  .sp-detail-annotation-row {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-  }
-
-  .sp-detail-annotation-row svg {
-    width: 13px;
-    height: 13px;
-    color: var(--sp-text-tertiary);
-    flex-shrink: 0;
-    margin-top: 2px;
-  }
-
-  .sp-detail-annotation-label {
-    font-size: 10px;
-    font-weight: 600;
-    color: var(--sp-text-tertiary);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    line-height: 1;
-    margin-bottom: 3px;
-  }
-
-  .sp-detail-annotation-value {
-    font-size: 12px;
-    line-height: 1.4;
-    color: var(--sp-text);
-    word-break: break-all;
-  }
-
-  .sp-detail-annotation-value--mono {
-    font-family: "SF Mono", "Cascadia Code", "Fira Code", "Consolas", monospace;
-    font-size: 11px;
-    background: var(--sp-bg-hover);
-    padding: 2px 6px;
-    border-radius: 4px;
-    display: inline-block;
-    max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .sp-detail-btn-goto {
-    width: 100%;
-    height: 44px;
-    padding: 0 20px;
-    border-radius: var(--sp-radius);
-    border: none;
-    background: var(--sp-accent-gradient);
-    color: #fff;
-    font-family: var(--sp-font);
-    font-size: 14px;
-    font-weight: 600;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    transition: all 0.25s ease;
-    box-shadow: 0 2px 12px var(--sp-accent-glow);
-  }
-
-  .sp-detail-btn-goto svg {
-    width: 16px;
-    height: 16px;
-  }
-
-  .sp-detail-btn-goto:hover {
-    box-shadow: 0 4px 20px var(--sp-accent-glow);
-    transform: translateY(-2px);
-  }
-
-  .sp-detail-btn-goto:active {
-    transform: translateY(0) scale(0.98);
-    transition-duration: 0.1s;
-  }
-
-  /* ---- Forced Colors / High Contrast ---- */
-
-  @media (forced-colors: active) {
-    .sp-detail {
-      border: 2px solid ButtonText !important;
-      background: Canvas !important;
-    }
-
-    .sp-detail-back,
-    .sp-detail-btn-goto,
-    .sp-detail-btn-resolve,
-    .sp-detail-btn-reopen,
-    .sp-detail-btn-delete,
-    .sp-detail-btn-custom {
-      border: 2px solid ButtonText !important;
-      background: Canvas !important;
-      color: ButtonText !important;
-    }
-
-    .sp-detail-back:focus-visible,
-    .sp-detail-btn-goto:focus-visible,
-    .sp-detail-btn-resolve:focus-visible,
-    .sp-detail-btn-reopen:focus-visible,
-    .sp-detail-btn-delete:focus-visible,
-    .sp-detail-btn-custom:focus-visible {
-      outline: 3px solid Highlight !important;
-    }
-
-    .sp-detail-status-pill {
-      border: 2px solid ButtonText !important;
-      background: Canvas !important;
-      color: ButtonText !important;
-    }
-
-    .sp-detail-message {
-      border-left: 3px solid ButtonText !important;
-    }
-  }
-
-  /* ---- Diagnostics Section ---- */
-
-  .sp-detail-diag {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  .sp-detail-diag-toggle {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    padding: 10px 12px;
-    border-radius: var(--sp-radius);
-    border: 1px solid var(--sp-glass-border-subtle);
-    background: var(--sp-glass-bg-heavy);
-    color: var(--sp-text);
-    font-family: var(--sp-font);
-    font-size: 12px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 0.15s ease;
-  }
-
-  .sp-detail-diag-toggle:hover {
-    background: var(--sp-bg-hover);
-  }
-
-  .sp-detail-diag-toggle svg {
-    width: 12px;
-    height: 12px;
-    transition: transform 0.2s ease;
-  }
-
-  .sp-detail-diag-toggle[aria-expanded="true"] svg {
-    transform: rotate(90deg);
-  }
-
-  .sp-detail-diag-counts {
-    display: inline-flex;
-    gap: 6px;
-    font-weight: 500;
-    color: var(--sp-text-tertiary);
-  }
-
-  .sp-detail-diag-count {
-    padding: 1px 7px;
-    border-radius: var(--sp-radius-full);
-    background: var(--sp-bg-hover);
-    font-variant-numeric: tabular-nums;
-  }
-
-  .sp-detail-diag-count--errors {
-    background: rgba(239, 68, 68, 0.14);
-    color: #ef4444;
-  }
-
-  .sp-detail-diag-body {
-    display: none;
-    flex-direction: column;
-    gap: 14px;
-  }
-
-  .sp-detail-diag-body--open {
-    display: flex;
-  }
-
-  .sp-detail-diag-group-title {
-    font-size: 10px;
-    font-weight: 700;
-    color: var(--sp-text-tertiary);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    margin-bottom: 6px;
-  }
-
-  .sp-detail-diag-list {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-    border-radius: var(--sp-radius);
-    border: 1px solid var(--sp-glass-border-subtle);
-    background: var(--sp-glass-bg-heavy);
-    max-height: 240px;
-    overflow-y: auto;
-  }
-
-  .sp-detail-diag-list li {
-    display: flex;
-    align-items: flex-start;
-    gap: 8px;
-    padding: 8px 10px;
-    border-bottom: 1px solid var(--sp-glass-border-subtle);
-    font-family: "SF Mono", "Cascadia Code", "Fira Code", "Consolas", monospace;
-    font-size: 11px;
-    line-height: 1.45;
-    color: var(--sp-text);
-  }
-
-  .sp-detail-diag-list li:last-child {
-    border-bottom: none;
-  }
-
-  .sp-detail-diag-level {
-    flex-shrink: 0;
-    font-weight: 700;
-    width: 44px;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    font-size: 10px;
-  }
-
-  .sp-detail-diag-level--log {
-    color: var(--sp-text-tertiary);
-  }
-  .sp-detail-diag-level--info {
-    color: #3b82f6;
-  }
-  .sp-detail-diag-level--warn {
-    color: #f59e0b;
-  }
-  .sp-detail-diag-level--error {
-    color: #ef4444;
-  }
-
-  .sp-detail-diag-message {
-    flex: 1;
-    min-width: 0;
-    word-break: break-word;
-    white-space: pre-wrap;
-  }
-
-  .sp-detail-diag-net {
-    display: grid;
-    grid-template-columns: auto 1fr auto;
-    gap: 8px;
-    align-items: center;
-  }
-
-  .sp-detail-diag-net-status {
-    flex-shrink: 0;
-    font-weight: 700;
-    color: #ef4444;
-    min-width: 32px;
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .sp-detail-diag-net-method {
-    flex-shrink: 0;
-    font-weight: 600;
-    color: var(--sp-text-tertiary);
-    min-width: 44px;
-  }
-
-  .sp-detail-diag-net-url {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--sp-text);
-  }
-
-  .sp-detail-diag-empty {
-    padding: 12px;
-    font-style: italic;
-    font-size: 11px;
-    color: var(--sp-text-tertiary);
-    text-align: center;
-  }
-
-  /* ---- Reduced Motion ---- */
-
-  @media (prefers-reduced-motion: reduce) {
-    .sp-detail {
-      transition-duration: 0.01ms !important;
-    }
-
-    .sp-detail-section {
-      animation-duration: 0.01ms !important;
-    }
-  }
-`;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1101,7 +245,7 @@ export class DetailView {
     header.appendChild(title);
 
     const badge = el("span", { class: "sp-badge" });
-    badge.style.background = getTypeBgColor(feedback.type, this.colors);
+    // The badge tints itself from its colour (see .sp-badge).
     badge.style.color = getTypeColor(feedback.type, this.colors);
     setText(badge, getTypeLabel(feedback.type, this.t));
     header.appendChild(badge);
@@ -1125,7 +269,6 @@ export class DetailView {
     messageSection.appendChild(messageSectionTitle);
 
     const messageBlock = el("div", { class: "sp-detail-message" });
-    messageBlock.style.borderLeftColor = getTypeColor(feedback.type, this.colors);
     setText(messageBlock, feedback.message);
     messageSection.appendChild(messageBlock);
     // The discussion thread reads on from the message it answers.
@@ -1165,10 +308,7 @@ export class DetailView {
     if (feedback.annotations.length > 0) {
       const annSection = this.buildSection(sectionIndex++);
       const annSectionTitle = el("div", { class: "sp-detail-section-title" });
-      annSectionTitle.appendChild(parseSvg(ICON_MAP_PIN));
-      const annTitleText = el("span");
-      setText(annTitleText, this.t("detail.annotation"));
-      annSectionTitle.appendChild(annTitleText);
+      setText(annSectionTitle, this.t("detail.annotation"));
       annSection.appendChild(annSectionTitle);
       this.buildAnnotation(annSection, feedback);
       this.content.appendChild(annSection);
@@ -1180,10 +320,7 @@ export class DetailView {
     if (hasDiagnostics(feedback.diagnostics)) {
       const diagSection = this.buildSection(sectionIndex++);
       const diagSectionTitle = el("div", { class: "sp-detail-section-title" });
-      diagSectionTitle.appendChild(parseSvg(ICON_TERMINAL));
-      const diagTitleText = el("span");
-      setText(diagTitleText, this.t("detail.diagnostics"));
-      diagSectionTitle.appendChild(diagTitleText);
+      setText(diagSectionTitle, this.t("detail.diagnostics"));
       diagSection.appendChild(diagSectionTitle);
       this.buildDiagnostics(diagSection, feedback);
       this.content.appendChild(diagSection);
@@ -1202,10 +339,13 @@ export class DetailView {
     // Force reflow before adding visible class to trigger CSS transition
     void this.element.offsetHeight;
     this.element.classList.add("sp-detail--visible");
+    // The panel slides its list away under the pushed view (see DETAIL_CSS).
+    this.element.parentElement?.classList.add("sp-panel--detail");
 
     // Focus the back button for keyboard users
     requestAnimationFrame(() => {
-      backBtn.focus();
+      // Still off-screen while it slides in: focusing must not scroll the panel.
+      backBtn.focus({ preventScroll: true });
     });
   }
 
@@ -1219,9 +359,13 @@ export class DetailView {
     const refocus = hasFocusWithin(this.element);
     const id = this.currentFeedback?.id;
     this.element.classList.remove("sp-detail--visible");
+    this.element.parentElement?.classList.remove("sp-panel--detail");
     this.element.setAttribute("aria-hidden", "true");
     setInert(this.element, true);
     if (refocus) {
+      // The list was visibility:hidden behind the detail: flush the style
+      // first, or WebKit still sees the card hidden and refuses the focus.
+      void this.element.parentElement?.offsetWidth;
       const card =
         this.opener?.isConnected === true
           ? this.opener
@@ -1280,10 +424,10 @@ export class DetailView {
     // resolved, wont-fix), each with its own dot colour.
     const statusModifier = feedback.status.replace(/_/g, "-");
     const dotColors: Record<FeedbackStatus, string> = {
-      open: "#22c55e",
-      in_progress: "#f59e0b",
-      resolved: "#9ca3af",
-      wont_fix: "#94a3b8",
+      open: this.colors.statusOpen,
+      in_progress: this.colors.statusInProgress,
+      resolved: this.colors.statusResolved,
+      wont_fix: this.colors.statusWontFix,
     };
     const statusRow = el("div", { class: "sp-detail-status" });
     const pill = el("span", {
@@ -1530,8 +674,9 @@ export class DetailView {
     const toggle = document.createElement("button");
     toggle.type = "button";
     toggle.className = "sp-detail-diag-toggle";
+    // Named by its visible text ("Diagnostics", then the counts), which speech
+    // users read off the row (WCAG 2.5.3); aria-expanded carries the state.
     toggle.setAttribute("aria-expanded", "false");
-    toggle.setAttribute("aria-label", this.t("detail.diagnostics.expand"));
     const toggleLabel = document.createElement("span");
     const leftRow = document.createElement("span");
     leftRow.style.display = "inline-flex";
@@ -1614,13 +759,8 @@ export class DetailView {
 
     toggle.addEventListener("click", () => {
       const expanded = toggle.getAttribute("aria-expanded") === "true";
-      const next = !expanded;
-      toggle.setAttribute("aria-expanded", String(next));
-      toggle.setAttribute(
-        "aria-label",
-        next ? this.t("detail.diagnostics.collapse") : this.t("detail.diagnostics.expand"),
-      );
-      body.classList.toggle("sp-detail-diag-body--open", next);
+      toggle.setAttribute("aria-expanded", String(!expanded));
+      body.classList.toggle("sp-detail-diag-body--open", !expanded);
     });
 
     wrapper.appendChild(toggle);

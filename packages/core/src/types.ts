@@ -237,14 +237,24 @@ export interface SitepingBaseConfig {
    */
   getPageScope?: (() => PageScope) | undefined;
   /**
-   * When true (default), the widget filters initial markers and panel results
-   * by `feedback.url === scope.url`, so annotations created on one page never
-   * leak to other pages — even if their CSS selector accidentally matches.
-   * Set to `false` for a project-wide view: the panel lists every feedback of
-   * the project, and a marker shows wherever its anchor resolves — for
-   * feedback on what every page shares, such as a header or a footer.
+   * When true (default), the widget only shows the markers of feedback
+   * created on the current page (`feedback.url === scope.url`), so
+   * annotations never leak to other pages, even if their CSS selector
+   * happens to match there. Set to `false` for project-wide markers: a marker
+   * shows wherever its anchor resolves, for feedback on what every page
+   * shares, such as a header or a footer. The panel's list has a scope filter
+   * of its own: see `defaultPanelScope`.
    */
   scopeAnnotationsByUrl?: boolean | undefined;
+  /**
+   * The scope the panel's list opens on: `"page"` (default) lists the
+   * current page's feedback, `"all"` every feedback of the project, for
+   * reviewers who triage across the whole site. The reviewer can still
+   * switch, and their choice holds until the widget is destroyed. The
+   * markers on the page follow `scopeAnnotationsByUrl`, whatever the list
+   * shows.
+   */
+  defaultPanelScope?: "page" | "all" | undefined;
   /**
    * Capture a JPEG screenshot of the annotated area on submit. Defaults to
    * `false` — opt-in because:
@@ -376,12 +386,11 @@ export interface SitepingBaseConfig {
    * When unset (default), the widget falls back to localStorage and shows
    * the modal on first feedback as before — existing behavior unchanged.
    *
-   * Note: `config.identity` is **not** persisted to localStorage. It is
-   * read at widget init time, not on every render. Hosts that need live
-   * identity updates after sign-in/sign-out should currently remount the
-   * widget (e.g. via a React `key` on the wrapping component). See
-   * https://github.com/NeosiaNexus/SitePing/issues/85 for tracking a
-   * future enhancement that propagates identity updates without a remount.
+   * Note: `config.identity` is **not** persisted to localStorage. The
+   * widget reads it from this config at each write. `useSiteping` passes
+   * the latest render's value, so a sign-in or a sign-out applies to the
+   * next feedback or reply without a remount. With `initSiteping`, call
+   * `destroy()` and init again after an account change.
    */
   identity?: SitepingIdentity | undefined;
   /**

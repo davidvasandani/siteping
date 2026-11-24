@@ -1,6 +1,7 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
 import type { ReactNode } from "react";
+import { Analytics } from "@/components/analytics";
 import { provider } from "@/lib/docs/ui";
 import { DocsProvider } from "./docs-provider";
 import "./docs.css";
@@ -14,6 +15,15 @@ export const metadata: Metadata = {
     template: "%s — SitePing Docs",
   },
   description: "Every option, default, and behavior of the SitePing feedback widget — verified against the source.",
+};
+
+// The docs follow the OS scheme (Fumadocs' neutral theme): the status bar on a
+// phone matches the page background in both.
+export const viewport: Viewport = {
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#f5f5f5" },
+    { media: "(prefers-color-scheme: dark)", color: "#121212" },
+  ],
 };
 
 // Root layout of the docs route group: unlike the landing (fixed dark), the
@@ -31,6 +41,7 @@ export default async function DocsRootLayout({
     <html lang={lang} className={inter.variable} suppressHydrationWarning>
       <body>
         <DocsProvider i18n={provider(lang)}>{children}</DocsProvider>
+        <Analytics />
       </body>
     </html>
   );

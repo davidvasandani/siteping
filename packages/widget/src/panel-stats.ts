@@ -3,95 +3,6 @@ import { el, setText } from "./dom-utils.js";
 import { type TFunction, tWithParams } from "./i18n/index.js";
 
 // ---------------------------------------------------------------------------
-// CSS
-// ---------------------------------------------------------------------------
-
-export const STATS_CSS = /* css */ `
-  .sp-stats-bar {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 12px 24px;
-    border-bottom: 1px solid var(--sp-border);
-    user-select: none;
-  }
-
-  .sp-stats-bar[hidden] {
-    display: none;
-  }
-
-  .sp-stats-row {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-  }
-
-  .sp-stats-item {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .sp-stats-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-
-  .sp-stats-value {
-    font-size: 16px;
-    font-weight: 600;
-    line-height: 1;
-    color: var(--sp-text);
-    font-variant-numeric: tabular-nums;
-    font-feature-settings: "tnum";
-    transition: opacity 0.3s ease;
-  }
-
-  .sp-stats-label {
-    font-size: 11px;
-    line-height: 1;
-    color: var(--sp-text-tertiary);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-
-  .sp-stats-progress {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .sp-stats-progress-track {
-    flex: 1;
-    height: 4px;
-    border-radius: 2px;
-    background: var(--sp-border);
-    overflow: hidden;
-  }
-
-  .sp-stats-progress-fill {
-    height: 100%;
-    border-radius: 2px;
-    background: linear-gradient(90deg, var(--sp-accent), #22c55e);
-    width: 0%;
-    transition: width 0.5s ease;
-  }
-
-  .sp-stats-progress-label {
-    font-size: 10px;
-    line-height: 1;
-    color: var(--sp-text-tertiary);
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
-    font-feature-settings: "tnum";
-    min-width: 64px;
-    text-align: right;
-  }
-`;
-
-// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
@@ -202,10 +113,7 @@ export class PanelStats {
     const visible = feedbacks.length;
     const pct = visible > 0 ? Math.round((closedCount / visible) * 100) : 0;
 
-    // Animate fill width via rAF so the transition kicks in after the DOM update
-    requestAnimationFrame(() => {
-      this.progressFill.style.width = `${pct}%`;
-    });
+    this.progressFill.style.clipPath = `inset(0 ${100 - pct}% 0 0 round 2px)`;
 
     const progressText = tWithParams(this.t, "stats.progress", { percent: pct });
     setText(this.progressLabel, progressText);

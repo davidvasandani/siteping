@@ -406,11 +406,15 @@ describe("launcher — annotation:complete integration", () => {
       expect(toast().textContent).toBe("Failed to send feedback");
       expect(toast().classList.contains("sp-toast--error")).toBe(true);
       toast().click();
+      // It fades out (150ms) before it leaves the page.
+      expect(toast().classList.contains("sp-toast--leaving")).toBe(true);
+      vi.advanceTimersByTime(150);
       expect(toast().hidden).toBe(true);
+      expect(toast().classList.contains("sp-toast--leaving")).toBe(false);
 
       await submit();
       expect(toast().hidden).toBe(false);
-      vi.advanceTimersByTime(8000);
+      vi.advanceTimersByTime(8000 + 150);
       expect(toast().hidden).toBe(true);
     });
   });
@@ -539,6 +543,26 @@ describe("launcher — annotation:complete integration", () => {
       const shadow = widget?.shadowRoot;
       const modal = shadow?.querySelector('[role="dialog"]:not(.sp-detail):not(.sp-shortcuts-overlay)') ?? null;
       expect(modal).toBeNull();
+
+      instance.destroy();
+    });
+
+    it("reads config.identity at each write, which useSiteping relies on to follow re-renders (#85)", async () => {
+      mockGetIdentity.mockReturnValue(null);
+      mockSendFeedback.mockResolvedValue(makeFeedbackResponse());
+      const config = defaultConfig({ identity: { name: "Alice", email: "alice@example.com" } });
+
+      const instance = launch(config);
+      // What the hook's getter returns after a re-render with another account.
+      config.identity = { name: "Bob", email: "bob@example.com" };
+      capturedBus!.emit("annotation:complete", makeAnnotationCompleteData());
+
+      await vi.waitFor(() => {
+        expect(mockSendFeedback).toHaveBeenCalledOnce();
+      });
+      const payload = mockSendFeedback.mock.calls[0]![0];
+      expect(payload.authorName).toBe("Bob");
+      expect(payload.authorEmail).toBe("bob@example.com");
 
       instance.destroy();
     });
@@ -2173,6 +2197,31 @@ describe("launcher — annotation:complete integration", () => {
       expect(card.querySelector(".sp-btn-resolve")).not.toBeNull();
       expect(card.querySelector(".sp-btn-delete")).not.toBeNull();
       instance.destroy();
+    });
+  });
+
+  describe("defaultPanelScope", () => {
+    let instance: ReturnType<typeof launch> | undefined;
+    afterEach(() => instance?.destroy());
+
+    /** Launches the widget, opens the panel, and returns its list's first query (the launcher's marker queries carry no `page`). */
+    async function openListQuery(config: SitepingConfig): Promise<Record<string, unknown>> {
+      instance = launch(config);
+      instance.open();
+      let query: Record<string, unknown> | undefined;
+      await vi.waitFor(() => {
+        query = mockGetFeedbacks.mock.calls.map((call) => call[1]).find((options) => options?.page === 1);
+        expect(query).toBeDefined();
+      });
+      return query!;
+    }
+
+    it("reaches the panel: its list opens on every page's feedback", async () => {
+      expect(await openListQuery(defaultConfig({ defaultPanelScope: "all" }))).not.toHaveProperty("url");
+    });
+
+    it("defaults to the current page", async () => {
+      expect(await openListQuery(defaultConfig())).toHaveProperty("url", window.location.pathname);
     });
   });
 });

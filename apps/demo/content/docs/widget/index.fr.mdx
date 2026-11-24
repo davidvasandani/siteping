@@ -18,7 +18,7 @@ const siteping = initSiteping({
 });
 ```
 
-`initSiteping` est l'export runtime principal du package, aux côtés des deux helpers i18n (`registerLocale`, `loadLocale`) et des types TypeScript. Son premier chargement pèse environ **59 kB gzip** — l'entrée ESM et le chunk qu'elle importe, tout ce que le navigateur télécharge avant que le widget s'exécute. Les parties lourdes se chargent à la demande : le panneau (une dizaine de kB de plus) à sa première ouverture, le dictionnaire d'une locale non anglaise, le moteur de capture à la première capture. Il s'affiche dans un Shadow DOM fermé — les styles de votre page et ceux du widget ne peuvent jamais se marcher dessus.
+`initSiteping` est l'export runtime principal du package, aux côtés des deux helpers i18n (`registerLocale`, `loadLocale`) et des types TypeScript. Son premier chargement pèse environ **51 kB gzip** — l'entrée ESM et le chunk qu'elle importe, tout ce que le navigateur télécharge avant que le widget s'exécute. Les parties lourdes se chargent à la demande : le panneau (une vingtaine de kB de plus) à sa première ouverture, le dictionnaire d'une locale non anglaise, le moteur de capture à la première capture. Il s'affiche dans un Shadow DOM fermé — les styles de votre page et ceux du widget ne peuvent jamais se marcher dessus.
 
 ## Quand le widget s'affiche — et quand il ne s'affiche pas
 
@@ -95,7 +95,7 @@ export function Feedback() {
 }
 ```
 
-Le hook renvoie `null` jusqu'à son montage, puis l'instance. Changer `endpoint` ou une autre option structurelle demande un remontage ; changer un callback, non — **tous** les callbacks acceptés par la config (`onFeedbackSent`, `onCommentAdded`, `onError`, `onOpen`, `onClose`, `onAnnotationStart`, `onAnnotationEnd`, `onSkip`) sont lus au moment de l'appel, donc un handler qui capture un état frais se déclenche avec cet état — tout comme les callbacks des [actions du panneau](/fr/docs/widget/panel-actions#react). Ils se taisent également après le démontage : une réponse tardive ne peut pas rappeler dans un arbre déjà démonté.
+Le hook renvoie `null` jusqu'à son montage, puis l'instance. Changer `endpoint` ou une autre option structurelle demande un remontage ; changer un callback, non — **tous** les callbacks acceptés par la config (`onFeedbackSent`, `onCommentAdded`, `onError`, `onOpen`, `onClose`, `onAnnotationStart`, `onAnnotationEnd`, `onSkip`) sont lus au moment de l'appel, donc un handler qui capture un état frais se déclenche avec cet état — tout comme les callbacks des [actions du panneau](/fr/docs/widget/panel-actions#react). Ils se taisent également après le démontage : une réponse tardive ne peut pas rappeler dans un arbre déjà démonté. `identity` suit aussi les rendus : le retour ou la réponse suivante part sous la dernière valeur.
 
 Plusieurs composants peuvent appeler le hook, un layout et une page par exemple. Ils partagent un seul widget, qui reste monté jusqu'au démontage du dernier d'entre eux. Le widget garde les options du composant qui l'a créé (en React, le plus profond, puisque les effets des enfants s'exécutent d'abord), et les callbacks de ces options se taisent une fois ce composant démonté. Le plus simple est d'appeler le hook une seule fois, depuis un composant qui reste monté comme le layout racine. Un composant qui a besoin de ses propres événements peut s'abonner via le `on()` de l'instance que renvoie son hook : chaque handle garde ses propres écouteurs, retirés au démontage de ce composant.
 
@@ -141,7 +141,7 @@ Les filtres du panneau se combinent et ne restreignent que la liste — les marq
 - **Recherche** : cherche dans le texte du message.
 - **Type** : garde un seul type de feedback.
 - **Statut** : *Ouvert* couvre `open` et `in_progress`, *Résolu* couvre `resolved` et `wont_fix`.
-- **Portée** : *Cette page* (par défaut), *Ce type* — toutes les pages qui partagent le modèle de route courant, proposé quand [`getPageScope`](/fr/docs/widget/configuration#cadrage-par-page) renvoie un `urlPattern` — ou *Toutes les pages*.
+- **Portée** : *Cette page* (par défaut, voir [`defaultPanelScope`](/fr/docs/widget/configuration#cadrage-par-page)), *Ce type* — toutes les pages qui partagent le modèle de route courant, proposé quand [`getPageScope`](/fr/docs/widget/configuration#cadrage-par-page) renvoie un `urlPattern` — ou *Toutes les pages*.
 - **Mes feedbacks** : garde les feedbacks envoyés depuis ce navigateur.
 
 « Mes feedbacks » ne demande ni identité ni support côté serveur, en mode HTTP comme en mode `store`. Le widget retient l'identifiant de chaque feedback qu'il envoie — les 500 plus récents par projet et par endpoint, dans le `localStorage`, y compris ceux que la file d'attente hors ligne envoie plus tard — et filtre de son côté : il parcourt les pages de la liste jusqu'à les avoir tous trouvés, puis les affiche d'un coup. Le serveur ne peut pas le faire à sa place : son `GET` public [masque les emails des auteurs](/fr/docs/server#ce-que-les-réponses-exposent), et un filtre par email permettrait à n'importe qui de vérifier si une adresse a envoyé des feedbacks. « Mes feedbacks » veut donc dire *ce navigateur* : les feedbacks envoyés depuis un autre navigateur ou appareil, ou avant l'effacement des données du site, n'y figurent pas.

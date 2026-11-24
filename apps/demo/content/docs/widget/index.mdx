@@ -18,7 +18,7 @@ const siteping = initSiteping({
 });
 ```
 
-`initSiteping` is the package's main runtime export, alongside the two i18n helpers (`registerLocale`, `loadLocale`) and the TypeScript types. Its first load weighs about **59 kB gzipped** — the ESM entry plus the chunk it imports, everything a browser downloads before the widget runs. The heavier parts load on demand: the panel (about 10 kB more) when it first opens, a non-English dictionary for its locale, the screenshot engine for the first capture. It renders inside a closed Shadow DOM so your page styles and the widget's never collide.
+`initSiteping` is the package's main runtime export, alongside the two i18n helpers (`registerLocale`, `loadLocale`) and the TypeScript types. Its first load weighs about **51 kB gzipped** — the ESM entry plus the chunk it imports, everything a browser downloads before the widget runs. The heavier parts load on demand: the panel (about 21 kB more) when it first opens, a non-English dictionary for its locale, the screenshot engine for the first capture. It renders inside a closed Shadow DOM so your page styles and the widget's never collide.
 
 ## When the widget shows — and when it doesn't
 
@@ -95,7 +95,7 @@ export function Feedback() {
 }
 ```
 
-The hook returns `null` until it mounts, then the instance. Changing `endpoint` or another structural option requires a remount; changing a callback does not — **every** callback the config accepts (`onFeedbackSent`, `onCommentAdded`, `onError`, `onOpen`, `onClose`, `onAnnotationStart`, `onAnnotationEnd`, `onSkip`) is read at call time, so a handler that closes over fresh state fires with that state — and so are the [panel actions](/docs/widget/panel-actions#react) callbacks. They also go quiet after unmount, so a late response can't call into a torn-down tree.
+The hook returns `null` until it mounts, then the instance. Changing `endpoint` or another structural option requires a remount; changing a callback does not — **every** callback the config accepts (`onFeedbackSent`, `onCommentAdded`, `onError`, `onOpen`, `onClose`, `onAnnotationStart`, `onAnnotationEnd`, `onSkip`) is read at call time, so a handler that closes over fresh state fires with that state — and so are the [panel actions](/docs/widget/panel-actions#react) callbacks. They also go quiet after unmount, so a late response can't call into a torn-down tree. `identity` follows re-renders too: the next feedback or reply goes out under the latest one.
 
 Several components can call the hook, a layout and a page for instance. They share one widget, which stays mounted until the last of them unmounts. The widget keeps the options of the component that created it (in React, the deepest one, since child effects run first), and the callbacks in those options go quiet once that component unmounts. The simplest setup calls the hook once, from a component that stays mounted such as the root layout. A component that needs events of its own can subscribe through the `on()` of the instance its hook returns: each handle keeps its own listeners, dropped when that component unmounts.
 
@@ -141,7 +141,7 @@ The panel's filters combine, and narrow the list only — the markers on the pag
 - **Search** matches the message text.
 - **Type** keeps one feedback type.
 - **Status**: *Open* covers `open` and `in_progress`, *Resolved* covers `resolved` and `wont_fix`.
-- **Scope**: *This page* (the default), *This type* — every page sharing the current route template, offered when [`getPageScope`](/docs/widget/configuration#page-scoping) returns a `urlPattern` — or *All pages*.
+- **Scope**: *This page* (the default, see [`defaultPanelScope`](/docs/widget/configuration#page-scoping)), *This type* — every page sharing the current route template, offered when [`getPageScope`](/docs/widget/configuration#page-scoping) returns a `urlPattern` — or *All pages*.
 - **Mine** keeps the feedback sent from this browser.
 
 "Mine" needs no identity and no server support, in HTTP and `store` mode alike. The widget remembers the id of each feedback it sends — the 500 most recent per project and endpoint, in `localStorage`, those the offline queue sends later included — and filters on its side: it walks the list's pages until it has found them all, then shows them at once. The server can't do it for the widget: its public `GET` [blanks author emails](/docs/server#what-responses-expose), and a filter by email would let anyone check whether an address sent feedback. So "Mine" means *this browser*: feedback sent from another browser or device, or before the site's data was cleared, isn't listed.
